@@ -1,0 +1,12 @@
+[project]
+name = "vieb"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "scikit-learn"
+]
+
+[project.optional-dependencies]
+tracking = [
+    "deeplabcut"
+]
