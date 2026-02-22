@@ -1,0 +1,43 @@
+# macOS metadata
+.DS_Store
+
+# Virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Claude Code local session data
+.claude/
+
+# Raw video files and DLC inference outputs (too large for GitHub)
+*.mp4
+raw_videos/*.h5
+raw_videos/*.csv
+raw_videos/*.pickle
+
+# DLC model weights (too large, ~549MB)
+VIEB-Carlos-2026-02-11/dlc-models-pytorch/
+
+# DLC training datasets (large)
+VIEB-Carlos-2026-02-11/training-datasets/
+
+# Labeled training frame images (~1GB of PNGs)
+VIEB-Carlos-2026-02-11/labeled-data/**/*.png
+
+# DLC evaluation outputs (large PNGs with very long filenames)
+VIEB-Carlos-2026-02-11/evaluation-results-pytorch/
+
+# PyTorch saved models
+*.pt
+
+# Misc
+push_log.txt

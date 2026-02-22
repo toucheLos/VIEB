@@ -1,0 +1,505 @@
+Task: VIEB
+scorer: Carlos
+date: Feb11
+multianimalproject: false
+identity: null
+project_path: C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\VIEB-Carlos-2026-02-11
+video_sets:
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_1_CFC_Day_0_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241113_Box_2_CFC_Day_0_(Context_A)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_1_CFC_Day_1_(Context_A,_No_Shock)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241114_Box_2_CFC_Day_1_(Context_A,_No_Shock)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_1_CFC_Day_2_(Context_C)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241115_Box_2_CFC_Day_2_(Context_C)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_1_CFD_Day_3_(Context_B)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_2_CFD_Day_3_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_2_CFD_Day_3_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_2_CFD_Day_3_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_2_CFD_Day_3_(Context_B)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241118_Box_2_CFD_Day_3_(Context_B)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_1_CFD_Day_4_(Context_B)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_A)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241119_Box_2_CFD_Day_4_(Context_B)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_1_CFD_Day_5_(Context_B)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_A)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241120_Box_2_CFD_Day_5_(Context_B)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_1_CFD_Day_6_(Context_B)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_A)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241121_Box_2_CFD_Day_6_(Context_B)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_A)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9003.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9005.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9007.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9009.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9011.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9013.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_1_CFD_Day_7_(Context_B)_9015.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9002.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_A)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9001.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9004.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9006.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9008.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9010.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9012.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9014.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20241122_Box_2_CFD_Day_7_(Context_B)_9016.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250205_Box_3_CFC_Day_0_(Context_A)_543.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250206_Box_1_CFC_Day_1_(Context_A,_No_Shock)_526.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250206_Box_3_CFC_Day_1_(Context_A,_No_Shock)_528.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250206_Box_3_CFC_Day_1_(Context_A,_No_Shock)_543.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_1_CFC_Day_2_(Context_C)_526.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_1_CFC_Day_2_(Context_C)_541.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_2_CFC_Day_2_(Context_C)_527.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_2_CFC_Day_2_(Context_C)_542.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_3_CFC_Day_2_(Context_C)_528.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250207_Box_3_CFC_Day_2_(Context_C)_543.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_1_CFD_Day_3_(Context_A)_526.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_1_CFD_Day_3_(Context_A)_541.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_1_CFD_Day_3_(Context_B)_526.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_1_CFD_Day_3_(Context_B)_541.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_2_CFD_Day_3_(Context_A)_527.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_2_CFD_Day_3_(Context_A)_542.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_2_CFD_Day_3_(Context_B)_527.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_2_CFD_Day_3_(Context_B)_542.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_3_CFD_Day_3_(Context_A)_528.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_3_CFD_Day_3_(Context_A)_543.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_3_CFD_Day_3_(Context_B)_528.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250210_Box_3_CFD_Day_3_(Context_B)_543.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250211_Box_1_CFD_Day_4_(Context_A)_526.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250211_Box_1_CFD_Day_4_(Context_A)_541.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250211_Box_1_CFD_Day_4_(Context_B)_541.mp4:
+    crop: 0, 640, 0, 480
+  C:\Users\playtoe\Programs\neuron\luna_lab\VIEB\raw_videos\20250211_Box_2_CFD_Day_4_(Context_A)_542.mp4:
+    crop: 0, 640, 0, 480
+bodyparts:
+- left_ear
+- right_ear
+- nose
+- center
+- lateral_left
+- lateral_right
+- tail_base
+- tail_end
+start: 0
+stop: 1
+numframes2pick: 20
+skeleton:
+- - nose
+  - left_ear
+- - nose
+  - right_ear
+- - left_ear
+  - right_ear
+- - nose
+  - center
+- - center
+  - lateral_left
+- - center
+  - lateral_right
+- - center
+  - tail_base
+- - tail_base
+  - tail_end
+skeleton_color: black
+pcutoff: 0.6
+dotsize: 12
+alphavalue: 0.7
+colormap: rainbow
+TrainingFraction:
+- 0.95
+iteration: 0
+default_net_type: resnet_50
+default_augmenter: default
+snapshotindex: -1
+batch_size: 8
+cropping: false
+x1: 0
+x2: 640
+y1: 277
+y2: 624
+corner2move2:
+- 50
+- 50
+move2corner: true
+engine: pytorch
+detector_snapshotindex: -1
+detector_batch_size: 1
+SuperAnimalConversionTables: null
