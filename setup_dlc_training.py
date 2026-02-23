@@ -106,17 +106,38 @@ def extract_frames():
     print("Frame extraction complete.")
 
 
-def label_frames():
-    """Launch the DLC labeling GUI."""
+def label_frames(video_name=None):
+    """Launch the DLC labeling GUI for one video folder at a time."""
     import deeplabcut
-    import napari
 
-    print("\nLaunching labeling GUI...")
-    print("Label all 8 keypoints on each frame:")
+    labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
+    all_dirs = sorted(os.listdir(labeled_dir))
+    unlabeled = [
+        d for d in all_dirs
+        if os.path.isdir(os.path.join(labeled_dir, d))
+        and any(f.endswith(".png") for f in os.listdir(os.path.join(labeled_dir, d)))
+        and not any(f.startswith("CollectedData") and f.endswith(".h5")
+                    for f in os.listdir(os.path.join(labeled_dir, d)))
+    ]
+
+    if video_name is None:
+        if not unlabeled:
+            print("All videos are already labeled!")
+            return
+        video_name = unlabeled[0]
+        labeled_count = len(all_dirs) - len(unlabeled)
+        print(f"\nProgress: {labeled_count}/{len(all_dirs)} videos labeled.")
+        print(f"Opening next unlabeled video: {video_name}")
+        print(f"  ({len(unlabeled) - 1} more after this one)")
+    else:
+        print(f"\nOpening: {video_name}")
+
+    print("\nLabel all 8 keypoints on each frame:")
     print("  left_ear, right_ear, nose, center,")
-    print("  lateral_left, lateral_right, tail_base, tail_end")
-    print("\nSave your work (Ctrl+S) before closing the GUI.\n")
-    deeplabcut.label_frames(DLC_CONFIG)
+    print("  left_hip, right_hip, tail_base, tail_tip")
+    print("\nSave with Ctrl+S before closing.\n")
+    deeplabcut.label_frames(DLC_CONFIG, video_name)
+    import napari
     napari.run()
 
 
@@ -187,14 +208,16 @@ def analyze_videos():
 
 def main():
     parser = argparse.ArgumentParser(description="DLC Training Setup for VIEB")
-    parser.add_argument("--label", action="store_true", help="Open labeling GUI (run after extracting frames)")
+    parser.add_argument("--label", nargs="?", const="__next__", metavar="VIDEO_NAME",
+                        help="Open labeling GUI. Defaults to next unlabeled video. Pass a folder name to open a specific one.")
     parser.add_argument("--train", action="store_true", help="Create dataset and train (run after labeling)")
     parser.add_argument("--evaluate", action="store_true", help="Evaluate trained model")
     parser.add_argument("--analyze", action="store_true", help="Analyze all videos with trained model")
     args = parser.parse_args()
 
-    if args.label:
-        label_frames()
+    if args.label is not None:
+        video_name = None if args.label == "__next__" else args.label
+        label_frames(video_name)
     elif args.train:
         check_labeled_data()
         create_training_dataset()

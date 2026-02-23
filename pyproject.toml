@@ -25,7 +25,7 @@ tracking = [
     "torch==2.5.1+cu121",
     "torchvision==0.20.1+cu121",
     "napari==0.4.18",
-    "vispy==0.13.0",
+    "vispy==0.12.2",
     "napari-console==0.1.4",
     "napari-deeplabcut==0.2.1.7",
     "PySide6==6.10.2",

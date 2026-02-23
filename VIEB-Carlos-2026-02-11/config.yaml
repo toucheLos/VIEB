@@ -454,10 +454,10 @@ bodyparts:
 - right_ear
 - nose
 - center
-- lateral_left
-- lateral_right
+- left_hip
+- right_hip
 - tail_base
-- tail_end
+- tail_tip
 start: 0
 stop: 1
 numframes2pick: 20
@@ -470,14 +470,16 @@ skeleton:
   - right_ear
 - - nose
   - center
-- - center
-  - lateral_left
-- - center
-  - lateral_right
-- - center
+- - neck
+  - left_hip
+- - neck
+  - right_hip
+- - left_hip
+  - tail_base
+- - right_hip
   - tail_base
 - - tail_base
-  - tail_end
+  - tail_tip
 skeleton_color: black
 pcutoff: 0.6
 dotsize: 12
