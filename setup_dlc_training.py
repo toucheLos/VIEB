@@ -20,6 +20,25 @@ import sys
 import glob
 import argparse
 import yaml
+from contextlib import contextmanager
+
+
+@contextmanager
+def prevent_sleep():
+    """Prevent Windows from sleeping during long-running tasks (like caffeinate on Mac)."""
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        print("  (sleep prevention active)")
+    except AttributeError:
+        pass  # non-Windows
+    try:
+        yield
+    finally:
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # release
+        except AttributeError:
+            pass
 
 # --- Python version check ---
 if sys.version_info < (3, 10):
@@ -106,38 +125,80 @@ def extract_frames():
     print("Frame extraction complete.")
 
 
-def label_frames(video_name=None):
-    """Launch the DLC labeling GUI for one video folder at a time."""
-    import deeplabcut
+QUEUE_FILE = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeling_queue.txt")
 
+
+def _get_queue():
+    """Load or create a random shuffled queue of all video folders that have frames."""
+    import random
     labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
-    all_dirs = sorted(os.listdir(labeled_dir))
-    unlabeled = [
-        d for d in all_dirs
+    has_frames = sorted([
+        d for d in os.listdir(labeled_dir)
         if os.path.isdir(os.path.join(labeled_dir, d))
         and any(f.endswith(".png") for f in os.listdir(os.path.join(labeled_dir, d)))
-        and not any(f.startswith("CollectedData") and f.endswith(".h5")
-                    for f in os.listdir(os.path.join(labeled_dir, d)))
-    ]
+    ])
 
-    if video_name is None:
-        if not unlabeled:
-            print("All videos are already labeled!")
-            return
-        video_name = unlabeled[0]
-        labeled_count = len(all_dirs) - len(unlabeled)
-        print(f"\nProgress: {labeled_count}/{len(all_dirs)} videos labeled.")
-        print(f"Opening next unlabeled video: {video_name}")
-        print(f"  ({len(unlabeled) - 1} more after this one)")
+    if os.path.exists(QUEUE_FILE):
+        with open(QUEUE_FILE) as f:
+            queue = [line.strip() for line in f if line.strip()]
+        # Add any new folders not yet in the queue
+        existing = set(queue)
+        new = [d for d in has_frames if d not in existing]
+        if new:
+            random.shuffle(new)
+            queue.extend(new)
+            with open(QUEUE_FILE, "w") as f:
+                f.write("\n".join(queue) + "\n")
+            print(f"  Added {len(new)} new video(s) to queue.")
     else:
-        print(f"\nOpening: {video_name}")
+        queue = list(has_frames)
+        random.shuffle(queue)
+        with open(QUEUE_FILE, "w") as f:
+            f.write("\n".join(queue) + "\n")
+        print(f"  Created labeling queue with {len(queue)} videos (randomized).")
+
+    return queue
+
+
+def _is_labeled(folder_name):
+    labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
+    folder = os.path.join(labeled_dir, folder_name)
+    return any(f.startswith("CollectedData") and f.endswith(".h5") for f in os.listdir(folder))
+
+
+def label_frames(index=None):
+    """Launch the DLC labeling GUI for one video at a time.
+
+    index: 1-based position in the queue, or None to open the next unlabeled video.
+    """
+    import deeplabcut, napari
+
+    queue = _get_queue()
+    total = len(queue)
+
+    if index is not None:
+        if index < 1 or index > total:
+            print(f"ERROR: Index {index} out of range (queue has {total} videos).")
+            sys.exit(1)
+        video_name = queue[index - 1]
+        status = "already labeled" if _is_labeled(video_name) else "unlabeled"
+        print(f"\nOpening #{index}/{total}: {video_name}  [{status}]")
+    else:
+        # Find the next unlabeled video in queue order
+        labeled_count = sum(1 for d in queue if _is_labeled(d))
+        next_entry = next(((i + 1, d) for i, d in enumerate(queue) if not _is_labeled(d)), None)
+        if next_entry is None:
+            print(f"All {total} videos are labeled!")
+            return
+        index, video_name = next_entry
+        print(f"\nProgress: {labeled_count}/{total} labeled.")
+        print(f"Opening #{index}/{total}: {video_name}")
 
     print("\nLabel all 8 keypoints on each frame:")
     print("  left_ear, right_ear, nose, center,")
     print("  left_hip, right_hip, tail_base, tail_tip")
     print("\nSave with Ctrl+S before closing.\n")
     deeplabcut.label_frames(DLC_CONFIG, video_name)
-    import napari
     napari.run()
 
 
@@ -170,14 +231,15 @@ def train():
 
     print("\nStarting training (this may take 30min - 2hrs)...")
     print("You can stop early with Ctrl+C — DLC saves snapshots periodically.\n")
-    deeplabcut.train_network(
-        DLC_CONFIG,
-        shuffle=2,
-        maxiters=200000,
-        displayiters=1000,
-        saveiters=10000,
-        batch_size=HW["batch_size"],
-    )
+    with prevent_sleep():
+        deeplabcut.train_network(
+            DLC_CONFIG,
+            shuffle=2,
+            maxiters=200000,
+            displayiters=1000,
+            saveiters=10000,
+            batch_size=HW["batch_size"],
+        )
     print("Training complete.")
 
 
@@ -196,28 +258,28 @@ def analyze_videos():
 
     video_files = glob.glob(os.path.join(RAW_VIDEOS_DIR, "*.mp4"))
     print(f"\nAnalyzing {len(video_files)} video(s)...")
-    deeplabcut.analyze_videos(
-        DLC_CONFIG,
-        video_files,
-        shuffle=2,
-        save_as_csv=True,
-        batchsize=HW["batch_size"],
-    )
+    with prevent_sleep():
+        deeplabcut.analyze_videos(
+            DLC_CONFIG,
+            video_files,
+            shuffle=2,
+            save_as_csv=True,
+            batchsize=HW["batch_size"],
+        )
     print("Analysis complete. CSV outputs saved alongside videos.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="DLC Training Setup for VIEB")
-    parser.add_argument("--label", nargs="?", const="__next__", metavar="VIDEO_NAME",
-                        help="Open labeling GUI. Defaults to next unlabeled video. Pass a folder name to open a specific one.")
+    parser.add_argument("--label", nargs="?", const=0, type=int, metavar="N",
+                        help="Open labeling GUI. No arg = next unlabeled. Pass a number (e.g. --label 39) to jump to that position in the queue.")
     parser.add_argument("--train", action="store_true", help="Create dataset and train (run after labeling)")
     parser.add_argument("--evaluate", action="store_true", help="Evaluate trained model")
     parser.add_argument("--analyze", action="store_true", help="Analyze all videos with trained model")
     args = parser.parse_args()
 
     if args.label is not None:
-        video_name = None if args.label == "__next__" else args.label
-        label_frames(video_name)
+        label_frames(index=args.label if args.label != 0 else None)
     elif args.train:
         check_labeled_data()
         create_training_dataset()

@@ -218,7 +218,7 @@ class PoseFeatureExtractor:
 
         Returns
         -------
-        centroid : np.ndarray
+        centroid : np.nd rray
             Shape (T, D)
         """
         return np.mean(pose, axis=1)

@@ -1,0 +1,49 @@
+================================================================================
+VIEB Behavioral Analysis Report
+================================================================================
+
+BEHAVIORAL STATES
+--------------------------------------------------------------------------------
+Number of discovered states: 5
+
+STATE_0:
+  Occurrence rate: 8.66%
+  Total duration: 15.57 seconds
+  Number of bouts: 37
+  Mean bout duration: 0.42 seconds
+
+STATE_1:
+  Occurrence rate: 18.49%
+  Total duration: 33.23 seconds
+  Number of bouts: 153
+  Mean bout duration: 0.22 seconds
+
+STATE_2:
+  Occurrence rate: 32.28%
+  Total duration: 58.00 seconds
+  Number of bouts: 68
+  Mean bout duration: 0.85 seconds
+
+STATE_3:
+  Occurrence rate: 19.31%
+  Total duration: 34.70 seconds
+  Number of bouts: 63
+  Mean bout duration: 0.55 seconds
+
+STATE_4:
+  Occurrence rate: 21.26%
+  Total duration: 38.20 seconds
+  Number of bouts: 85
+  Mean bout duration: 0.45 seconds
+
+
+BEHAVIORAL TRANSITIONS
+--------------------------------------------------------------------------------
+Top 5 most common transitions:
+  1. State 4 → State 1: 57 times (4.97%)
+  2. State 1 → State 4: 51 times (5.12%)
+  3. State 1 → State 3: 49 times (4.92%)
+  4. State 3 → State 1: 47 times (4.51%)
+  5. State 1 → State 2: 44 times (4.42%)
+
+================================================================================

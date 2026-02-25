@@ -1,0 +1,79 @@
+================================================================================
+VIEB Behavioral Analysis Report
+================================================================================
+
+BEHAVIORAL STATES
+--------------------------------------------------------------------------------
+Number of discovered states: 10
+
+STATE_0:
+  Occurrence rate: 6.31%
+  Total duration: 11.33 seconds
+  Number of bouts: 30
+  Mean bout duration: 0.38 seconds
+
+STATE_1:
+  Occurrence rate: 11.39%
+  Total duration: 20.47 seconds
+  Number of bouts: 63
+  Mean bout duration: 0.32 seconds
+
+STATE_2:
+  Occurrence rate: 17.96%
+  Total duration: 32.27 seconds
+  Number of bouts: 3
+  Mean bout duration: 10.76 seconds
+
+STATE_3:
+  Occurrence rate: 12.69%
+  Total duration: 22.80 seconds
+  Number of bouts: 62
+  Mean bout duration: 0.37 seconds
+
+STATE_4:
+  Occurrence rate: 10.11%
+  Total duration: 18.17 seconds
+  Number of bouts: 64
+  Mean bout duration: 0.28 seconds
+
+STATE_5:
+  Occurrence rate: 3.26%
+  Total duration: 5.87 seconds
+  Number of bouts: 32
+  Mean bout duration: 0.18 seconds
+
+STATE_6:
+  Occurrence rate: 6.94%
+  Total duration: 12.47 seconds
+  Number of bouts: 41
+  Mean bout duration: 0.30 seconds
+
+STATE_7:
+  Occurrence rate: 13.06%
+  Total duration: 23.47 seconds
+  Number of bouts: 71
+  Mean bout duration: 0.33 seconds
+
+STATE_8:
+  Occurrence rate: 5.77%
+  Total duration: 10.37 seconds
+  Number of bouts: 28
+  Mean bout duration: 0.37 seconds
+
+STATE_9:
+  Occurrence rate: 12.52%
+  Total duration: 22.50 seconds
+  Number of bouts: 19
+  Mean bout duration: 1.18 seconds
+
+
+BEHAVIORAL TRANSITIONS
+--------------------------------------------------------------------------------
+Top 5 most common transitions:
+  1. State 1 → State 7: 59 times (9.61%)
+  2. State 7 → State 1: 58 times (8.24%)
+  3. State 3 → State 6: 26 times (3.80%)
+  4. State 3 → State 5: 25 times (3.65%)
+  5. State 5 → State 3: 25 times (14.20%)
+
+================================================================================

@@ -292,10 +292,10 @@ class AnomalyDetector:
         # Load best model
         self.model.load_state_dict(self.best_model_state)
 
+        self.trained = True
+
         # Compute anomaly threshold from validation set
         self._compute_threshold(val_features)
-
-        self.trained = True
 
         return history
 

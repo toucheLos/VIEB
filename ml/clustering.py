@@ -222,7 +222,7 @@ class BehaviorClusterer:
         optimal_k : int
             Optimal number of clusters
         """
-        min_clusters = 2
+        min_clusters = 4
         max_clusters = min(self.max_clusters, len(features) // 10)
 
         if max_clusters < min_clusters:

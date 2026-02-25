@@ -73,17 +73,24 @@ Check `VIEB-Carlos-*/evaluation-results-pytorch/` for accuracy metrics and label
 caffeinate -i python setup_dlc_training.py --analyze
 ```
 
-Outputs a `.csv` and `.h5` per video alongside each file in `raw_videos/`. Takes a while — `caffeinate` prevents your Mac from sleeping.
+Outputs a `.csv` and `.h5` per video alongside each file in `raw_videos/`. Takes a while - `caffeinate` prevents your Mac from sleeping. Used a mouse mover such a Wiggler on Windows.
 
 ---
 
 ## 8. Run Behavioral Analysis
 
 ```bash
-python main.py \
-  --video raw_videos/your_video.mp4 \
-  --dlc-config VIEB-Carlos-*/config.yaml \
-  --output results/your_video/
+# Step 1: already done per-video, just re-run with better clustering
+python main.py --all
+
+# Step 2a: extract features from all videos
+python compare.py --extract
+
+# Step 2b: fit shared model + label all videos
+python compare.py --cluster
+
+# Step 3: generate comparison report
+python compare.py --report
 ```
 
 Repeat for each video, or write a loop. Results land in `results/`.

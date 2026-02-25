@@ -348,8 +348,22 @@ class BehaviorAnalyzer:
 
         # Export as JSON
         json_path = output_path / "analysis_results.json"
+
+        def _to_python(obj):
+            if isinstance(obj, dict):
+                return {k: _to_python(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_to_python(v) for v in obj]
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+
         with open(json_path, 'w') as f:
-            json.dump(self.results, f, indent=2)
+            json.dump(_to_python(self.results), f, indent=2)
 
         print(f"Results exported to {output_dir}")
 
@@ -400,7 +414,7 @@ class BehaviorAnalyzer:
         output_path : str
             Path to save report
         """
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
             f.write("VIEB Behavioral Analysis Report\n")
             f.write("=" * 80 + "\n\n")

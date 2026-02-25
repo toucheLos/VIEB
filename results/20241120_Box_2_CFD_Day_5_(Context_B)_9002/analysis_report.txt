@@ -1,0 +1,91 @@
+================================================================================
+VIEB Behavioral Analysis Report
+================================================================================
+
+BEHAVIORAL STATES
+--------------------------------------------------------------------------------
+Number of discovered states: 12
+
+STATE_0:
+  Occurrence rate: 40.36%
+  Total duration: 72.53 seconds
+  Number of bouts: 15
+  Mean bout duration: 4.84 seconds
+
+STATE_1:
+  Occurrence rate: 19.96%
+  Total duration: 35.87 seconds
+  Number of bouts: 50
+  Mean bout duration: 0.72 seconds
+
+STATE_2:
+  Occurrence rate: 2.41%
+  Total duration: 4.33 seconds
+  Number of bouts: 33
+  Mean bout duration: 0.13 seconds
+
+STATE_3:
+  Occurrence rate: 1.17%
+  Total duration: 2.10 seconds
+  Number of bouts: 9
+  Mean bout duration: 0.23 seconds
+
+STATE_4:
+  Occurrence rate: 10.89%
+  Total duration: 19.57 seconds
+  Number of bouts: 67
+  Mean bout duration: 0.29 seconds
+
+STATE_5:
+  Occurrence rate: 4.80%
+  Total duration: 8.63 seconds
+  Number of bouts: 40
+  Mean bout duration: 0.22 seconds
+
+STATE_6:
+  Occurrence rate: 2.86%
+  Total duration: 5.13 seconds
+  Number of bouts: 15
+  Mean bout duration: 0.34 seconds
+
+STATE_7:
+  Occurrence rate: 3.64%
+  Total duration: 6.53 seconds
+  Number of bouts: 12
+  Mean bout duration: 0.54 seconds
+
+STATE_8:
+  Occurrence rate: 3.73%
+  Total duration: 6.70 seconds
+  Number of bouts: 27
+  Mean bout duration: 0.25 seconds
+
+STATE_9:
+  Occurrence rate: 1.06%
+  Total duration: 1.90 seconds
+  Number of bouts: 5
+  Mean bout duration: 0.38 seconds
+
+STATE_10:
+  Occurrence rate: 1.22%
+  Total duration: 2.20 seconds
+  Number of bouts: 15
+  Mean bout duration: 0.15 seconds
+
+STATE_11:
+  Occurrence rate: 7.90%
+  Total duration: 14.20 seconds
+  Number of bouts: 59
+  Mean bout duration: 0.24 seconds
+
+
+BEHAVIORAL TRANSITIONS
+--------------------------------------------------------------------------------
+Top 5 most common transitions:
+  1. State 4 → State 1: 44 times (7.51%)
+  2. State 1 → State 4: 43 times (4.00%)
+  3. State 11 → State 2: 19 times (4.46%)
+  4. State 5 → State 11: 14 times (5.41%)
+  5. State 2 → State 11: 12 times (9.23%)
+
+================================================================================

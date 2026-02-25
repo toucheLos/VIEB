@@ -1,0 +1,3 @@
+state,occurrence_rate,total_duration_sec,n_bouts,mean_bout_duration_sec
+state_0,0.10442786859228693,21.933333333333334,15,1.4622222222222223
+state_1,0.8955721314077131,188.1,16,11.75625
