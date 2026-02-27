@@ -470,9 +470,9 @@ skeleton:
   - right_ear
 - - nose
   - center
-- - neck
+- - center
   - left_hip
-- - neck
+- - center
   - right_hip
 - - left_hip
   - tail_base

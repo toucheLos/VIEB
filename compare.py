@@ -285,6 +285,363 @@ def cmd_report(fps: float = 30.0):
 
 
 # ---------------------------------------------------------------------------
+# Step 4: State windows — per-video frame ranges for manual inspection
+# ---------------------------------------------------------------------------
+
+def cmd_windows(fps: float = 30.0):
+    """Export CSVs listing start/end frames for every state bout in every video."""
+    for path in ["results/features/index.json", "results/shared/cluster_info.json"]:
+        if not os.path.exists(path):
+            sys.exit(f"Missing {path}. Run --extract and --cluster first.")
+
+    with open("results/features/index.json") as f:
+        index = json.load(f)
+    with open("results/shared/cluster_info.json") as f:
+        cluster_info = json.load(f)
+    n_clusters = cluster_info["n_clusters"]
+
+    os.makedirs("results/inspection", exist_ok=True)
+
+    all_rows = []
+    for stem in sorted(index.keys()):
+        labels_path = f"results/shared/{stem}_labels.npy"
+        if not os.path.exists(labels_path):
+            continue
+        labels = np.load(labels_path)
+
+        # Run-length encode: find consecutive runs of the same state
+        change_points = np.where(np.diff(labels) != 0)[0] + 1
+        starts = np.concatenate([[0], change_points])
+        ends = np.concatenate([change_points, [len(labels)]])
+        values = labels[starts]
+
+        rows = []
+        for s, e, v in zip(starts, ends, values):
+            dur_sec = (e - s) / fps
+            rows.append({
+                "stem": stem,
+                "state": int(v),
+                "start_frame": int(s),
+                "end_frame": int(e - 1),
+                "start_sec": round(s / fps, 2),
+                "end_sec": round((e - 1) / fps, 2),
+                "duration_sec": round(dur_sec, 2),
+            })
+
+        # Save per-video file
+        df_vid = pd.DataFrame(rows)
+        df_vid.to_csv(f"results/inspection/{stem}_windows.csv", index=False)
+        all_rows.extend(rows)
+
+    # Save combined file
+    df_all = pd.DataFrame(all_rows)
+    df_all.to_csv("results/inspection/all_windows.csv", index=False)
+
+    print(f"State windows exported:")
+    print(f"  Per-video: results/inspection/<stem>_windows.csv")
+    print(f"  Combined:  results/inspection/all_windows.csv  ({len(df_all):,} bouts total)")
+    print(f"\nTo find frames to inspect in a specific video:")
+    print(f"  Open results/inspection/<stem>_windows.csv")
+    print(f"  Find rows where state=<N>, scrub video to start_frame")
+
+    # Print a sample: longest bout per state (good examples to start with)
+    print(f"\nLongest single bout per state (good frames to check first):")
+    for k in range(n_clusters):
+        sub = df_all[df_all["state"] == k]
+        if sub.empty:
+            continue
+        best = sub.loc[sub["duration_sec"].idxmax()]
+        print(f"  State {k}: {best['stem']}")
+        print(f"    frames {int(best['start_frame'])}–{int(best['end_frame'])}  "
+              f"({best['duration_sec']:.1f}s at {best['start_sec']:.1f}s into video)")
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Per-animal ethogram grid
+# ---------------------------------------------------------------------------
+
+def cmd_ethograms(fps: float = 30.0):
+    """Plot a color-coded state timeline for every session of every animal."""
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import ListedColormap
+
+    for path in ["results/features/index.json", "results/shared/cluster_info.json",
+                 "metadata.csv"]:
+        if not os.path.exists(path):
+            sys.exit(f"Missing {path}. Run --extract, --cluster, and ensure metadata.csv exists.")
+
+    with open("results/features/index.json") as f:
+        index = json.load(f)
+    with open("results/shared/cluster_info.json") as f:
+        cluster_info = json.load(f)
+    n_clusters = cluster_info["n_clusters"]
+
+    meta = pd.read_csv("metadata.csv")
+    meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
+
+    # State color palette (consistent across all plots)
+    STATE_COLORS = plt.cm.tab10(np.linspace(0, 0.9, n_clusters))
+    cmap = ListedColormap(STATE_COLORS)
+
+    os.makedirs("results/comparison", exist_ok=True)
+
+    animals = sorted(meta["animal_id"].dropna().unique())
+    print(f"Generating ethograms for {len(animals)} animals...")
+
+    for animal_id in animals:
+        animal_sessions = meta[meta["animal_id"] == animal_id].sort_values(
+            ["experiment", "day", "context"]
+        )
+
+        # Filter to sessions that have labels
+        valid = []
+        for _, row in animal_sessions.iterrows():
+            stem = row["stem"]
+            if os.path.exists(f"results/shared/{stem}_labels.npy"):
+                valid.append(row)
+
+        if not valid:
+            continue
+
+        n_sessions = len(valid)
+        max_frames = max(
+            len(np.load(f"results/shared/{row['stem']}_labels.npy"))
+            for row in valid
+        )
+        max_sec = max_frames / fps
+
+        fig, ax = plt.subplots(figsize=(14, max(3, n_sessions * 0.5 + 1)))
+
+        for i, row in enumerate(valid):
+            stem = row["stem"]
+            labels = np.load(f"results/shared/{stem}_labels.npy")
+            n_frames = len(labels)
+            time_axis = np.arange(n_frames) / fps
+
+            # Draw colored segments using imshow row
+            ax.imshow(
+                labels[np.newaxis, :],
+                aspect="auto",
+                extent=[0, n_frames / fps, i - 0.4, i + 0.4],
+                cmap=cmap,
+                vmin=0,
+                vmax=n_clusters - 1,
+                interpolation="nearest",
+            )
+
+            # Y-axis label: experiment + day + context
+            exp = row.get("experiment", "")
+            day = row.get("day", "")
+            ctx = row.get("context", "")
+            ax.text(
+                -0.5, i, f"{exp} D{day} {ctx}",
+                va="center", ha="right", fontsize=7,
+            )
+
+        ax.set_xlim(0, max_sec)
+        ax.set_ylim(-0.6, n_sessions - 0.4)
+        ax.set_yticks([])
+        ax.set_xlabel("Time (seconds)")
+        ax.set_title(f"Animal {animal_id} — Behavioral State Timeline")
+
+        # Legend
+        patches = [
+            mpatches.Patch(color=STATE_COLORS[k], label=f"State {k}")
+            for k in range(n_clusters)
+        ]
+        ax.legend(handles=patches, loc="upper right", fontsize=8, ncol=n_clusters)
+
+        plt.tight_layout()
+        save_path = f"results/comparison/ethogram_{animal_id}.png"
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {save_path}")
+
+    print(f"\nEthograms saved to results/comparison/ethogram_<animal_id>.png")
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Pose profiles — mean skeleton per state
+# ---------------------------------------------------------------------------
+
+def cmd_pose_profiles(fps: float = 30.0, max_frames_per_state: int = 2000):
+    """Plot the mean body posture (skeleton) for each behavioral state."""
+    import matplotlib.pyplot as plt
+    from main import load_pose
+
+    for path in ["results/features/index.json", "results/shared/cluster_info.json"]:
+        if not os.path.exists(path):
+            sys.exit(f"Missing {path}. Run --extract and --cluster first.")
+
+    with open("results/features/index.json") as f:
+        index = json.load(f)
+    with open("results/shared/cluster_info.json") as f:
+        cluster_info = json.load(f)
+    n_clusters = cluster_info["n_clusters"]
+
+    # Keypoint names (must match config.yaml order)
+    KEYPOINTS = ["left_ear", "right_ear", "nose", "center",
+                 "left_hip", "right_hip", "tail_base", "tail_tip"]
+    # Skeleton connections as (i, j) index pairs
+    SKELETON = [
+        (2, 0),  # nose → left_ear
+        (2, 1),  # nose → right_ear
+        (0, 1),  # left_ear → right_ear
+        (2, 3),  # nose → center
+        (3, 4),  # center → left_hip
+        (3, 5),  # center → right_hip
+        (4, 6),  # left_hip → tail_base
+        (5, 6),  # right_hip → tail_base
+        (6, 7),  # tail_base → tail_tip
+    ]
+
+    # Accumulate normalized pose frames per state
+    # pose_accum[k] = list of (K, 2) arrays
+    pose_accum = {k: [] for k in range(n_clusters)}
+    frames_collected = {k: 0 for k in range(n_clusters)}
+
+    stems = sorted(index.keys())
+    print(f"Loading pose data from {len(stems)} videos to build pose profiles...")
+
+    for stem in stems:
+        # Stop collecting a state once we have enough frames
+        if all(frames_collected[k] >= max_frames_per_state for k in range(n_clusters)):
+            break
+
+        labels_path = f"results/shared/{stem}_labels.npy"
+        if not os.path.exists(labels_path):
+            continue
+
+        labels = np.load(labels_path)
+        csv_path = index[stem].get("csv_path")
+        if not csv_path or not os.path.exists(csv_path):
+            continue
+
+        pose, conf, bodyparts = load_pose(csv_path)
+
+        # Normalize each frame to body-centered frame
+        # 1. Translate: center on centroid of all keypoints
+        # 2. Rotate: align nose(2) → tail_base(6) axis to point upward
+        for k in range(n_clusters):
+            if frames_collected[k] >= max_frames_per_state:
+                continue
+
+            frame_indices = np.where(labels == k)[0]
+            if len(frame_indices) == 0:
+                continue
+
+            # Sample evenly across the video
+            n_sample = min(len(frame_indices), max_frames_per_state - frames_collected[k])
+            sampled = frame_indices[np.round(
+                np.linspace(0, len(frame_indices) - 1, n_sample)
+            ).astype(int)]
+
+            for t in sampled:
+                pts = pose[t].copy()  # (K, 2)
+
+                # Skip frames with NaN (low confidence tracking)
+                if np.any(np.isnan(pts)):
+                    continue
+
+                # Translate: center on centroid
+                centroid = pts.mean(axis=0)
+                pts -= centroid
+
+                # Rotate: align nose-to-tailbase axis to point "up" (0, -1)
+                nose = pts[2]
+                tail = pts[6]
+                axis = tail - nose
+                axis_len = np.linalg.norm(axis)
+                if axis_len < 1e-6:
+                    continue
+                axis /= axis_len
+
+                # Target direction: nose should be at top (0, -1 in image coords)
+                target = np.array([0.0, -1.0])
+                angle = np.arctan2(axis[1], axis[0]) - np.arctan2(target[1], target[0])
+                cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+                R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+                pts = pts @ R.T
+
+                # Scale: normalize by nose-to-tailbase distance
+                scale = np.linalg.norm(pts[2] - pts[6])
+                if scale < 1e-6:
+                    continue
+                pts /= scale
+
+                pose_accum[k].append(pts)
+                frames_collected[k] += 1
+
+    print(f"Frames collected per state: { {k: len(v) for k, v in pose_accum.items()} }")
+
+    # Plot
+    fig, axes = plt.subplots(1, n_clusters, figsize=(4 * n_clusters, 5))
+    if n_clusters == 1:
+        axes = [axes]
+
+    STATE_COLORS = plt.cm.tab10(np.linspace(0, 0.9, n_clusters))
+
+    for k, ax in enumerate(axes):
+        frames = pose_accum[k]
+        if not frames:
+            ax.set_title(f"State {k}\n(no data)")
+            ax.axis("off")
+            continue
+
+        pts_stack = np.stack(frames)          # (N, K, 2)
+        mean_pose = pts_stack.mean(axis=0)    # (K, 2)
+        std_pose = pts_stack.std(axis=0)      # (K, 2)
+
+        color = STATE_COLORS[k]
+
+        # Draw skeleton edges
+        for (i, j) in SKELETON:
+            ax.plot(
+                [mean_pose[i, 0], mean_pose[j, 0]],
+                [mean_pose[i, 1], mean_pose[j, 1]],
+                color=color, linewidth=2.5, zorder=1,
+            )
+
+        # Draw keypoint uncertainty ellipses (std as error bars)
+        for ki in range(len(KEYPOINTS)):
+            ax.errorbar(
+                mean_pose[ki, 0], mean_pose[ki, 1],
+                xerr=std_pose[ki, 0], yerr=std_pose[ki, 1],
+                fmt="o", color=color, markersize=6,
+                elinewidth=1, ecolor="gray", alpha=0.7, zorder=2,
+            )
+            ax.annotate(
+                KEYPOINTS[ki].replace("_", "\n"),
+                xy=(mean_pose[ki, 0], mean_pose[ki, 1]),
+                fontsize=5, ha="center", va="bottom",
+                xytext=(0, 6), textcoords="offset points",
+                color="dimgray",
+            )
+
+        n_frames = len(frames)
+        global_frac = n_frames / sum(len(v) for v in pose_accum.values()) * 100
+        ax.set_title(f"State {k}\n({n_frames:,} frames sampled)")
+        ax.set_aspect("equal")
+        ax.invert_yaxis()   # image convention: y increases downward
+        ax.set_xlabel("← right     left →")
+        ax.set_ylabel("← tail     nose →")
+        ax.axhline(0, color="lightgray", linewidth=0.5, zorder=0)
+        ax.axvline(0, color="lightgray", linewidth=0.5, zorder=0)
+
+    plt.suptitle(
+        "Mean Body Posture per Behavioral State\n"
+        "(body-centered, normalized to nose–tail length)",
+        fontsize=11,
+    )
+    plt.tight_layout()
+    save_path = "results/comparison/pose_profiles.png"
+    plt.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"\nPose profiles saved: {save_path}")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -300,12 +657,19 @@ def main():
                         help="Fit shared clusterer across all videos")
     parser.add_argument("--report", action="store_true",
                         help="Generate comparison plots using metadata.csv")
+    parser.add_argument("--windows", action="store_true",
+                        help="Export per-video state bout frame ranges for manual inspection")
+    parser.add_argument("--ethograms", action="store_true",
+                        help="Plot per-animal session-by-session ethogram timelines")
+    parser.add_argument("--pose-profiles", action="store_true",
+                        help="Plot mean skeleton posture for each behavioral state")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--n-clusters", type=int, default=None,
                         help="Fix number of behavioral states (default: auto-detect)")
     args = parser.parse_args()
 
-    if not any([args.extract, args.cluster, args.report]):
+    if not any([args.extract, args.cluster, args.report,
+                args.windows, args.ethograms, args.pose_profiles]):
         parser.print_help()
         sys.exit(1)
 
@@ -315,6 +679,12 @@ def main():
         cmd_cluster(fps=args.fps, n_clusters=args.n_clusters)
     if args.report:
         cmd_report(fps=args.fps)
+    if args.windows:
+        cmd_windows(fps=args.fps)
+    if args.ethograms:
+        cmd_ethograms(fps=args.fps)
+    if args.pose_profiles:
+        cmd_pose_profiles(fps=args.fps)
 
 
 if __name__ == "__main__":
