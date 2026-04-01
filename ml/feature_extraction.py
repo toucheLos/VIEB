@@ -35,6 +35,7 @@ class PoseFeatureExtractor:
         fps: float = 30.0,
         smooth_window: int = 5,
         feature_window: int = 30,
+        use_wavelets: bool = True,
     ):
         """
         Parameters
@@ -49,6 +50,9 @@ class PoseFeatureExtractor:
         self.fps = fps
         self.smooth_window = smooth_window
         self.feature_window = feature_window
+        self.use_wavelets = use_wavelets
+        # Morlet wavelet frequencies (Hz)
+        self._wavelet_freqs = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
 
     def extract_features(self, pose: np.ndarray, confidence: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
@@ -112,6 +116,10 @@ class PoseFeatureExtractor:
         # --- Temporal dynamics ---
         features["movement_entropy"] = self._compute_movement_entropy(features["speed"])
         features["temporal_features"] = self._compute_temporal_features(features)
+
+        # --- Morlet wavelet amplitudes (optional) ---
+        if self.use_wavelets:
+            features["wavelet_amplitudes"] = self._compute_wavelet_features(pose_smooth)
 
         # Flatten features for ML (convert to 2D: samples x features)
         features["flattened"] = self._flatten_features(features)
@@ -360,6 +368,69 @@ class PoseFeatureExtractor:
         dot   = body_vec[:, 0] * head_vec[:, 0] + body_vec[:, 1] * head_vec[:, 1]
         return np.arctan2(cross, dot)
 
+    def _compute_wavelet_features(self, pose_smooth: np.ndarray) -> np.ndarray:
+        """
+        Morlet wavelet decomposition of per-keypoint speed.
+
+        Computes instantaneous amplitude (envelope) at each frequency for each
+        keypoint using a continuous wavelet transform (CWT) with Morlet2 wavelet.
+
+        Parameters
+        ----------
+        pose_smooth : np.ndarray
+            Smoothed pose array of shape (T, K, 2).
+
+        Returns
+        -------
+        amplitudes : np.ndarray
+            Shape (T, K * n_freqs) where n_freqs = len(self._wavelet_freqs).
+        """
+        T, K, D = pose_smooth.shape
+        freqs = self._wavelet_freqs
+        n_freqs = len(freqs)
+
+        # Morlet2 central frequency in radians (default w=5.0)
+        w = 5.0
+        # Scale: s = w * fps / (2π * f) maps frequency f (Hz) → CWT width (samples)
+        widths = (w * self.fps) / (2.0 * np.pi * freqs)
+
+        # Compute per-keypoint speed (scalar, shape (T, K))
+        grad = np.gradient(pose_smooth, axis=0) * self.fps  # (T, K, 2), pixels/s
+        speed = np.linalg.norm(grad, axis=2)               # (T, K)
+
+        amplitudes = np.zeros((T, K * n_freqs), dtype=np.float32)
+        for k in range(K):
+            sig = speed[:, k]
+            coef = self._morlet_cwt(sig, widths)   # (n_freqs, T), complex
+            amp = np.abs(coef).T                   # (T, n_freqs)
+            amplitudes[:, k * n_freqs:(k + 1) * n_freqs] = amp.astype(np.float32)
+
+        return amplitudes
+
+    @staticmethod
+    def _morlet_cwt(data: np.ndarray, widths: np.ndarray, w: float = 5.0) -> np.ndarray:
+        """
+        Continuous wavelet transform with complex Morlet wavelet.
+
+        Implements the equivalent of the removed scipy.signal.cwt + morlet2
+        using FFT convolution directly.
+
+        Returns complex array of shape (len(widths), len(data)).
+        """
+        from scipy.signal import fftconvolve
+
+        out = np.zeros((len(widths), len(data)), dtype=complex)
+        for i, s in enumerate(widths):
+            N = int(min(10.0 * s, len(data)))
+            N = max(N, 1)
+            # Morlet2 wavelet: normalised complex Morlet at scale s
+            x = np.arange(N) - (N - 1) / 2.0
+            x /= s
+            wav = (np.exp(1j * w * x) * np.exp(-0.5 * x ** 2)
+                   * np.pi ** (-0.25) / np.sqrt(s))
+            out[i] = fftconvolve(data, np.conj(wav[::-1]), mode="same")
+        return out
+
     def _compute_movement_entropy(self, speed: np.ndarray) -> np.ndarray:
         """
         Compute local movement entropy (predictability measure).
@@ -472,6 +543,10 @@ class PoseFeatureExtractor:
         # Temporal features
         feature_arrays.append(features["temporal_features"])  # (T, M)
 
+        # Morlet wavelet amplitudes (optional)
+        if self.use_wavelets and "wavelet_amplitudes" in features:
+            feature_arrays.append(features["wavelet_amplitudes"])  # (T, K*n_freqs)
+
         # Concatenate all features
         flattened = np.concatenate(feature_arrays, axis=1)
 
@@ -518,5 +593,11 @@ class PoseFeatureExtractor:
             "angular_vel_mean_window",
             "angular_vel_max_window"
         ])
+
+        # Morlet wavelet amplitudes
+        if self.use_wavelets:
+            for k in range(n_keypoints):
+                for f in self._wavelet_freqs:
+                    names.append(f"wavelet_kp{k}_{int(f)}hz")
 
         return names
