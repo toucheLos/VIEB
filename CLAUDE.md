@@ -150,3 +150,4 @@ clips/                   # From characterize.py --clips
     context_<X>_NN.mp4        # bouts from most-enriched context
 videos/                  # Manually curated or exported video files
 ```
+

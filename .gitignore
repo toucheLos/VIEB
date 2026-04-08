@@ -4,6 +4,7 @@
 # Virtual environment
 .venv/
 venv/
+venv_wsl/
 
 # Python cache
 __pycache__/
@@ -29,8 +30,9 @@ raw_videos/
 *.pt
 
 # Generated results (rerun compare.py to regenerate)
-results/
-**/results/
+results/2*
+results/features
+results/shared
 
 # Misc
 push_log.txt

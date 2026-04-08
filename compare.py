@@ -17,6 +17,7 @@ import glob
 import io
 import json
 import os
+import platform
 import sys
 
 import numpy as np
@@ -24,6 +25,66 @@ import pandas as pd
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+
+# ---------------------------------------------------------------------------
+# GPU detection and hardware banner
+# ---------------------------------------------------------------------------
+
+def _detect_gpu() -> bool:
+    """Return True if cuML (RAPIDS) is importable and CUDA is available."""
+    if platform.system() == "Windows":
+        return False  # cuML has no Windows wheels; requires WSL2
+    try:
+        import cuml  # noqa: F401
+        import cupy as cp
+        cp.cuda.runtime.getDeviceCount()  # raises if no CUDA device
+        return True
+    except Exception:
+        return False
+
+
+def _get_gpu_name() -> str | None:
+    """Return GPU name string via nvidia-smi, or None if unavailable."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = result.stdout.strip().splitlines()[0].strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    return None
+
+
+def _print_hardware_banner():
+    """Print a summary of available hardware at startup."""
+    import multiprocessing
+    cpu = platform.processor() or platform.machine()
+    n_cores = multiprocessing.cpu_count()
+    gpu_name = _get_gpu_name()
+    on_windows = platform.system() == "Windows"
+    gpu_accel = _detect_gpu()
+
+    print("=" * 60)
+    print("VIEB  —  Hardware")
+    print(f"  CPU : {cpu} ({n_cores} logical cores)")
+    if gpu_name:
+        print(f"  GPU : {gpu_name}  [CUDA available]")
+        if on_windows:
+            print("        GPU acceleration (cuML) requires WSL2 on Windows")
+        elif gpu_accel:
+            print("        cuML available — GPU acceleration ready for --cluster")
+        else:
+            print("        cuML not installed — install via pip for GPU acceleration")
+    else:
+        print("  GPU : none detected")
+    print("=" * 60)
+    print()
+
 
 
 # Step 1: Feature extraction
@@ -189,9 +250,26 @@ def _hmm_viterbi(obs: np.ndarray, prior, A, B, n_states: int) -> np.ndarray:
 
 def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50):
     import joblib
-    import umap as umap_lib
-    import hdbscan as hdbscan_lib
     from ml import BehaviorPreprocessor
+
+    if _detect_gpu():
+        use_gpu = True
+    else:
+        use_gpu = False
+        if platform.system() == "Windows":
+            print("[GPU] Running on CPU (cuML requires WSL2 on Windows).")
+        else:
+            print("[GPU] Running on CPU (cuML not available).")
+
+    if use_gpu:
+        from cuml.manifold import UMAP as UMAPClass
+        from cuml.cluster import HDBSCAN as HDBSCANClass
+        print("[GPU] Using cuML UMAP + HDBSCAN")
+    else:
+        import umap as umap_lib
+        import hdbscan as hdbscan_lib
+        UMAPClass = umap_lib.UMAP
+        HDBSCANClass = hdbscan_lib.HDBSCAN
 
     index_path = "results/features/index.json"
     if not os.path.exists(index_path):
@@ -210,7 +288,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     boundaries = {}
     cursor = 0
     for stem in stems:
-        feat = np.load(index[stem]["features_path"])
+        feat = np.load(index[stem]["features_path"].replace("\\", "/"))
         boundaries[stem] = (cursor, cursor + len(feat))
         cursor += len(feat)
         all_features.append(feat)
@@ -238,28 +316,34 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         fit_data = pooled_scaled
         print(f"  Fitting on all {n_total:,} frames...")
 
-    reducer = umap_lib.UMAP(
-        n_components=10,
-        n_neighbors=30,
-        min_dist=0.0,
-        random_state=42,
-        low_memory=True,
-        verbose=True,
-    )
+    umap_kwargs = dict(n_components=10, n_neighbors=30, min_dist=0.0, random_state=42)
+    if not use_gpu:
+        umap_kwargs.update(low_memory=True, verbose=True)
+    reducer = UMAPClass(**umap_kwargs)
     reducer.fit(fit_data)
     pooled_umap = reducer.transform(pooled_scaled)
+    if hasattr(pooled_umap, "to_numpy"):
+        pooled_umap = pooled_umap.to_numpy()
+    elif hasattr(pooled_umap, "get"):
+        pooled_umap = pooled_umap.get()
+    pooled_umap = np.asarray(pooled_umap, dtype=np.float32)
     joblib.dump(reducer, "results/shared/umap_reducer.pkl")
     print(f"  UMAP embedding: {pooled_umap.shape}")
 
     # ---- HDBSCAN clustering ----
     print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size})...")
-    clusterer_model = hdbscan_lib.HDBSCAN(
+    clusterer_model = HDBSCANClass(
         min_cluster_size=min_cluster_size,
         min_samples=10,
         cluster_selection_method="eom",
     )
     clusterer_model.fit(pooled_umap)
-    all_raw_labels = clusterer_model.labels_.astype(np.int32)  # -1 = noise
+    raw_labels = clusterer_model.labels_
+    if hasattr(raw_labels, "to_numpy"):   # cuML returns a cuDF Series
+        raw_labels = raw_labels.to_numpy()
+    elif hasattr(raw_labels, "get"):      # cupy array
+        raw_labels = raw_labels.get()
+    all_raw_labels = np.asarray(raw_labels, dtype=np.int32)  # -1 = noise
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
     print(f"  Behavioral states discovered: {n_found}")
@@ -617,11 +701,12 @@ def _identify_freeze_state(n_clusters: int) -> int:
 
     for stem, info in index.items():
         labels_path = f"results/shared/{stem}_labels.npy"
-        if not os.path.exists(labels_path) or not os.path.exists(info["features_path"]):
+        feat_path = info["features_path"].replace("\\", "/")
+        if not os.path.exists(labels_path) or not os.path.exists(feat_path):
             continue
         labels = np.load(labels_path)
         # First 8 features are per-keypoint speeds
-        feats = np.load(info["features_path"])[:, :8].astype(np.float64)
+        feats = np.load(feat_path)[:, :8].astype(np.float64)
         if feats.shape[0] != len(labels):
             continue
         for k in range(n_clusters):
@@ -753,6 +838,8 @@ def main():
     if not any([args.extract, args.cluster, args.report, args.summarize]):
         parser.print_help()
         sys.exit(1)
+
+    _print_hardware_banner()
 
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
