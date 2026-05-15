@@ -91,7 +91,7 @@ def _print_hardware_banner():
 
 def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     from ml import PoseFeatureExtractor
-    from main import load_pose, _find_dlc_csv
+    from pose_io import load_pose, _find_dlc_csv
 
     videos = sorted(glob.glob("raw_videos/*.mp4"))
     if not videos:
@@ -680,132 +680,33 @@ def cmd_report(fps: float = 30.0):
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Per-animal scalar summary
+# Step 4: Per-animal scalar summary (delegates to quantify.py)
 # ---------------------------------------------------------------------------
-
-def _identify_freeze_state(n_clusters: int) -> int:
-    """
-    Return the cluster ID with the lowest mean speed across all keypoints.
-
-    Uses speed features (first 8 columns = per-keypoint speed) from the
-    saved feature files, avoiding a full reload of all data.
-    """
-    index_path = "results/features/index.json"
-    if not os.path.exists(index_path):
-        sys.exit("No feature index found. Run --extract first.")
-    with open(index_path) as f:
-        index = json.load(f)
-
-    speed_sum = np.zeros(n_clusters, dtype=np.float64)
-    speed_cnt = np.zeros(n_clusters, dtype=np.float64)
-
-    for stem, info in index.items():
-        labels_path = f"results/shared/{stem}_labels.npy"
-        feat_path = info["features_path"].replace("\\", "/")
-        if not os.path.exists(labels_path) or not os.path.exists(feat_path):
-            continue
-        labels = np.load(labels_path)
-        # First 8 features are per-keypoint speeds
-        feats = np.load(feat_path)[:, :8].astype(np.float64)
-        if feats.shape[0] != len(labels):
-            continue
-        for k in range(n_clusters):
-            mask = labels == k
-            if mask.any():
-                speed_sum[k] += feats[mask].mean(axis=1).sum()
-                speed_cnt[k] += mask.sum()
-
-    mean_speed = np.where(speed_cnt > 0, speed_sum / speed_cnt, np.inf)
-    freeze_state = int(np.argmin(mean_speed))
-    print(f"  Mean speed per cluster: "
-          + ", ".join(f"S{k}={mean_speed[k]:.2f}" for k in range(n_clusters)))
-    print(f"  → Freeze state identified: State {freeze_state}")
-    return freeze_state
-
 
 def cmd_summarize():
     """
-    Per-animal scalar summary:
-      - AUC of freeze-state occupancy across days (trapezoidal rule)
-      - Mean discrimination ratio: (freeze_A - freeze_B) / (freeze_A + freeze_B)
+    Deprecated thin wrapper — delegates to quantify.py build_master_table().
 
-    The freeze state is identified automatically as the cluster with the
-    lowest mean keypoint speed.
-
-    Output: results/comparison/animal_scalars.csv
+    Kept for CLI backwards compatibility. Prefer:
+        python quantify.py --build
     """
-    summary_path = "results/comparison/summary_table.csv"
-    if not os.path.exists(summary_path):
-        sys.exit("summary_table.csv not found. Run --report first.")
+    print("NOTE: --summarize now delegates to quantify.py build_master_table().")
+    print("      For the full master table, run: python quantify.py --build")
+    print()
+    try:
+        from quantify import build_master_table
+        build_master_table()
+    except ImportError:
+        sys.exit("[ERROR] quantify.py not found in project directory.")
 
-    for path in ["results/shared/cluster_info.json"]:
-        if not os.path.exists(path):
-            sys.exit(f"Missing {path}. Run --cluster first.")
 
-    with open("results/shared/cluster_info.json") as f:
-        cluster_info = json.load(f)
-    n_clusters = cluster_info["n_clusters"]
-
-    df = pd.read_csv(summary_path)
-    required = {"animal_id", "day", "context"}
-    missing = required - set(df.columns)
-    if missing:
-        sys.exit(f"summary_table.csv is missing columns: {missing}")
-
-    print("Identifying freeze state (lowest mean speed)...")
-    freeze_state = _identify_freeze_state(n_clusters)
-    freeze_col = f"state_{freeze_state}_frac"
-
-    if freeze_col not in df.columns:
-        sys.exit(f"Column '{freeze_col}' not found in summary_table.csv.")
-
-    rows = []
-    for animal_id, group in df.groupby("animal_id"):
-        if pd.isna(animal_id):
-            continue
-
-        # AUC of freeze-state occupancy across days
-        group_sorted = group.dropna(subset=["day", freeze_col]).sort_values("day")
-        if len(group_sorted) >= 2:
-            auc = float(np.trapz(group_sorted[freeze_col].values,
-                                 group_sorted["day"].values))
-        elif len(group_sorted) == 1:
-            auc = float(group_sorted[freeze_col].iloc[0])
-        else:
-            auc = float("nan")
-
-        # Discrimination ratio per day: (freeze_A - freeze_B) / (freeze_A + freeze_B)
-        disc_ratios = []
-        for day, day_group in group.groupby("day"):
-            ctx_means = (
-                day_group.dropna(subset=["context", freeze_col])
-                         .groupby("context")[freeze_col].mean()
-            )
-            if "A" in ctx_means.index and "B" in ctx_means.index:
-                fa, fb = ctx_means["A"], ctx_means["B"]
-                denom = fa + fb
-                if denom > 0:
-                    disc_ratios.append((fa - fb) / denom)
-
-        mean_disc = float(np.mean(disc_ratios)) if disc_ratios else float("nan")
-
-        rows.append({
-            "animal_id": animal_id,
-            "freeze_state": freeze_state,
-            "freeze_auc": round(auc, 4),
-            "mean_discrimination_ratio": round(mean_disc, 4) if not np.isnan(mean_disc) else float("nan"),
-            "n_sessions": len(group),
-            "n_days": int(group["day"].nunique()),
-        })
-
-    if not rows:
-        sys.exit("No animals found with valid data in summary_table.csv.")
-
-    os.makedirs("results/comparison", exist_ok=True)
-    out = pd.DataFrame(rows).sort_values("animal_id")
-    out.to_csv("results/comparison/animal_scalars.csv", index=False)
-    print(f"\nSaved: results/comparison/animal_scalars.csv  ({len(out)} animals)")
-    print(f"\n{out.to_string(index=False)}")
+def cmd_quantify(cohort: str | None = None):
+    """Build master_table.csv via quantify.py."""
+    try:
+        from quantify import build_master_table
+        build_master_table(cohort_path=cohort)
+    except ImportError:
+        sys.exit("[ERROR] quantify.py not found in project directory.")
 
 
 # ---------------------------------------------------------------------------
@@ -825,7 +726,9 @@ def main():
     parser.add_argument("--report", action="store_true",
                         help="Generate comparison plots using metadata.csv")
     parser.add_argument("--summarize", action="store_true",
-                        help="Per-animal AUC + discrimination ratio (requires --report output)")
+                        help="[deprecated] Use --quantify instead")
+    parser.add_argument("--quantify", action="store_true",
+                        help="Build master_table.csv with all per-animal scalars")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--n-clusters", type=int, default=None,
                         help="(ignored for HDBSCAN — kept for CLI compatibility)")
@@ -833,9 +736,11 @@ def main():
                         help="HDBSCAN min_cluster_size (default: 50)")
     parser.add_argument("--no-wavelets", action="store_true",
                         help="Skip Morlet wavelet features during --extract (faster)")
+    parser.add_argument("--cohort", metavar="FILE", default=None,
+                        help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     args = parser.parse_args()
 
-    if not any([args.extract, args.cluster, args.report, args.summarize]):
+    if not any([args.extract, args.cluster, args.report, args.summarize, args.quantify]):
         parser.print_help()
         sys.exit(1)
 
@@ -849,6 +754,8 @@ def main():
         cmd_report(fps=args.fps)
     if args.summarize:
         cmd_summarize()
+    if args.quantify:
+        cmd_quantify(cohort=args.cohort)
 
 
 if __name__ == "__main__":

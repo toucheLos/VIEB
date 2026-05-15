@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>VIEB — Video Interpreter for Experimental Behavior</title>
+  <meta name="viewport" content="width=1480"/>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+
+  <link rel="stylesheet" href="styles.css"/>
+
+  <style>
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script src="data.js"></script>
+
+  <script type="text/babel" src="charts.jsx"></script>
+  <script type="text/babel" src="views-a.jsx"></script>
+  <script type="text/babel" src="views-b.jsx"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const NAV = [
+      { key: 'overview',    icon: '⊞', label: 'Overview' },
+      { key: 'pipeline',    icon: '▶', label: 'Pipeline' },
+      { key: 'browse',      icon: '▣', label: 'Browse States' },
+      { key: 'validation',  icon: '✓', label: 'Validation' },
+      { key: 'quant',       icon: '∑', label: 'Quantification' },
+      { key: 'advanced',    icon: '⚙', label: 'Advanced' },
+      { key: 'settings',    icon: '≡', label: 'Settings' }
+    ];
+
+    function App() {
+      const [route, setRoute] = useState(() => {
+        try { return localStorage.getItem('vieb_route') || 'overview'; } catch(e) { return 'overview'; }
+      });
+
+      useEffect(() => {
+        try { localStorage.setItem('vieb_route', route); } catch(e) {}
+      }, [route]);
+
+      const pipelineRunning = window.VIEB_DATA.pipeline.some(s => s.status === 'running');
+
+      return (
+        <div className="window-stage">
+          <div className="app-window" data-screen-label="VIEB Desktop App">
+            <div className="titlebar">
+              <div className="traffic">
+                <span className="dot close"></span>
+                <span className="dot min"></span>
+                <span className="dot max"></span>
+              </div>
+              <div className="titlebar-title">VIEB — FearCond_2026_Q2</div>
+              <div className="titlebar-meta">v0.9.4-dev</div>
+            </div>
+
+            <div className="app-body">
+              <aside className="sidebar">
+                <div className="sidebar-brand">
+                  <span className="logo">VIEB</span>
+                  <span className="ver">v0.9.4</span>
+                </div>
+                <div className="sidebar-section-label">Workspace</div>
+                <nav className="sidebar-nav">
+                  {NAV.map(n => (
+                    <div key={n.key}
+                         className={`nav-item ${route === n.key ? 'active' : ''}`}
+                         data-screen-label={n.label}
+                         onClick={() => setRoute(n.key)}>
+                      <span className="nav-icon">{n.icon}</span>
+                      <span>{n.label}</span>
+                    </div>
+                  ))}
+                </nav>
+                <div className="sidebar-footer">
+                  Project<br/>
+                  <span style={{color:'var(--text-secondary)'}}>FearCond_2026_Q2</span><br/>
+                  <span style={{opacity:0.7}}>22 animals · 12 days</span>
+                </div>
+              </aside>
+
+              <main className="main">
+                <div className="view-scroll">
+                  {route === 'overview'    && <OverviewView navigate={setRoute}/>}
+                  {route === 'pipeline'    && <PipelineView/>}
+                  {route === 'browse'      && <BrowseStatesView/>}
+                  {route === 'validation'  && <ValidationView/>}
+                  {route === 'quant'       && <QuantificationView/>}
+                  {route === 'advanced'    && <AdvancedView/>}
+                  {route === 'settings'    && <SettingsView/>}
+                </div>
+                <div className="statusbar">
+                  <div className="left">
+                    <span>Last run: 16:11:08 · Cohort Aggregation</span>
+                  </div>
+                  <div className="center">
+                    <span>Videos: 222</span><span className="sep">·</span>
+                    <span>States: 61</span><span className="sep">·</span>
+                    <span>Noise: 57.8%</span>
+                  </div>
+                  <div className="right">
+                    <span style={{color: pipelineRunning ? 'var(--success)' : 'var(--text-tertiary)'}}>
+                      {pipelineRunning ? 'pipeline running' : 'idle'}
+                    </span>
+                    <span className={`dot-status ${pipelineRunning ? 'running' : ''}`}></span>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>
