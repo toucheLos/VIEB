@@ -269,7 +269,38 @@ def build_occupancy_scalars(summary, dominant_id):
     return pd.DataFrame(rows)
 
 
-def build_master_table(cohort_path=None, out_dir=_OUT):
+def _recompute_fracs_with_confidence(summary: pd.DataFrame, min_confidence: float) -> pd.DataFrame:
+    """Recompute per-session state fractions using _labels.npy + _probs.npy files."""
+    state_cols = _state_cols(summary)
+    if not state_cols:
+        return summary
+    n_clusters = len(state_cols)
+    rows_out = []
+    for _, row in summary.iterrows():
+        stem = row.get("stem")
+        if not stem:
+            rows_out.append(row)
+            continue
+        lbl_path = _SHARED / f"{stem}_labels.npy"
+        prob_path = _SHARED / f"{stem}_probs.npy"
+        if not lbl_path.exists():
+            rows_out.append(row)
+            continue
+        labels = np.load(str(lbl_path))
+        if prob_path.exists():
+            probs = np.load(str(prob_path))
+            valid = (labels >= 0) & (probs >= min_confidence)
+        else:
+            valid = labels >= 0
+        denom = int(valid.sum())
+        new_row = row.copy()
+        for k, col in enumerate(state_cols):
+            new_row[col] = float((labels[valid] == k).sum() / denom) if denom > 0 else 0.0
+        rows_out.append(new_row)
+    return pd.DataFrame(rows_out)
+
+
+def build_master_table(cohort_path=None, out_dir=_OUT, min_confidence: float = 0.0):
     """Assemble all per-animal scalars into master_table.csv."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +308,10 @@ def build_master_table(cohort_path=None, out_dir=_OUT):
     print("Loading pipeline outputs...")
     summary = _require(_COMP / "summary_table.csv",
                        "Run: python compare.py --extract --cluster --report")
+
+    if min_confidence > 0.0:
+        print(f"  Applying min-confidence filter: {min_confidence}")
+        summary = _recompute_fracs_with_confidence(summary, min_confidence)
     cluster_info = _load_cluster_info()
     cohort = _load_cohort(cohort_path)
 
@@ -863,6 +898,124 @@ def run_jess_correlation(master_table_csv, jess_csv, output_dir):
         ["behavioral_var", "jess_protein", "pearson_r", "pearson_p"]
     ].to_string(index=False))
     return result
+
+
+# ---------------------------------------------------------------------------
+# State learning rates across conditioning days
+# ---------------------------------------------------------------------------
+
+def compute_state_learning_rates(
+    summary_csv: str,
+    output_dir: str = "results/quantification",
+    cohort_csv: str = None,
+) -> "pd.DataFrame":
+    """
+    For each animal and each non-dominant state, compute the rate of change of
+    state occupancy across conditioning days (Context A sessions only).
+
+    Method: linear regression of state_k_frac against day number.
+    Requires at least 3 days of data per animal; animals with fewer get NaN.
+
+    Returns DataFrame with one row per animal.
+    Saves: results/quantification/learning_rates.csv
+    """
+    from scipy.stats import linregress
+
+    summary = pd.read_csv(summary_csv)
+    summary["animal_id"] = summary["animal_id"].astype(str)
+
+    cluster_info = _load_cluster_info()
+    dominant_id = _dominant_state_id(summary, cluster_info)
+    sc = [c for c in _state_cols(summary) if int(c.split("_")[1]) != dominant_id]
+
+    col = _ctx_col(summary)
+    if col is None:
+        print("[WARN] No context column found — cannot compute learning rates.")
+        return pd.DataFrame()
+
+    ctx_A = [v for v in summary[col].dropna().astype(str).unique() if v.upper().startswith("A")]
+    ctx_B = [v for v in summary[col].dropna().astype(str).unique() if v.upper().startswith("B")]
+    a_data = summary[summary[col].isin(ctx_A)]
+    b_data = summary[summary[col].isin(ctx_B)]
+
+    # Identify fear-relevant states: higher mean in A vs B
+    if sc:
+        mean_A = a_data[sc].mean() if not a_data.empty else pd.Series(0, index=sc)
+        mean_B = b_data[sc].mean() if not b_data.empty else pd.Series(0, index=sc)
+        fear_states = [c for c in sc if mean_A.get(c, 0) > mean_B.get(c, 0) * 1.1]
+        if not fear_states:
+            fear_states = sc[:3]
+    else:
+        fear_states = []
+
+    rows = []
+    for animal_id, grp in a_data.groupby("animal_id"):
+        grp = grp.dropna(subset=["day"])
+        days = grp["day"].values.astype(float)
+
+        if len(grp) < 3:
+            row = {"animal_id": animal_id,
+                   "fear_learning_rate": float("nan"),
+                   "fear_learning_r2": float("nan")}
+            rows.append(row)
+            continue
+
+        # Fear learning rate
+        if fear_states:
+            fear_occ = grp[fear_states].sum(axis=1).values
+        else:
+            fear_occ = np.zeros(len(grp))
+
+        if len(set(days)) >= 2 and not np.all(np.isnan(fear_occ)):
+            slope, _, r, _, _ = linregress(days, np.nan_to_num(fear_occ))
+            r2 = r ** 2
+        else:
+            slope = r2 = float("nan")
+
+        row = {"animal_id": animal_id,
+               "fear_learning_rate": round(float(slope), 6) if not np.isnan(slope) else float("nan"),
+               "fear_learning_r2": round(float(r2), 4) if not np.isnan(r2) else float("nan")}
+
+        for c in sc:
+            vals = grp[c].values
+            if len(set(days)) >= 2 and not np.all(np.isnan(vals)):
+                s, _, r_val, _, _ = linregress(days, np.nan_to_num(vals))
+                row[f"{c}_slope"] = round(float(s), 6)
+                row[f"{c}_r2"] = round(float(r_val ** 2), 4)
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows).set_index("animal_id")
+
+    if cohort_csv:
+        ext = os.path.splitext(cohort_csv)[1].lower()
+        if ext in (".xlsx", ".xls"):
+            from cohort_loader import load_cohort_excel
+            cohort = load_cohort_excel(cohort_csv)
+        else:
+            cohort = pd.read_csv(cohort_csv)
+        cohort["animal_id"] = cohort["animal_id"].astype(str)
+        id_cols = [c for c in ["cohort_label", "sex", "age_group", "treatment"]
+                   if c in cohort.columns]
+        df = df.join(cohort.set_index("animal_id")[id_cols], how="left")
+
+        print("\nFear learning rate by cohort:")
+        if "cohort_label" in df.columns:
+            for label, grp in df.groupby("cohort_label"):
+                vals = grp["fear_learning_rate"].dropna()
+                if len(vals) > 0:
+                    se = vals.std() / np.sqrt(len(vals))
+                    print(f"  {str(label):40s} "
+                          f"{float(vals.mean()):+.4f}/day "
+                          f"± {float(se):.4f} (n={len(vals)})")
+        print("\n  Positive slope = fear behavior increasing across days")
+        print("  Negative slope = fear behavior decreasing (extinction)")
+
+    out_path = os.path.join(output_dir, "learning_rates.csv")
+    os.makedirs(output_dir, exist_ok=True)
+    df.reset_index().to_csv(out_path, index=False)
+    print(f"\nSaved: {out_path}")
+    return df
 
 
 # ---------------------------------------------------------------------------

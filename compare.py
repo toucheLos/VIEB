@@ -248,7 +248,78 @@ def _hmm_viterbi(obs: np.ndarray, prior, A, B, n_states: int) -> np.ndarray:
 # Step 2: Shared clustering (UMAP + HDBSCAN)
 # ---------------------------------------------------------------------------
 
-def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10):
+def _run_validation_report(
+    stems, train_stems, test_stems, boundaries,
+    smoothed_labels_all, probs_all, n_found, min_cluster_size,
+):
+    """Compute and print train/test state distribution comparison."""
+    stem_to_idx = {s: i for i, s in enumerate(stems)}
+    train_set = set(train_stems)
+    test_set  = set(test_stems)
+
+    def _per_video_fracs(stem_set):
+        fracs = []
+        for s in stem_set:
+            i = stem_to_idx[s]
+            lbl = smoothed_labels_all[i]
+            row = []
+            for k in range(n_found):
+                row.append(float((lbl == k).sum()) / max(1, len(lbl)))
+            fracs.append(row)
+        return np.array(fracs) if fracs else np.zeros((0, n_found))
+
+    train_fracs = _per_video_fracs(train_set)
+    test_fracs  = _per_video_fracs(test_set)
+
+    train_mean = train_fracs.mean(axis=0) if len(train_fracs) else np.zeros(n_found)
+    test_mean  = test_fracs.mean(axis=0)  if len(test_fracs)  else np.zeros(n_found)
+    deltas = np.abs(train_mean - test_mean)
+    mean_delta = float(deltas.mean())
+    generalization = round(1.0 - mean_delta, 4)
+
+    if generalization >= 0.9:
+        quality = "excellent"
+    elif generalization >= 0.8:
+        quality = "good"
+    else:
+        quality = "poor"
+
+    print(f"\n=== Clustering Validation (Train/Test Split) ===")
+    print(f"Train videos: {len(train_stems)}  Test videos: {len(test_stems)}")
+    n_train_fr = sum(boundaries[s][1] - boundaries[s][0] for s in train_stems)
+    n_test_fr  = sum(boundaries[s][1] - boundaries[s][0] for s in test_stems)
+    print(f"Train frames: {n_train_fr:,}  Test frames: {n_test_fr:,}")
+    print(f"\nState distribution comparison:")
+    print(f"{'State':>6} | {'Train%':>7} | {'Test%':>6} | {'Delta':>6}")
+    print("-" * 36)
+    per_state_delta = {}
+    for k in range(n_found):
+        tr = train_mean[k] * 100
+        te = test_mean[k] * 100
+        d  = deltas[k] * 100
+        per_state_delta[str(k)] = round(float(deltas[k]), 6)
+        print(f"  {k:>4} | {tr:>6.1f}% | {te:>5.1f}% | {d:>5.1f}%")
+    print(f"\nMean delta: {mean_delta * 100:.1f}%")
+    print(f"Generalization score: {generalization:.3f} ({quality})")
+
+    if generalization < 0.8:
+        print(f"\nWARNING: clustering may not generalize well.")
+        print(f"Try increasing --min-cluster-size.")
+
+    report = {
+        "generalization_score": generalization,
+        "train_stems": sorted(train_stems),
+        "test_stems":  sorted(test_stems),
+        "per_state_delta": per_state_delta,
+        "mean_delta": round(mean_delta, 6),
+    }
+    os.makedirs("results/shared", exist_ok=True)
+    with open("results/shared/validation_report.json", "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"\nValidation report saved: results/shared/validation_report.json")
+
+
+def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10, validate: bool = False):
     import joblib
     from ml import BehaviorPreprocessor
 
@@ -283,6 +354,21 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
 
     # ---- Load all feature matrices ----
     stems = sorted(index.keys())
+
+    # ---- Train/test split (video-level, not frame-level) ----
+    if validate:
+        rng_split = np.random.default_rng(42)
+        shuffled = rng_split.permutation(len(stems)).tolist()
+        n_train = int(len(stems) * 0.8)
+        train_stems = sorted([stems[i] for i in shuffled[:n_train]])
+        test_stems  = sorted([stems[i] for i in shuffled[n_train:]])
+        print(f"\n=== Clustering Validation (Train/Test Split) ===")
+        print(f"Train videos: {len(train_stems)}  Test videos: {len(test_stems)}")
+        print(f"Test set stems: {test_stems}")
+    else:
+        train_stems = stems
+        test_stems  = []
+
     print(f"Loading features from {len(stems)} videos...")
     all_features = []
     boundaries = {}
@@ -299,7 +385,18 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     # ---- Standardize (no PCA — UMAP handles reduction) ----
     print("\nFitting shared standardizer...")
     preprocessor = BehaviorPreprocessor(use_pca=False)
-    pooled_scaled = preprocessor.fit_transform(pooled)
+
+    if validate:
+        # Fit only on train frames
+        train_indices = np.concatenate([
+            np.arange(boundaries[s][0], boundaries[s][1]) for s in train_stems
+        ])
+        train_frames = pooled[train_indices]
+        preprocessor.fit(train_frames)
+        pooled_scaled = preprocessor.transform(pooled)
+    else:
+        pooled_scaled = preprocessor.fit_transform(pooled)
+
     preprocessor.save("results/shared/preprocessor.pkl")
     print(f"  Standardized to {pooled_scaled.shape[1]} features")
 
@@ -313,23 +410,48 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
                 print(f"  [info] Saved UMAP reducer has different n_components; refitting with {umap_dims}.")
         except Exception:
             pass
-    n_total = pooled_scaled.shape[0]
-    n_sample = min(200_000, n_total)
-    if n_total > n_sample:
-        rng = np.random.default_rng(42)
-        sample_idx = np.sort(rng.choice(n_total, n_sample, replace=False))
-        fit_data = pooled_scaled[sample_idx]
-        print(f"  Fitting on {n_sample:,}-frame sample, then transforming all {n_total:,}...")
-    else:
-        fit_data = pooled_scaled
-        print(f"  Fitting on all {n_total:,} frames...")
 
-    umap_kwargs = dict(n_components=umap_dims, n_neighbors=30, min_dist=0.0, random_state=42)
-    if not use_gpu:
-        umap_kwargs.update(low_memory=True, verbose=True)
-    reducer = UMAPClass(**umap_kwargs)
-    reducer.fit(fit_data)
-    pooled_umap = reducer.transform(pooled_scaled)
+    if validate:
+        # Fit UMAP on train frames only
+        train_scaled = pooled_scaled[train_indices]
+        n_train_frames = len(train_scaled)
+        n_sample = min(200_000, n_train_frames)
+        if n_train_frames > n_sample:
+            rng = np.random.default_rng(42)
+            sample_idx = np.sort(rng.choice(n_train_frames, n_sample, replace=False))
+            fit_data = train_scaled[sample_idx]
+            print(f"  Fitting UMAP on {n_sample:,}-frame train sample...")
+        else:
+            fit_data = train_scaled
+            print(f"  Fitting UMAP on {n_train_frames:,} train frames...")
+        umap_kwargs = dict(n_components=umap_dims, n_neighbors=30, min_dist=0.0, random_state=42)
+        if not use_gpu:
+            umap_kwargs.update(low_memory=True, verbose=False)
+        reducer = UMAPClass(**umap_kwargs)
+        reducer.fit(fit_data)
+        # Transform all frames (train + test) through the fitted UMAP
+        pooled_umap = reducer.transform(pooled_scaled)
+        train_n_frames = int(sum(boundaries[s][1] - boundaries[s][0] for s in train_stems))
+        test_n_frames  = int(sum(boundaries[s][1] - boundaries[s][0] for s in test_stems))
+        print(f"  Train frames: {train_n_frames:,}  Test frames: {test_n_frames:,}")
+    else:
+        n_total = pooled_scaled.shape[0]
+        n_sample = min(200_000, n_total)
+        if n_total > n_sample:
+            rng = np.random.default_rng(42)
+            sample_idx = np.sort(rng.choice(n_total, n_sample, replace=False))
+            fit_data = pooled_scaled[sample_idx]
+            print(f"  Fitting on {n_sample:,}-frame sample, then transforming all {n_total:,}...")
+        else:
+            fit_data = pooled_scaled
+            print(f"  Fitting on all {n_total:,} frames...")
+        umap_kwargs = dict(n_components=umap_dims, n_neighbors=30, min_dist=0.0, random_state=42)
+        if not use_gpu:
+            umap_kwargs.update(low_memory=True, verbose=True)
+        reducer = UMAPClass(**umap_kwargs)
+        reducer.fit(fit_data)
+        pooled_umap = reducer.transform(pooled_scaled)
+
     if hasattr(pooled_umap, "to_numpy"):
         pooled_umap = pooled_umap.to_numpy()
     elif hasattr(pooled_umap, "get"):
@@ -341,22 +463,118 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     # ---- HDBSCAN clustering ----
     effective_min_samples = min_samples if min_samples is not None else min_cluster_size
     print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={effective_min_samples})...")
-    clusterer_model = HDBSCANClass(
-        min_cluster_size=min_cluster_size,
-        min_samples=effective_min_samples,
-        cluster_selection_method="eom",
-    )
-    clusterer_model.fit(pooled_umap)
-    raw_labels = clusterer_model.labels_
-    if hasattr(raw_labels, "to_numpy"):   # cuML returns a cuDF Series
-        raw_labels = raw_labels.to_numpy()
-    elif hasattr(raw_labels, "get"):      # cupy array
-        raw_labels = raw_labels.get()
-    all_raw_labels = np.asarray(raw_labels, dtype=np.int32)  # -1 = noise
+
+    if validate:
+        # Fit HDBSCAN on train frames only
+        train_umap = pooled_umap[train_indices]
+        clusterer_model = HDBSCANClass(
+            min_cluster_size=min_cluster_size,
+            min_samples=effective_min_samples,
+            cluster_selection_method="eom",
+        )
+        clusterer_model.fit(train_umap)
+        train_raw_labels = clusterer_model.labels_
+        if hasattr(train_raw_labels, "to_numpy"):
+            train_raw_labels = train_raw_labels.to_numpy()
+        elif hasattr(train_raw_labels, "get"):
+            train_raw_labels = train_raw_labels.get()
+        train_raw_labels = np.asarray(train_raw_labels, dtype=np.int32)
+
+        # Assign test frames using approximate_predict (CPU) or transform (GPU)
+        test_indices = np.concatenate([
+            np.arange(boundaries[s][0], boundaries[s][1]) for s in test_stems
+        ]) if test_stems else np.array([], dtype=np.int64)
+
+        if len(test_indices) > 0:
+            test_umap = pooled_umap[test_indices]
+            if use_gpu:
+                try:
+                    test_result = clusterer_model.transform(test_umap)
+                    if hasattr(test_result, "to_numpy"):
+                        test_result = test_result.to_numpy()
+                    elif hasattr(test_result, "get"):
+                        test_result = test_result.get()
+                    test_raw_labels = np.asarray(test_result[:, 0] if test_result.ndim > 1 else test_result, dtype=np.int32)
+                    test_probs = np.ones(len(test_raw_labels), dtype=np.float32)
+                    test_probs[test_raw_labels < 0] = 0.0
+                except Exception:
+                    test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
+                    test_probs = np.zeros(len(test_indices), dtype=np.float32)
+            else:
+                try:
+                    from hdbscan import approximate_predict
+                    test_raw_labels, test_probs = approximate_predict(clusterer_model, test_umap)
+                    test_raw_labels = np.asarray(test_raw_labels, dtype=np.int32)
+                    test_probs = np.asarray(test_probs, dtype=np.float32)
+                except Exception as e:
+                    print(f"  [WARN] approximate_predict failed: {e}. Using noise labels for test.")
+                    test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
+                    test_probs = np.zeros(len(test_indices), dtype=np.float32)
+        else:
+            test_raw_labels = np.array([], dtype=np.int32)
+            test_probs = np.array([], dtype=np.float32)
+
+        # Build pooled labels array combining train and test
+        all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
+        all_raw_labels[train_indices] = train_raw_labels
+        if len(test_indices) > 0:
+            all_raw_labels[test_indices] = test_raw_labels
+
+        # Train probabilities from clusterer
+        train_probs_raw = getattr(clusterer_model, "probabilities_", None)
+        if train_probs_raw is not None:
+            if hasattr(train_probs_raw, "to_numpy"):
+                train_probs_raw = train_probs_raw.to_numpy()
+            elif hasattr(train_probs_raw, "get"):
+                train_probs_raw = train_probs_raw.get()
+            train_probs_raw = np.asarray(train_probs_raw, dtype=np.float32)
+        else:
+            train_probs_raw = np.where(train_raw_labels >= 0, 1.0, 0.0).astype(np.float32)
+
+        all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
+        all_probs[train_indices] = train_probs_raw
+        if len(test_indices) > 0:
+            all_probs[test_indices] = test_probs
+
+    else:
+        clusterer_model = HDBSCANClass(
+            min_cluster_size=min_cluster_size,
+            min_samples=effective_min_samples,
+            cluster_selection_method="eom",
+        )
+        clusterer_model.fit(pooled_umap)
+        raw_labels = clusterer_model.labels_
+        if hasattr(raw_labels, "to_numpy"):
+            raw_labels = raw_labels.to_numpy()
+        elif hasattr(raw_labels, "get"):
+            raw_labels = raw_labels.get()
+        all_raw_labels = np.asarray(raw_labels, dtype=np.int32)
+
+        raw_probs = getattr(clusterer_model, "probabilities_", None)
+        if raw_probs is not None:
+            if hasattr(raw_probs, "to_numpy"):
+                raw_probs = raw_probs.to_numpy()
+            elif hasattr(raw_probs, "get"):
+                raw_probs = raw_probs.get()
+            all_probs = np.asarray(raw_probs, dtype=np.float32)
+        else:
+            all_probs = np.where(all_raw_labels >= 0, 1.0, 0.0).astype(np.float32)
+
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
     print(f"  Behavioral states discovered: {n_found}")
     print(f"  Noise frames: {n_noise:,} ({100 * n_noise / len(all_raw_labels):.1f}%)")
+
+    # ---- Confidence stats ----
+    non_noise_probs = all_probs[all_raw_labels >= 0]
+    if len(non_noise_probs) > 0:
+        mean_conf = float(non_noise_probs.mean())
+        low_conf_frac = float((non_noise_probs < 0.5).sum() / len(non_noise_probs))
+    else:
+        mean_conf = 0.0
+        low_conf_frac = 0.0
+    print(f"  Mean cluster confidence: {mean_conf:.3f}")
+    print(f"  Low confidence frames (<0.5): {100 * low_conf_frac:.1f}%")
 
     if n_found == 0:
         sys.exit("HDBSCAN found no clusters. Try a smaller --min-cluster-size.")
@@ -376,6 +594,8 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         "cluster_centers": cluster_centers,
         "method": "umap+hdbscan",
         "min_cluster_size": min_cluster_size,
+        "mean_confidence": round(mean_conf, 4),
+        "low_confidence_frac": round(low_conf_frac, 4),
     }
     with open("results/shared/cluster_info.json", "w") as f:
         json.dump(cluster_info, f, indent=2)
@@ -383,9 +603,11 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     # ---- Per-video labels (slice from pooled HDBSCAN result) ----
     print(f"\nSlicing per-video labels ({len(stems)} videos)...")
     raw_labels_all = []
+    raw_probs_all = []
     for stem in stems:
         start, end = boundaries[stem]
         raw_labels_all.append(all_raw_labels[start:end])
+        raw_probs_all.append(all_probs[start:end])
 
     # ---- HMM smoothing on non-noise segments ----
     print("\nFitting HMM smoother on non-noise labels...")
@@ -399,9 +621,10 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         print("  Skipping HMM (no valid labels or single cluster)")
         smoothed_labels_all = raw_labels_all
 
-    # ---- Save smoothed labels ----
-    for stem, smoothed in zip(stems, smoothed_labels_all):
+    # ---- Save smoothed labels and probabilities ----
+    for stem, smoothed, probs in zip(stems, smoothed_labels_all, raw_probs_all):
         np.save(f"results/shared/{stem}_labels.npy", smoothed.astype(np.int32))
+        np.save(f"results/shared/{stem}_probs.npy", probs.astype(np.float32))
 
     all_labels = np.concatenate(smoothed_labels_all)
     n_valid_total = int((all_labels >= 0).sum())
@@ -414,6 +637,15 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
 
     print(f"\nShared models → results/shared/")
     print(f"Per-video labels → results/shared/<stem>_labels.npy")
+    print(f"Per-video probabilities → results/shared/<stem>_probs.npy")
+
+    # ---- Validation report ----
+    if validate:
+        _run_validation_report(
+            stems, train_stems, test_stems, boundaries,
+            smoothed_labels_all, raw_probs_all, n_found,
+            min_cluster_size,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +883,7 @@ def _plot_animal_trajectories(df, state_cols, n_clusters):
     print(f"  Saved: {save_path}")
 
 
-def cmd_report(fps: float = 30.0):
+def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     import matplotlib.pyplot as plt
     from scipy import stats
 
@@ -666,6 +898,10 @@ def cmd_report(fps: float = 30.0):
     n_clusters = cluster_info["n_clusters"]
     state_cols = [f"state_{k}_frac" for k in range(n_clusters)]
 
+    if min_confidence > 0.0:
+        print(f"Applying min-confidence filter: {min_confidence} "
+              f"(frames with prob < {min_confidence} excluded from state fractions)")
+
     # Build per-video summary + transition matrices
     rows = []
     trans_rows = []  # flattened transition probabilities per video
@@ -674,9 +910,22 @@ def cmd_report(fps: float = 30.0):
         if not os.path.exists(labels_path):
             continue
         labels = np.load(labels_path)
-        row = {"stem": stem}
-        for k in range(n_clusters):
-            row[f"state_{k}_frac"] = float((labels == k).mean())
+
+        if min_confidence > 0.0:
+            probs_path = f"results/shared/{stem}_probs.npy"
+            if os.path.exists(probs_path):
+                probs = np.load(probs_path)
+                valid = (labels >= 0) & (probs >= min_confidence)
+            else:
+                valid = labels >= 0
+            denom = int(valid.sum())
+            row = {"stem": stem}
+            for k in range(n_clusters):
+                row[f"state_{k}_frac"] = float((labels[valid] == k).sum() / denom) if denom > 0 else 0.0
+        else:
+            row = {"stem": stem}
+            for k in range(n_clusters):
+                row[f"state_{k}_frac"] = float((labels == k).mean())
         rows.append(row)
 
         # Transition matrix
@@ -828,11 +1077,11 @@ def cmd_summarize():
         sys.exit("[ERROR] quantify.py not found in project directory.")
 
 
-def cmd_quantify(cohort: str | None = None):
+def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     """Build master_table.csv via quantify.py."""
     try:
         from quantify import build_master_table, compute_contrast_vector
-        build_master_table(cohort_path=cohort)
+        build_master_table(cohort_path=cohort, min_confidence=min_confidence)
     except ImportError:
         sys.exit("[ERROR] quantify.py not found in project directory.")
 
@@ -858,6 +1107,28 @@ def cmd_quantify(cohort: str | None = None):
             print("contrast_magnitude added to master_table.csv")
     except Exception as e:
         print(f"[WARN] Contrast vector computation failed: {e}")
+
+    print("\nComputing state learning rates...")
+    try:
+        from quantify import compute_state_learning_rates
+        lr_df = compute_state_learning_rates(
+            "results/comparison/summary_table.csv",
+            output_dir="results/quantification",
+            cohort_csv=cohort,
+        )
+        master_path = "results/quantification/master_table.csv"
+        if os.path.exists(master_path) and not lr_df.empty:
+            master = pd.read_csv(master_path)
+            master["animal_id"] = master["animal_id"].astype(str)
+            lr_reset = lr_df.reset_index()
+            lr_reset["animal_id"] = lr_reset["animal_id"].astype(str)
+            keep_cols = ["animal_id", "fear_learning_rate", "fear_learning_r2"]
+            keep_cols = [c for c in keep_cols if c in lr_reset.columns]
+            master = master.merge(lr_reset[keep_cols], on="animal_id", how="left")
+            master.to_csv(master_path, index=False)
+            print("fear_learning_rate added to master_table.csv")
+    except Exception as e:
+        print(f"[WARN] Learning rate computation failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +1166,10 @@ def main():
                         help="UMAP n_components (default: 10). Try 3 for better HDBSCAN performance.")
     parser.add_argument("--no-wavelets", action="store_true",
                         help="Skip Morlet wavelet features during --extract (faster)")
+    parser.add_argument("--validate", action="store_true",
+                        help="With --cluster: run 80/20 train/test split validation (seed=42)")
+    parser.add_argument("--min-confidence", type=float, default=0.0,
+                        help="With --report/--quantify: exclude frames with prob < threshold")
     parser.add_argument("--cohort", metavar="FILE", default=None,
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     args = parser.parse_args()
@@ -909,15 +1184,16 @@ def main():
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
     if args.cluster:
         cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
-                    min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims)
+                    min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
+                    validate=args.validate)
     if args.collapse:
         cmd_collapse(threshold=args.collapse_threshold)
     if args.report:
-        cmd_report(fps=args.fps)
+        cmd_report(fps=args.fps, min_confidence=args.min_confidence)
     if args.summarize:
         cmd_summarize()
     if args.quantify:
-        cmd_quantify(cohort=args.cohort)
+        cmd_quantify(cohort=args.cohort, min_confidence=args.min_confidence)
 
 
 if __name__ == "__main__":

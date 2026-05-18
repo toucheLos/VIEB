@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import os
 from collections import deque
 from pathlib import Path
 
@@ -167,6 +168,137 @@ class VideoPlayer(QWidget):
         if self._cap:
             self._cap.release()
         super().closeEvent(e)
+
+
+class KinematicsPanel(QWidget):
+    """
+    Three time-series panel shown below a video player.
+
+    Shows centroid_speed (blue), angular_velocity (orange), rearing_score (green)
+    normalised 0-1 over the clip's frame range. A vertical red cursor updates
+    at 30fps as the video plays (driven by an external QTimer call to set_frame).
+
+    If features are unavailable the panel hides itself silently.
+    """
+
+    # Feature column indices in the 51/91-feature array
+    _FEAT_SPEED   = 36   # centroid_speed
+    _FEAT_ANGVEL  = 39   # angular_velocity
+    _FEAT_REARING = 41   # rearing_score
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._features = None      # (T_clip, 3) normalised
+        self._n_frames = 0
+        self._cursor_frame = 0
+        self._cursor_line = None
+        self.setMaximumHeight(130)
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(0)
+        if _MPL:
+            self._canvas = FigureCanvas(Figure(figsize=(8, 1.4), tight_layout=True))
+            self._canvas.figure.patch.set_facecolor("#1a1a1a")
+            self._ax = self._canvas.figure.add_subplot(111)
+            self._ax.set_facecolor("#1a1a1a")
+            lay.addWidget(self._canvas)
+        else:
+            self._canvas = None
+            self._ax = None
+            lay.addWidget(QLabel("Install matplotlib for kinematic overlay."))
+
+    def load_clip(self, features_path: str, start_frame: int, end_frame: int):
+        """Load feature slice for a clip and draw the time series."""
+        self._features = None
+        self._n_frames = 0
+        self._cursor_frame = 0
+        if not _MPL or self._ax is None:
+            return
+        if not features_path or not os.path.exists(features_path):
+            self._ax.clear()
+            self._canvas.draw()
+            return
+        try:
+            arr = np.load(features_path)
+            n_total = arr.shape[0]
+            s = max(0, min(start_frame, n_total - 1))
+            e = max(s + 1, min(end_frame, n_total))
+            feat_slice = arr[s:e]
+
+            cols = []
+            for idx in (self._FEAT_SPEED, self._FEAT_ANGVEL, self._FEAT_REARING):
+                if idx < arr.shape[1]:
+                    raw = feat_slice[:, idx].astype(float)
+                    lo, hi = raw.min(), raw.max()
+                    normed = (raw - lo) / (hi - lo + 1e-9)
+                    cols.append(normed)
+                else:
+                    cols.append(np.zeros(len(feat_slice)))
+
+            self._features = np.column_stack(cols)
+            self._n_frames = len(feat_slice)
+        except Exception:
+            self._features = None
+            self._n_frames = 0
+
+        self._redraw()
+
+    def _redraw(self):
+        if not _MPL or self._ax is None:
+            return
+        ax = self._ax
+        ax.clear()
+        ax.set_facecolor("#1a1a1a")
+
+        if self._features is not None and self._n_frames > 0:
+            x = np.arange(self._n_frames)
+            colors = ["#4a90d9", "#e67e22", "#2ecc71"]
+            labels = ["speed", "ang_vel", "rearing"]
+            for i, (color, label) in enumerate(zip(colors, labels)):
+                ax.plot(x, self._features[:, i], color=color, linewidth=0.8,
+                        label=label, alpha=0.9)
+            # Cursor
+            self._cursor_line = ax.axvline(
+                x=self._cursor_frame, color="#e74c3c", linewidth=1.2, alpha=0.85)
+            ax.legend(loc="upper right", fontsize=6, framealpha=0.3,
+                      labelcolor="white", facecolor="#1a1a1a")
+            ax.set_xlim(0, max(1, self._n_frames - 1))
+            ax.set_ylim(-0.05, 1.05)
+        else:
+            ax.text(0.5, 0.5, "Features not available", ha="center", va="center",
+                    color="#666", fontsize=8, transform=ax.transAxes)
+
+        for spine in ax.spines.values():
+            spine.set_color("#333")
+        ax.tick_params(colors="#888", labelsize=6)
+        ax.set_xlabel("Frame", color="#888", fontsize=6)
+
+        self._canvas.figure.tight_layout(pad=0.2)
+        self._canvas.draw()
+
+    def set_frame(self, frame_idx: int):
+        """Update cursor position — called by QTimer at ~30fps."""
+        if self._features is None or self._n_frames == 0:
+            return
+        frame_idx = max(0, min(frame_idx, self._n_frames - 1))
+        if frame_idx == self._cursor_frame:
+            return
+        self._cursor_frame = frame_idx
+        if self._cursor_line is not None:
+            self._cursor_line.set_xdata([frame_idx, frame_idx])
+            self._canvas.draw_idle()
+
+    def clear(self):
+        self._features = None
+        self._n_frames = 0
+        self._cursor_frame = 0
+        self._cursor_line = None
+        if _MPL and self._ax:
+            self._ax.clear()
+            self._canvas.draw()
 
 
 class _Card(QFrame):

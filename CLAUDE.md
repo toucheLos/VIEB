@@ -43,9 +43,13 @@ python compare.py --extract              # Extract features → results/features
 python compare.py --extract --no-wavelets  # Skip Morlet wavelets (faster, 51 features instead of 91)
 python compare.py --cluster              # UMAP+HDBSCAN, HMM-smooth → results/shared/
 python compare.py --cluster --min-cluster-size 30  # Tune HDBSCAN (default 50)
+python compare.py --cluster --validate   # Train/test split validation (80/20, seed=42)
 python compare.py --report               # Comparison plots + CSVs → results/comparison/
+python compare.py --report --min-confidence 0.7  # Exclude low-confidence frames
 python compare.py --summarize            # Per-animal AUC + discrimination ratio
-python compare.py --quantify             # Full master_table.csv + contrast vectors
+python compare.py --quantify             # Full master_table.csv + contrast vectors + learning rates
+python compare.py --quantify --min-confidence 0.7  # Quantify with confidence filtering
+python feature_reduction_test.py         # Feature subset experiment → results/feature_reduction/
 python quantify.py --build               # Build master_table.csv only
 python quantify.py --contrast            # Per-animal contrast vectors → results/quantification/contrast_vectors.csv
 python quantify.py --contrast --cohort cohort_normalized.csv  # + cohort-level contrast stats
@@ -92,7 +96,7 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 3. Cluster with **HDBSCAN** (min_cluster_size=50 by default) — noise frames labeled `-1`
 4. HMM Viterbi smoothing on each contiguous non-noise segment; `-1` frames preserved
 
-Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`, `clusterer.pkl`, `cluster_info.json`. Per-video labels in `results/shared/<stem>_labels.npy` (int32, -1 = noise).
+Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`, `clusterer.pkl`, `cluster_info.json`. Per-video labels in `results/shared/<stem>_labels.npy` (int32, -1 = noise). Per-video soft probabilities in `results/shared/<stem>_probs.npy` (float32, 0–1; 0 for noise frames).
 
 ### Important API notes
 
@@ -104,7 +108,13 @@ Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`
 - `analysis.py`'s `export_results()` must convert numpy types to Python before `json.dump()`.
 - `PoseFeatureExtractor` now accepts `use_wavelets=True` (default). Feature vector is 91D with wavelets, 51D without. All downstream code that loads `_features.npy` must use the same setting used during `--extract`.
 - `_labels.npy` files contain `int32` with `-1` meaning noise (HDBSCAN). All downstream code must skip `-1` frames (e.g., `labels[labels >= 0]`). State fractions in `summary_table.csv` do NOT sum to 1 when noise is present — that is correct.
-- `cluster_info.json` now includes `"method": "umap+hdbscan"` and `"min_cluster_size"`. `cluster_centers` are in standardized (51D or 91D) feature space for `characterize.py` compatibility.
+- `cluster_info.json` now includes `"method": "umap+hdbscan"`, `"min_cluster_size"`, `"mean_confidence"`, and `"low_confidence_frac"`. `cluster_centers` are in standardized (51D or 91D) feature space for `characterize.py` compatibility.
+- `_probs.npy` files (float32) contain HDBSCAN soft assignment probabilities (0–1) parallel to `_labels.npy`. Noise frames have prob=0. Use `valid = (labels >= 0) & (probs >= threshold)` for confidence-filtered fractions.
+- `--cluster --validate` does an 80/20 video-level train/test split (seed=42), fits on train only, predicts test via `approximate_predict`, and saves `results/shared/validation_report.json` with the generalization score.
+- `compare.py --report --min-confidence N` and `--quantify --min-confidence N` exclude frames with soft probability < N from all state fraction calculations.
+- `quantify.compute_state_learning_rates()` computes linear regression slopes of state occupancy vs day (Context A only, ≥3 days required). Called automatically by `compare.py --quantify`; saves `results/quantification/learning_rates.csv` and adds `fear_learning_rate`/`fear_learning_r2` to `master_table.csv`.
+- `feature_reduction_test.py` tests 5 feature subsets (4→91 features) on a 50k-frame sample. Saves UMAP scatter plots to `results/feature_reduction/` and a comparison CSV. Completes in under 5 minutes.
+- `KinematicsPanel` widget (`_widgets.py`) shows centroid_speed/angular_velocity/rearing_score time series alongside video clips in Browse States and Validation views. A QTimer fires at 33ms to update the cursor position without blocking the main thread.
 - `cohort_analysis.py` computes per-animal means (not per-session) as the unit of analysis before any cohort-level statistics. All cohort grouping is driven by `cohort_loader.load_cohort_excel()`. Dominant state is excluded from all state-level comparisons. FDR correction uses BH method via statsmodels if available, manual fallback otherwise.
 - `quantify.compute_contrast_vector()` excludes the dominant state dynamically, detects Context A/B case-insensitively, stores vectors as JSON strings in CSV. Parse with `json.loads(row["contrast_vector_json"])`. `contrast_magnitude` is NaN (not 0) when an animal has no sessions in a context. `contrast_magnitude` is automatically added to `master_table.csv` by `compare.py --quantify` and is therefore included in Jess correlations without any special casing.
 - `plot_cohort.py --contrast` requires `contrast_vectors.csv` and `cohort_contrast_vectors.csv` to already exist (run `quantify.py --contrast` first). Pass `--jess FILE` for the scatter plot.
@@ -163,8 +173,10 @@ results/
     preprocessor.pkl          # joblib BehaviorPreprocessor (standardizer, no PCA)
     umap_reducer.pkl          # joblib UMAP reducer (10 components)
     clusterer.pkl             # joblib HDBSCAN model
-    cluster_info.json         # n_clusters, cluster_centers, method, min_cluster_size
+    cluster_info.json         # n_clusters, cluster_centers, method, min_cluster_size, mean_confidence, low_confidence_frac
     <stem>_labels.npy         # int32 (T,) per video; -1 = noise frame
+    <stem>_probs.npy          # float32 (T,) per video; HDBSCAN soft probabilities 0-1
+    validation_report.json    # from --cluster --validate: generalization score, train/test split
   comparison/            # From compare.py --report and --summarize
     summary_table.csv         # 222 rows: state fracs + metadata (fracs may not sum to 1)
     transition_table.csv      # summary_table + flattened per-video transition matrices
@@ -198,8 +210,12 @@ cohort/                  # From cohort_analysis.py
   cohort_state_profiles.png     # bar charts per cohort (one subplot per cohort)
   cohort_comparison.png         # top-20-state grouped bar chart across cohorts
   cohort_metrics.png            # behavioral scalar means per cohort
+feature_reduction/       # From feature_reduction_test.py
+  subset_N_umap.png             # UMAP scatter plots per feature subset (5 files)
+  subset_comparison.csv         # comparison: n_features, n_clusters, sil, noise%, locomotion cluster
 quantification/          # From quantify.py / compare.py --quantify
-  master_table.csv              # one row per animal: all behavioral scalars + contrast_magnitude
+  master_table.csv              # one row per animal: all behavioral scalars + contrast_magnitude + fear_learning_rate
+  learning_rates.csv            # per-animal linear regression slopes of state occupancy vs day
   contrast_vectors.csv          # per-animal contrast vector, magnitude, dominant states (JSON columns)
   cohort_contrast_vectors.csv   # mean contrast vector + 95% CI per cohort
   cohort_contrast_stats.csv     # pairwise Mann-Whitney U + BH FDR on contrast_magnitude
