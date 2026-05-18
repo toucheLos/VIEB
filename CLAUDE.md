@@ -45,10 +45,22 @@ python compare.py --cluster              # UMAP+HDBSCAN, HMM-smooth → results/
 python compare.py --cluster --min-cluster-size 30  # Tune HDBSCAN (default 50)
 python compare.py --report               # Comparison plots + CSVs → results/comparison/
 python compare.py --summarize            # Per-animal AUC + discrimination ratio
+python compare.py --quantify             # Full master_table.csv + contrast vectors
+python quantify.py --build               # Build master_table.csv only
+python quantify.py --contrast            # Per-animal contrast vectors → results/quantification/contrast_vectors.csv
+python quantify.py --contrast --cohort cohort_normalized.csv  # + cohort-level contrast stats
 python characterize.py                   # Behavioral state profiles + t-SNE → results/characterization/
 python characterize.py --clips           # Also export exemplar video clips → clips/state_<id>/
 python characterize.py --n-clips 10      # Change clips per category (default 15)
 ```
+
+### Cohort-level analysis (run after compare.py and characterize.py)
+```bash
+python cohort_analysis.py --cohort cohort_normalized.csv --output results/cohort/
+python cohort_analysis.py --cohort cohort.xlsx --groupby genotype_treatment
+python cohort_analysis.py --cohort cohort_normalized.csv --dry-run  # preview without writing
+```
+`--groupby` options: `age | treatment | sex | genotype | age_treatment (default) | genotype_treatment | age_sex | full`
 
 ## Architecture
 
@@ -93,6 +105,35 @@ Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`
 - `PoseFeatureExtractor` now accepts `use_wavelets=True` (default). Feature vector is 91D with wavelets, 51D without. All downstream code that loads `_features.npy` must use the same setting used during `--extract`.
 - `_labels.npy` files contain `int32` with `-1` meaning noise (HDBSCAN). All downstream code must skip `-1` frames (e.g., `labels[labels >= 0]`). State fractions in `summary_table.csv` do NOT sum to 1 when noise is present — that is correct.
 - `cluster_info.json` now includes `"method": "umap+hdbscan"` and `"min_cluster_size"`. `cluster_centers` are in standardized (51D or 91D) feature space for `characterize.py` compatibility.
+- `cohort_analysis.py` computes per-animal means (not per-session) as the unit of analysis before any cohort-level statistics. All cohort grouping is driven by `cohort_loader.load_cohort_excel()`. Dominant state is excluded from all state-level comparisons. FDR correction uses BH method via statsmodels if available, manual fallback otherwise.
+- `quantify.compute_contrast_vector()` excludes the dominant state dynamically, detects Context A/B case-insensitively, stores vectors as JSON strings in CSV. Parse with `json.loads(row["contrast_vector_json"])`. `contrast_magnitude` is NaN (not 0) when an animal has no sessions in a context. `contrast_magnitude` is automatically added to `master_table.csv` by `compare.py --quantify` and is therefore included in Jess correlations without any special casing.
+- `plot_cohort.py --contrast` requires `contrast_vectors.csv` and `cohort_contrast_vectors.csv` to already exist (run `quantify.py --contrast` first). Pass `--jess FILE` for the scatter plot.
+
+### GUI architecture (`user_interface.py`)
+
+The main GUI is `user_interface.py` (standalone, run directly). The sidebar order is:
+
+1. Overview — dashboard with stat cards
+2. Pipeline — staged pipeline runner
+3. Browse States — state explorer with clips
+4. **Analysis** — consolidated analysis hub (`views/analysis.py`)
+5. Validation — manual frame labeling
+6. Settings — config editor
+
+`views/analysis.py` contains `AnalysisView` with a vertical tab bar (six tabs):
+
+| Tab | Command | Data source |
+|-----|---------|-------------|
+| Comparison Report | `compare.py --report` | `results/comparison/summary_table.csv` |
+| State Characterization | `characterize.py` | `results/characterization/state_summary.csv` + clips/ |
+| Cohort Analysis | `cohort_analysis.py --groupby X` | `results/cohort/` |
+| Quantification | `compare.py --quantify` | `results/quantification/master_table.csv` |
+| Fear Index | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
+| Jess Correlation | `compare.py --jess` | `results/quantification/jess_correlations.csv` |
+
+Each tab has a `TerminalBox` (dark, 80px) that streams live stdout from a `SubprocessWorker`. Data is loaded lazily on tab switch. State labels saved to `results/validation/state_labels.csv`.
+
+`AnalysisView` emits `worker_running(bool)` connected to `MainWindow._set_running()` so the status-bar pulse indicator reflects running analysis commands.
 
 ### DLC project structure
 
@@ -149,5 +190,22 @@ clips/                   # From characterize.py --clips
     typical_NN.mp4            # bouts closest to cluster centroid
     context_<X>_NN.mp4        # bouts from most-enriched context
 videos/                  # Manually curated or exported video files
+cohort/                  # From cohort_analysis.py
+  cohort_state_profiles.csv     # per-cohort mean ± SE per non-dominant state
+  cohort_behavioral_metrics.csv # fear_AUC, disc_ratio, etc. per cohort
+  cohort_statistics.csv         # pairwise Mann-Whitney U + BH FDR for all states
+  cohort_significant_states.csv # filtered to FDR p < 0.05, sorted by fold-change
+  cohort_state_profiles.png     # bar charts per cohort (one subplot per cohort)
+  cohort_comparison.png         # top-20-state grouped bar chart across cohorts
+  cohort_metrics.png            # behavioral scalar means per cohort
+quantification/          # From quantify.py / compare.py --quantify
+  master_table.csv              # one row per animal: all behavioral scalars + contrast_magnitude
+  contrast_vectors.csv          # per-animal contrast vector, magnitude, dominant states (JSON columns)
+  cohort_contrast_vectors.csv   # mean contrast vector + 95% CI per cohort
+  cohort_contrast_stats.csv     # pairwise Mann-Whitney U + BH FDR on contrast_magnitude
+  contrast_bars.png             # diverging bar chart per cohort (plot_cohort.py --contrast)
+  contrast_heatmap.png          # per-animal contrast vector heatmap
+  contrast_magnitude.png        # cohort bar chart + individual dots
+  contrast_scatter.png          # contrast_magnitude vs Jess protein (if jess data available)
 ```
 

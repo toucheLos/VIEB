@@ -556,7 +556,31 @@ def _export_clip(video_path, start_frame, end_frame, out_path,
     return True
 
 
-def cmd_clips(fps=30.0, n_clips=15):
+def _expand_clip(labels, anchor, target_state, clip_purity, max_frames):
+    left = anchor
+    right = anchor + 1
+    while (right - left) < max_frames:
+        # Try expanding left
+        new_left = left - 1
+        if new_left >= 0:
+            trial = labels[new_left:right]
+            purity = (trial == target_state).mean()
+            if purity >= clip_purity:
+                left = new_left
+                continue
+        # Try expanding right
+        new_right = right + 1
+        if new_right <= len(labels):
+            trial = labels[left:new_right]
+            purity = (trial == target_state).mean()
+            if purity >= clip_purity:
+                right = new_right
+                continue
+        break  # neither direction meets purity
+    return left, right
+
+
+def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     import cv2  # fail fast if not installed
 
     index, cluster_info, df_summary, meta = _load_prereqs()
@@ -596,6 +620,13 @@ def cmd_clips(fps=30.0, n_clips=15):
             if best:
                 state_best_ctx[k] = best
 
+    # Cache smoothed labels per stem for purity-based clip expansion
+    labels_cache = {}
+    for stem in index.keys():
+        lp = f"results/shared/{stem}_labels.npy"
+        if os.path.exists(lp):
+            labels_cache[stem] = _smooth_labels(np.load(lp))
+
     for k in range(n_clusters):
         kb = bouts_df[bouts_df["state"] == k].copy()
         if kb.empty:
@@ -607,8 +638,15 @@ def cmd_clips(fps=30.0, n_clips=15):
 
         # ── Longest bouts ──────────────────────────────────────────────────
         for i, (_, b) in enumerate(kb.nlargest(n_clips, "duration_sec").iterrows()):
-            _export_clip(b["video_path"], int(b["start_frame"]), int(b["end_frame"]),
-                         os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps)
+            stem = b["stem"]
+            anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
+            if stem in labels_cache:
+                left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
+            else:
+                left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
+            _export_clip(b["video_path"], left, right - 1,
+                         os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
+                         pad_to_secs=0.0, max_secs=max_clip_frames / fps)
         print(f"  longest: {min(n_clips, len(kb))} clips")
 
         # ── Typical bouts (nearest to cluster centroid in PCA space) ───────
@@ -631,8 +669,15 @@ def cmd_clips(fps=30.0, n_clips=15):
             kb["_dist"] = dists
 
             for i, (_, b) in enumerate(kb.nsmallest(n_clips, "_dist").iterrows()):
-                _export_clip(b["video_path"], int(b["start_frame"]), int(b["end_frame"]),
-                             os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps)
+                stem = b["stem"]
+                anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
+                if stem in labels_cache:
+                    left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
+                else:
+                    left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
+                _export_clip(b["video_path"], left, right - 1,
+                             os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
+                             pad_to_secs=0.0, max_secs=max_clip_frames / fps)
             print(f"  typical: {min(n_clips, len(kb))} clips")
 
         # ── Context-specific bouts ─────────────────────────────────────────
@@ -640,8 +685,15 @@ def cmd_clips(fps=30.0, n_clips=15):
         if best_ctx:
             ctx_bouts = kb[kb["context"] == best_ctx]
             for i, (_, b) in enumerate(ctx_bouts.nlargest(n_clips, "duration_sec").iterrows()):
-                _export_clip(b["video_path"], int(b["start_frame"]), int(b["end_frame"]),
-                             os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps)
+                stem = b["stem"]
+                anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
+                if stem in labels_cache:
+                    left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
+                else:
+                    left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
+                _export_clip(b["video_path"], left, right - 1,
+                             os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
+                             pad_to_secs=0.0, max_secs=max_clip_frames / fps)
             print(f"  context-{best_ctx}: {min(n_clips, len(ctx_bouts))} clips")
 
     print(f"\nClips saved under clips/state_<id>/")
@@ -744,12 +796,28 @@ def main():
     parser.add_argument("--n-clips",  type=int, default=15,
                         help="Clips per category per state (default 15)")
     parser.add_argument("--fps",      type=float, default=30.0)
+    parser.add_argument(
+        "--clip-purity",
+        type=float,
+        default=0.95,
+        help="Minimum fraction of frames in a clip that "
+             "must belong to the target state (default: 0.95). "
+             "Lower values allow longer clips with more context. "
+             "Range: 0.0 to 1.0."
+    )
+    parser.add_argument(
+        "--max-clip-frames",
+        type=int,
+        default=300,
+        help="Hard cap on clip length in frames (default: 300 = 10 s at 30 fps)."
+    )
     args = parser.parse_args()
 
     cmd_summarize(fps=args.fps)
     if args.clips:
         print("\n--- Exporting clips ---")
-        cmd_clips(fps=args.fps, n_clips=args.n_clips)
+        cmd_clips(fps=args.fps, n_clips=args.n_clips,
+                  clip_purity=args.clip_purity, max_clip_frames=args.max_clip_frames)
 
 
 if __name__ == "__main__":

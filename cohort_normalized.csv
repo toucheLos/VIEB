@@ -1,0 +1,129 @@
+animal_id,treatment,sex,age_group,genotype,cohort_label
+132,Vehicle,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_Vehicle
+134,Vehicle,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_Vehicle
+166,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+226,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+228,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+230,Vehicle,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_Vehicle
+231,Vehicle,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_Vehicle
+232,Vehicle,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_Vehicle
+233,Vehicle,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_Vehicle
+234,Vehicle,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_Vehicle
+235,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+236,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+237,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+238,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+256,Vehicle,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_Vehicle
+257,Vehicle,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_Vehicle
+263,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+264,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+265,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+266,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+267,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+268,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+269,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+271,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+287,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+288,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+289,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+290,TMZ,Male,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Male_TMZ
+321,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+322,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+323,TMZ,Female,18-24 Mo,BL6x129,BL6x129_18_24_Mo_Female_TMZ
+526,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+527,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+528,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+541,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+542,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+543,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+570,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+571,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+572,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+573,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+574,Untreated,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_Untreated
+575,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+576,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+577,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+578,Untreated,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_Untreated
+582,A,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_A
+583,A,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_A
+584,A,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_A
+585,A,Male,3-6 Mo,Het3,Het3_3_6_Mo_Male_A
+590,A,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_A
+591,A,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_A
+592,A,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_A
+593,A,Female,3-6 Mo,Het3,Het3_3_6_Mo_Female_A
+601,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+602,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+603,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+604,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+605,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+606,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+607,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+608,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+609,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+610,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+611,Aged Surgery,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Aged_Surgery
+612,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+613,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+614,Aged Surgery,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Aged_Surgery
+9001,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9002,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9003,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9004,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9005,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9006,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9007,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9008,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9009,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9010,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9011,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9012,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9013,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9014,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9015,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9016,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9024,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9025,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9026,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9027,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9028,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9029,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9030,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9031,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9032,TMZ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_TMZ
+9033,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9034,TMZ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_TMZ
+9036,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9037,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9038,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9039,Vehicle,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_Vehicle
+9040,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9041,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9042,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9043,Vehicle,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_Vehicle
+9044,CIQ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_CIQ
+9045,CIQ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_CIQ
+9046,CIQ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_CIQ
+9047,CIQ,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_CIQ
+9048,CIQ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_CIQ
+9049,CIQ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_CIQ
+9050,CIQ,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_CIQ
+9051,DQP,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP
+9052,DQP,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP
+9053,DQP,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP
+9054,DQP,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP
+9055,DQP,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP
+9056,DQP-1105,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP_1105
+9057,DQP-1105,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP_1105
+9058,DQP-1105,Female,18-24 Mo,Het3,Het3_18_24_Mo_Female_DQP_1105
+9061,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9062,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9063,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9064,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9065,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9066,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9067,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9068,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9069,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105
+9070,DQP-1105,Male,18-24 Mo,Het3,Het3_18_24_Mo_Male_DQP_1105

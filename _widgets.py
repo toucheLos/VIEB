@@ -1,0 +1,403 @@
+from __future__ import annotations
+import math
+from collections import deque
+from pathlib import Path
+
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QSlider, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
+)
+
+from _utils import _fmt_ts, _CV2, _MPL, _state_colors
+
+if _CV2:
+    import cv2
+
+if _MPL:
+    from _utils import FigureCanvas, Figure
+
+
+if _MPL:
+    class MplCanvas(FigureCanvas):
+        def __init__(self, parent=None, figsize=(6, 4)):
+            self.fig = Figure(figsize=figsize, tight_layout=True)
+            super().__init__(self.fig)
+            self.setParent(parent)
+            self.ax = self.fig.add_subplot(111)
+else:
+    class MplCanvas(QWidget):
+        def __init__(self, parent=None, figsize=(6, 4)):
+            super().__init__(parent)
+            self.fig = None
+            self.ax = None
+        def draw(self):
+            pass
+
+
+class VideoPlayer(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cap = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._next_frame)
+        self._fps = 30.0
+        self._speed = 1.0
+        self._total = 0
+        self._cur = 0
+        self._loop = False
+        self._playing = False
+        self._frame_buf = None
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._display = QLabel("No video loaded", alignment=Qt.AlignCenter)
+        self._display.setMinimumSize(320, 220)
+        self._display.setStyleSheet("background:#111;color:#999;")
+        lay.addWidget(self._display)
+
+        ctrl = QHBoxLayout()
+        self._btn_play = QPushButton("Play")
+        self._btn_play.clicked.connect(self.toggle_play)
+        ctrl.addWidget(self._btn_play)
+
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.sliderMoved.connect(self.seek)
+        ctrl.addWidget(self._slider)
+
+        self._loop_btn = QCheckBox("Loop")
+        self._loop_btn.toggled.connect(lambda v: setattr(self, "_loop", v))
+        ctrl.addWidget(self._loop_btn)
+
+        ctrl.addWidget(QLabel("Speed"))
+        self._speed_combo = QComboBox()
+        self._speed_combo.addItems(["0.25x", "0.5x", "1x"])
+        self._speed_combo.setCurrentText("1x")
+        self._speed_combo.currentTextChanged.connect(self._set_speed)
+        ctrl.addWidget(self._speed_combo)
+        lay.addLayout(ctrl)
+
+    def _set_speed(self, text):
+        val = text.replace("x", "")
+        self._speed = float(val)
+        if self._playing:
+            self.play()
+
+    def load(self, path: str):
+        if not _CV2:
+            self._display.setText("OpenCV unavailable")
+            return
+        self.pause()
+        if self._cap:
+            self._cap.release()
+        self._cap = cv2.VideoCapture(str(path))
+        if not self._cap.isOpened():
+            self._display.setText("Cannot open clip")
+            return
+        self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._slider.setMaximum(max(0, self._total - 1))
+        self._show(0)
+
+    def _show(self, idx):
+        if not self._cap:
+            return
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = self._cap.read()
+        if not ret:
+            return
+        h, w = frame.shape[:2]
+        max_w, max_h = self._display.width(), self._display.height()
+        scale = min(max_w / w, max_h / h)
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        frame = cv2.resize(frame, (nw, nh))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._frame_buf = frame.copy()
+        img = QImage(self._frame_buf.data, nw, nh, 3 * nw, QImage.Format_RGB888)
+        self._display.setPixmap(QPixmap.fromImage(img))
+        self._cur = idx
+        self._slider.blockSignals(True)
+        self._slider.setValue(idx)
+        self._slider.blockSignals(False)
+
+    def _next_frame(self):
+        nxt = self._cur + 1
+        if nxt >= self._total:
+            if self._loop:
+                nxt = 0
+            else:
+                self.pause()
+                return
+        self._show(nxt)
+
+    def play(self):
+        if not self._cap:
+            return
+        self._playing = True
+        self._btn_play.setText("Pause")
+        interval = max(1, int(1000 / max(0.01, self._fps * self._speed)))
+        self._timer.start(interval)
+
+    def pause(self):
+        self._playing = False
+        self._btn_play.setText("Play")
+        self._timer.stop()
+
+    def toggle_play(self):
+        self.pause() if self._playing else self.play()
+
+    def seek(self, idx):
+        self.pause()
+        self._show(idx)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Space:
+            self.toggle_play()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        self.pause()
+        if self._cap:
+            self._cap.release()
+        super().closeEvent(e)
+
+
+class _Card(QFrame):
+    def __init__(self, title, value="-"):
+        super().__init__()
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("QFrame{background:#f5f5f5;border:none;border-radius:8px;}")
+        self.setFixedHeight(95)
+        lay = QVBoxLayout(self)
+        t = QLabel(title)
+        t.setStyleSheet("color:#666;")
+        lay.addWidget(t)
+        self._value = QLabel(value)
+        self._value.setFont(QFont("Arial", 22, QFont.Bold))
+        lay.addWidget(self._value)
+
+    def set(self, value):
+        self._value.setText(str(value))
+
+
+class StageRow(QFrame):
+    run_stage = pyqtSignal(int)
+    run_from_here = pyqtSignal(int)
+    mark_completed = pyqtSignal(int, bool)
+    changed = pyqtSignal(str, object)
+    run_diagnose = pyqtSignal()
+    run_subcluster = pyqtSignal(int)   # payload: dominant state id
+
+    def __init__(self, stage: dict, cfg: dict):
+        super().__init__()
+        self.stage = stage
+        self.cfg = cfg
+        self.logs = deque(maxlen=20)
+        self._dom_state_id = -1
+        self._build()
+
+    def _build(self):
+        self.setStyleSheet("QFrame{border:none;background:#fff;}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+
+        top = QHBoxLayout()
+        self._icon = QLabel("○")
+        self._icon.setFixedWidth(18)
+        top.addWidget(self._icon)
+        name = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
+        name.setFont(QFont("Arial", 11, QFont.Bold))
+        top.addWidget(name)
+        top.addStretch()
+        self._ts = QLabel("Last run: -")
+        self._eta = QLabel("ETA: -")
+        top.addWidget(self._ts)
+        top.addWidget(QLabel("  "))
+        top.addWidget(self._eta)
+        self._expand = QToolButton()
+        self._expand.setText("▾")
+        self._expand.setCheckable(True)
+        self._expand.clicked.connect(self._toggle)
+        top.addWidget(self._expand)
+        self._done_cb = QCheckBox()
+        self._done_cb.setToolTip("Mark stage as completed")
+        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
+        top.addWidget(self._done_cb)
+        lay.addLayout(top)
+
+        d = QLabel(self.stage["desc"])
+        d.setStyleSheet("color:#555;")
+        lay.addWidget(d)
+        if self.stage["id"] in (3, 4, 5, 6):
+            note = QLabel("Runs stages 3-6 together.")
+            note.setStyleSheet("color:#0b57d0;")
+            lay.addWidget(note)
+        if self.stage["id"] == 5:
+            self._quality_badge = QLabel("Cluster Quality: —")
+            self._quality_badge.setStyleSheet(
+                "background:#f5f5f5;border:1px solid #ddd;border-radius:4px;"
+                "padding:3px 8px;color:#555;font-size:12px;"
+            )
+            lay.addWidget(self._quality_badge)
+
+        self._details = QWidget()
+        dl = QVBoxLayout(self._details)
+        cmd = QLabel(f"CLI: {self.stage['cmd']}")
+        cmd.setStyleSheet("font-family:Consolas;color:#222;")
+        dl.addWidget(cmd)
+
+        params = QHBoxLayout()
+        if self.stage["id"] in (2, 3):
+            self._mcs = QSlider(Qt.Horizontal)
+            self._mcs.setRange(500, 5000)
+            self._mcs.setValue(int(self.cfg.get("min_cluster_size", 2000)))
+            self._mcs.valueChanged.connect(lambda v: self.changed.emit("min_cluster_size", v))
+            self._wave = QCheckBox("Use Morlet wavelets")
+            self._wave.setChecked(bool(self.cfg.get("use_wavelets", True)))
+            self._wave.toggled.connect(lambda v: self.changed.emit("use_wavelets", v))
+            params.addWidget(QLabel("min_cluster_size"))
+            params.addWidget(self._mcs)
+            params.addWidget(self._wave)
+        if self.stage["id"] == 7:
+            self._collapse = QCheckBox("Enable state collapsing")
+            self._collapse.setChecked(bool(self.cfg.get("enable_state_collapse", False)))
+            self._collapse.toggled.connect(lambda v: self.changed.emit("enable_state_collapse", v))
+            params.addWidget(self._collapse)
+        if self.stage["id"] == 11:
+            self._clips = QCheckBox("Export video clips")
+            self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
+            self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
+            params.addWidget(self._clips)
+        if self.stage["id"] == 5:
+            self._diagnose_btn = QPushButton("Diagnose")
+            self._diagnose_btn.setFixedHeight(26)
+            self._diagnose_btn.setToolTip(
+                "Run diagnose_clusters.py to sweep min_cluster_size values\n"
+                "and find the best setting for your data."
+            )
+            self._diagnose_btn.clicked.connect(self.run_diagnose.emit)
+            self._fix_btn = QPushButton("Fix dominant state")
+            self._fix_btn.setFixedHeight(26)
+            self._fix_btn.setToolTip(
+                "Re-cluster the dominant state into sub-states using a\n"
+                "second UMAP pass (compare.py --subcluster --state N)."
+            )
+            self._fix_btn.clicked.connect(
+                lambda: self.run_subcluster.emit(self._dom_state_id)
+            )
+            self._fix_btn.hide()
+            params.addWidget(self._diagnose_btn)
+            params.addWidget(self._fix_btn)
+        params.addStretch()
+        dl.addLayout(params)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMinimumHeight(120)
+        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;")
+        dl.addWidget(self._log)
+
+        acts = QHBoxLayout()
+        self._run_btn = QPushButton("Run")
+        self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
+        self._from_btn = QPushButton("Run from here")
+        self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
+        acts.addWidget(self._run_btn)
+        acts.addWidget(self._from_btn)
+        acts.addStretch()
+        dl.addLayout(acts)
+
+        self._details.hide()
+        lay.addWidget(self._details)
+
+    def _toggle(self):
+        self._details.setVisible(self._expand.isChecked())
+        self._expand.setText("▴" if self._expand.isChecked() else "▾")
+
+    def set_eta(self, text):
+        self._eta.setText(f"ETA: {text}")
+
+    def set_status(self, status):
+        icon_map = {
+            "pending": ("○", "#888"),
+            "running": ("◔", "#e0a400"),
+            "done": ("✓", "green"),
+            "error": ("✕", "red"),
+        }
+        icon, color = icon_map.get(status, ("○", "#888"))
+        self._icon.setText(icon)
+        self._icon.setStyleSheet(f"color:{color};font-weight:bold;")
+        self._done_cb.blockSignals(True)
+        self._done_cb.setChecked(status == "done")
+        self._done_cb.blockSignals(False)
+
+    def set_last_run(self, ts):
+        self._ts.setText(f"Last run: {_fmt_ts(ts)}")
+
+    def set_cluster_quality(self, dominant_frac: float, dom_state_id: int):
+        """Update the cluster quality badge (stage 5 only)."""
+        if self.stage["id"] != 5:
+            return
+        self._dom_state_id = dom_state_id
+        pct = dominant_frac * 100
+        if dominant_frac < 0.40:
+            color_bg, color_border, color_text = "#e8f5e9", "#a5d6a7", "#1b5e20"
+            label = f"Cluster Quality: ✓ Good — dominant state {dom_state_id} = {pct:.1f}%"
+        elif dominant_frac < 0.60:
+            color_bg, color_border, color_text = "#fff8e1", "#ffe082", "#795548"
+            label = f"Cluster Quality: ⚠ Moderate — dominant state {dom_state_id} = {pct:.1f}%"
+        else:
+            color_bg, color_border, color_text = "#ffebee", "#ef9a9a", "#b71c1c"
+            label = f"Cluster Quality: ✕ Poor — dominant state {dom_state_id} = {pct:.1f}% (consider fixing)"
+        self._quality_badge.setText(label)
+        self._quality_badge.setStyleSheet(
+            f"background:{color_bg};border:1px solid {color_border};"
+            f"border-radius:4px;padding:3px 8px;color:{color_text};font-size:12px;"
+        )
+        self._fix_btn.setVisible(dominant_frac > 0.50)
+
+    def append_log(self, line):
+        self.logs.append(line.rstrip("\n"))
+        self._log.setPlainText("\n".join(self.logs))
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def set_enabled(self, enabled):
+        self._run_btn.setEnabled(enabled)
+        self._from_btn.setEnabled(enabled)
+
+
+_NAVBTN_CSS = (
+    "QPushButton{text-align:left;padding-left:20px;border:none;"
+    "background:#F0F0F0;color:#333333;font-size:13px;}"
+    "QPushButton:hover{background:#e8f0fe;color:#1a73e8;}"
+    "QPushButton:checked{background:#d2e3fc;color:#1a73e8;font-weight:bold;"
+    "border-left:3px solid #1a73e8;padding-left:17px;}"
+)
+
+_NAV_ICONS = {
+    "Overview":       "⊞",
+    "Pipeline":       "▶",
+    "Browse States":  "▣",
+    "Validation":     "✓",
+    "Quantification": "∑",
+    "Advanced":       "⚙",
+    "Settings":       "≡",
+}
+
+
+class NavBtn(QPushButton):
+    def __init__(self, text):
+        icon = _NAV_ICONS.get(text, "")
+        display = f"{icon}  {text}" if icon else text
+        super().__init__(display)
+        self.setCheckable(True)
+        self.setFixedHeight(42)
+        self.setStyleSheet(_NAVBTN_CSS)

@@ -91,7 +91,7 @@ def _print_hardware_banner():
 
 def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     from ml import PoseFeatureExtractor
-    from main import load_pose, _find_dlc_csv
+    from pose_io import load_pose, _find_dlc_csv
 
     videos = sorted(glob.glob("raw_videos/*.mp4"))
     if not videos:
@@ -248,7 +248,7 @@ def _hmm_viterbi(obs: np.ndarray, prior, A, B, n_states: int) -> np.ndarray:
 # Step 2: Shared clustering (UMAP + HDBSCAN)
 # ---------------------------------------------------------------------------
 
-def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50):
+def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10):
     import joblib
     from ml import BehaviorPreprocessor
 
@@ -304,7 +304,15 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     print(f"  Standardized to {pooled_scaled.shape[1]} features")
 
     # ---- UMAP reduction ----
-    print("\nFitting UMAP (n_components=10, n_neighbors=30)...")
+    print(f"\nFitting UMAP (n_components={umap_dims}, n_neighbors=30)...")
+    umap_save_path = "results/shared/umap_reducer.pkl"
+    if os.path.exists(umap_save_path):
+        try:
+            _saved = joblib.load(umap_save_path)
+            if getattr(_saved, 'n_components', None) != umap_dims:
+                print(f"  [info] Saved UMAP reducer has different n_components; refitting with {umap_dims}.")
+        except Exception:
+            pass
     n_total = pooled_scaled.shape[0]
     n_sample = min(200_000, n_total)
     if n_total > n_sample:
@@ -316,7 +324,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         fit_data = pooled_scaled
         print(f"  Fitting on all {n_total:,} frames...")
 
-    umap_kwargs = dict(n_components=10, n_neighbors=30, min_dist=0.0, random_state=42)
+    umap_kwargs = dict(n_components=umap_dims, n_neighbors=30, min_dist=0.0, random_state=42)
     if not use_gpu:
         umap_kwargs.update(low_memory=True, verbose=True)
     reducer = UMAPClass(**umap_kwargs)
@@ -331,10 +339,11 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     print(f"  UMAP embedding: {pooled_umap.shape}")
 
     # ---- HDBSCAN clustering ----
-    print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size})...")
+    effective_min_samples = min_samples if min_samples is not None else min_cluster_size
+    print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={effective_min_samples})...")
     clusterer_model = HDBSCANClass(
         min_cluster_size=min_cluster_size,
-        min_samples=10,
+        min_samples=effective_min_samples,
         cluster_selection_method="eom",
     )
     clusterer_model.fit(pooled_umap)
@@ -405,6 +414,125 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
 
     print(f"\nShared models → results/shared/")
     print(f"Per-video labels → results/shared/<stem>_labels.npy")
+
+
+# ---------------------------------------------------------------------------
+# Step 2.5: Collapse similar states (post-clustering merge)
+# ---------------------------------------------------------------------------
+
+def cmd_collapse(threshold: float = 0.5):
+    """
+    Merge behavioral states whose centroids have cosine similarity > threshold.
+
+    Operates on the existing results/shared/ outputs without re-running UMAP or
+    HDBSCAN. Updates cluster_info.json and remaps all _labels.npy files in-place.
+    """
+    from collections import defaultdict
+
+    cluster_info_path = "results/shared/cluster_info.json"
+    if not os.path.exists(cluster_info_path):
+        sys.exit("No cluster_info.json found. Run --cluster first.")
+    index_path = "results/features/index.json"
+    if not os.path.exists(index_path):
+        sys.exit("No feature index found. Run --extract first.")
+
+    with open(cluster_info_path) as f:
+        cluster_info = json.load(f)
+    with open(index_path) as f:
+        index = json.load(f)
+
+    n_clusters = cluster_info["n_clusters"]
+    centers = np.array(cluster_info["cluster_centers"], dtype=np.float64)  # (K, D)
+
+    # Pairwise cosine similarity between centroids
+    norms = np.linalg.norm(centers, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-10
+    centers_normed = centers / norms
+    sim = centers_normed @ centers_normed.T  # (K, K)
+
+    # Collect pairs above threshold (upper triangle, skip diagonal)
+    merge_edges = [
+        (i, j)
+        for i in range(n_clusters)
+        for j in range(i + 1, n_clusters)
+        if sim[i, j] > threshold
+    ]
+    print(f"Cosine similarity threshold: {threshold}")
+    print(f"Pairs above threshold: {len(merge_edges)}")
+
+    # Union-find to build connected components
+    parent = list(range(n_clusters))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i, j in merge_edges:
+        pi, pj = _find(i), _find(j)
+        if pi != pj:
+            parent[pi] = pj
+
+    groups = defaultdict(list)
+    for k in range(n_clusters):
+        groups[_find(k)].append(k)
+
+    sorted_groups = sorted(groups.values(), key=lambda g: min(g))
+    n_new = len(sorted_groups)
+
+    old_to_new = {}
+    for new_id, group in enumerate(sorted_groups):
+        for old_id in group:
+            old_to_new[old_id] = new_id
+
+    print(f"\nCollapsing {n_clusters} → {n_new} states")
+    for new_id, group in enumerate(sorted_groups):
+        if len(group) > 1:
+            print(f"  New state {new_id}: merged from original states {sorted(group)}")
+
+    if n_new == n_clusters:
+        print("No merges at this threshold. Try a higher --collapse-threshold.")
+        return
+
+    # Remap label files and count frames per old cluster for weighted center averaging
+    stems = sorted(index.keys())
+    frame_counts = np.zeros(n_clusters, dtype=np.int64)
+
+    print(f"\nRemapping {len(stems)} label files...")
+    for stem in stems:
+        labels_path = f"results/shared/{stem}_labels.npy"
+        if not os.path.exists(labels_path):
+            continue
+        labels = np.load(labels_path)
+        for k in range(n_clusters):
+            frame_counts[k] += int((labels == k).sum())
+        new_labels = labels.copy()
+        for old_id, new_id in old_to_new.items():
+            new_labels[labels == old_id] = new_id  # uses original `labels` as mask
+        np.save(labels_path, new_labels.astype(np.int32))
+
+    # New cluster centers: weighted mean of merged old centers by frame count
+    new_centers = []
+    for group in sorted_groups:
+        total = sum(int(frame_counts[k]) for k in group)
+        if total == 0:
+            new_centers.append(centers[group[0]].tolist())
+        else:
+            weighted = sum(frame_counts[k] * centers[k] for k in group)
+            new_centers.append((weighted / total).tolist())
+
+    cluster_info["n_clusters"] = n_new
+    cluster_info["cluster_centers"] = new_centers
+    cluster_info["collapse_threshold"] = threshold
+    cluster_info["collapse_map"] = {str(k): v for k, v in old_to_new.items()}
+
+    with open(cluster_info_path, "w") as f:
+        json.dump(cluster_info, f, indent=2)
+
+    print(f"\nUpdated results/shared/cluster_info.json  ({n_clusters} → {n_new} states)")
+    print("All _labels.npy files remapped in-place.")
+    print("Run --report (and --summarize / characterize.py) to rebuild downstream outputs.")
 
 
 # ---------------------------------------------------------------------------
@@ -680,132 +808,56 @@ def cmd_report(fps: float = 30.0):
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Per-animal scalar summary
+# Step 4: Per-animal scalar summary (delegates to quantify.py)
 # ---------------------------------------------------------------------------
-
-def _identify_freeze_state(n_clusters: int) -> int:
-    """
-    Return the cluster ID with the lowest mean speed across all keypoints.
-
-    Uses speed features (first 8 columns = per-keypoint speed) from the
-    saved feature files, avoiding a full reload of all data.
-    """
-    index_path = "results/features/index.json"
-    if not os.path.exists(index_path):
-        sys.exit("No feature index found. Run --extract first.")
-    with open(index_path) as f:
-        index = json.load(f)
-
-    speed_sum = np.zeros(n_clusters, dtype=np.float64)
-    speed_cnt = np.zeros(n_clusters, dtype=np.float64)
-
-    for stem, info in index.items():
-        labels_path = f"results/shared/{stem}_labels.npy"
-        feat_path = info["features_path"].replace("\\", "/")
-        if not os.path.exists(labels_path) or not os.path.exists(feat_path):
-            continue
-        labels = np.load(labels_path)
-        # First 8 features are per-keypoint speeds
-        feats = np.load(feat_path)[:, :8].astype(np.float64)
-        if feats.shape[0] != len(labels):
-            continue
-        for k in range(n_clusters):
-            mask = labels == k
-            if mask.any():
-                speed_sum[k] += feats[mask].mean(axis=1).sum()
-                speed_cnt[k] += mask.sum()
-
-    mean_speed = np.where(speed_cnt > 0, speed_sum / speed_cnt, np.inf)
-    freeze_state = int(np.argmin(mean_speed))
-    print(f"  Mean speed per cluster: "
-          + ", ".join(f"S{k}={mean_speed[k]:.2f}" for k in range(n_clusters)))
-    print(f"  → Freeze state identified: State {freeze_state}")
-    return freeze_state
-
 
 def cmd_summarize():
     """
-    Per-animal scalar summary:
-      - AUC of freeze-state occupancy across days (trapezoidal rule)
-      - Mean discrimination ratio: (freeze_A - freeze_B) / (freeze_A + freeze_B)
+    Deprecated thin wrapper — delegates to quantify.py build_master_table().
 
-    The freeze state is identified automatically as the cluster with the
-    lowest mean keypoint speed.
-
-    Output: results/comparison/animal_scalars.csv
+    Kept for CLI backwards compatibility. Prefer:
+        python quantify.py --build
     """
-    summary_path = "results/comparison/summary_table.csv"
-    if not os.path.exists(summary_path):
-        sys.exit("summary_table.csv not found. Run --report first.")
+    print("NOTE: --summarize now delegates to quantify.py build_master_table().")
+    print("      For the full master table, run: python quantify.py --build")
+    print()
+    try:
+        from quantify import build_master_table
+        build_master_table()
+    except ImportError:
+        sys.exit("[ERROR] quantify.py not found in project directory.")
 
-    for path in ["results/shared/cluster_info.json"]:
-        if not os.path.exists(path):
-            sys.exit(f"Missing {path}. Run --cluster first.")
 
-    with open("results/shared/cluster_info.json") as f:
-        cluster_info = json.load(f)
-    n_clusters = cluster_info["n_clusters"]
+def cmd_quantify(cohort: str | None = None):
+    """Build master_table.csv via quantify.py."""
+    try:
+        from quantify import build_master_table, compute_contrast_vector
+        build_master_table(cohort_path=cohort)
+    except ImportError:
+        sys.exit("[ERROR] quantify.py not found in project directory.")
 
-    df = pd.read_csv(summary_path)
-    required = {"animal_id", "day", "context"}
-    missing = required - set(df.columns)
-    if missing:
-        sys.exit(f"summary_table.csv is missing columns: {missing}")
+    print("\nComputing behavioral contrast vectors...")
+    try:
+        contrast_df = compute_contrast_vector(
+            summary_csv="results/comparison/summary_table.csv",
+            output_dir="results/quantification",
+            cohort_csv=cohort,
+        )
 
-    print("Identifying freeze state (lowest mean speed)...")
-    freeze_state = _identify_freeze_state(n_clusters)
-    freeze_col = f"state_{freeze_state}_frac"
-
-    if freeze_col not in df.columns:
-        sys.exit(f"Column '{freeze_col}' not found in summary_table.csv.")
-
-    rows = []
-    for animal_id, group in df.groupby("animal_id"):
-        if pd.isna(animal_id):
-            continue
-
-        # AUC of freeze-state occupancy across days
-        group_sorted = group.dropna(subset=["day", freeze_col]).sort_values("day")
-        if len(group_sorted) >= 2:
-            auc = float(np.trapz(group_sorted[freeze_col].values,
-                                 group_sorted["day"].values))
-        elif len(group_sorted) == 1:
-            auc = float(group_sorted[freeze_col].iloc[0])
-        else:
-            auc = float("nan")
-
-        # Discrimination ratio per day: (freeze_A - freeze_B) / (freeze_A + freeze_B)
-        disc_ratios = []
-        for day, day_group in group.groupby("day"):
-            ctx_means = (
-                day_group.dropna(subset=["context", freeze_col])
-                         .groupby("context")[freeze_col].mean()
+        master_path = "results/quantification/master_table.csv"
+        if os.path.exists(master_path) and "animal_id" in contrast_df.columns:
+            master = pd.read_csv(master_path)
+            master["animal_id"] = master["animal_id"].astype(str)
+            contrast_df["animal_id"] = contrast_df["animal_id"].astype(str)
+            master = master.merge(
+                contrast_df[["animal_id", "contrast_magnitude",
+                             "dominant_fear_state", "dominant_safety_state"]],
+                on="animal_id", how="left",
             )
-            if "A" in ctx_means.index and "B" in ctx_means.index:
-                fa, fb = ctx_means["A"], ctx_means["B"]
-                denom = fa + fb
-                if denom > 0:
-                    disc_ratios.append((fa - fb) / denom)
-
-        mean_disc = float(np.mean(disc_ratios)) if disc_ratios else float("nan")
-
-        rows.append({
-            "animal_id": animal_id,
-            "freeze_state": freeze_state,
-            "freeze_auc": round(auc, 4),
-            "mean_discrimination_ratio": round(mean_disc, 4) if not np.isnan(mean_disc) else float("nan"),
-            "n_sessions": len(group),
-            "n_days": int(group["day"].nunique()),
-        })
-
-    if not rows:
-        sys.exit("No animals found with valid data in summary_table.csv.")
-
-    os.makedirs("results/comparison", exist_ok=True)
-    out = pd.DataFrame(rows).sort_values("animal_id")
-    out.to_csv("results/comparison/animal_scalars.csv", index=False)
-    print(f"\nSaved: results/comparison/animal_scalars.csv  ({len(out)} animals)")
-    print(f"\n{out.to_string(index=False)}")
+            master.to_csv(master_path, index=False)
+            print("contrast_magnitude added to master_table.csv")
+    except Exception as e:
+        print(f"[WARN] Contrast vector computation failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -825,17 +877,29 @@ def main():
     parser.add_argument("--report", action="store_true",
                         help="Generate comparison plots using metadata.csv")
     parser.add_argument("--summarize", action="store_true",
-                        help="Per-animal AUC + discrimination ratio (requires --report output)")
+                        help="[deprecated] Use --quantify instead")
+    parser.add_argument("--quantify", action="store_true",
+                        help="Build master_table.csv with all per-animal scalars")
+    parser.add_argument("--collapse", action="store_true",
+                        help="Merge similar states by centroid cosine similarity (run after --cluster)")
+    parser.add_argument("--collapse-threshold", type=float, default=0.5,
+                        help="Cosine similarity threshold for --collapse (default: 0.5)")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--n-clusters", type=int, default=None,
                         help="(ignored for HDBSCAN — kept for CLI compatibility)")
     parser.add_argument("--min-cluster-size", type=int, default=50,
                         help="HDBSCAN min_cluster_size (default: 50)")
+    parser.add_argument("--hdbscan-min-samples", type=int, default=None,
+                        help="HDBSCAN min_samples. Defaults to min_cluster_size if not set.")
+    parser.add_argument("--umap-dims", type=int, default=10,
+                        help="UMAP n_components (default: 10). Try 3 for better HDBSCAN performance.")
     parser.add_argument("--no-wavelets", action="store_true",
                         help="Skip Morlet wavelet features during --extract (faster)")
+    parser.add_argument("--cohort", metavar="FILE", default=None,
+                        help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     args = parser.parse_args()
 
-    if not any([args.extract, args.cluster, args.report, args.summarize]):
+    if not any([args.extract, args.cluster, args.collapse, args.report, args.summarize, args.quantify]):
         parser.print_help()
         sys.exit(1)
 
@@ -844,11 +908,16 @@ def main():
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
     if args.cluster:
-        cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size)
+        cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
+                    min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims)
+    if args.collapse:
+        cmd_collapse(threshold=args.collapse_threshold)
     if args.report:
         cmd_report(fps=args.fps)
     if args.summarize:
         cmd_summarize()
+    if args.quantify:
+        cmd_quantify(cohort=args.cohort)
 
 
 if __name__ == "__main__":

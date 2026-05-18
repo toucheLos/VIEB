@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c:*)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(python characterize.py)",
+      "Bash(python compare.py --cluster)",
+      "Bash(python compare.py --report)",
+      "Bash(git add characterize.py compare.py ml/clustering.py results/characterization/ results/comparison/ results/shared/ \"VIEB-Carlos-2026-02-11/labeled-data/20241113_Box_1_CFC_Day_0_\\(Context_A\\)_9001/\")",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(python -:*)",
+      "Bash(wc:*)",
+      "WebSearch",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(ls labeled-data/20241113_Box_1_CFC_Day_0_\\\\\\(Context_A\\\\\\)_9009/)",
+      "Bash(du -sh raw_videos/*.csv)",
+      "Bash(python3 -c \"import csv; f=open\\('c:/Users/playtoe/Programs/neuron/luna_lab/VIEB/results/comparison/summary_table.csv'\\); r=csv.reader\\(f\\); h=next\\(r\\); print\\('Columns:', len\\(h\\)\\); print\\('\\\\\\\\n'.join\\(h\\)\\)\")",
+      "Bash(Select-String \"cohort\")",
+      "Bash(Get-Item \"c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\\\\gui.py\")",
+      "Bash(Select-Object Length)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\" -Filter \"gui.py\")",
+      "Bash(Select-Object FullName)",
+      "PowerShell(\\(Get-Item \"c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\\\\gui.py\"\\).Length)",
+      "Bash(python3 -m py_compile \"c:/Users/playtoe/Programs/neuron/luna_lab/VIEB/gui.py\")",
+      "PowerShell(Set-Location \"c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\"; python -m py_compile gui.py 2>&1; Write-Host \"Exit: $LASTEXITCODE\")",
+      "PowerShell(Set-Location \"c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\"; python -m py_compile quantify.py 2>&1; python -m py_compile compare.py 2>&1; Write-Host \"Exit: $LASTEXITCODE\")",
+      "Bash(powershell -Command \"\\(Get-Content 'c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\\\\gui.py' | Measure-Object -Line\\).Lines\")",
+      "Bash(powershell -Command \"Select-String -Path 'c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\\\\gui.py' -Pattern '^\\\\s*#' | Select-Object LineNumber, Line | Head -100\")",
+      "Bash(powershell -Command \"Select-String -Path 'c:\\\\Users\\\\playtoe\\\\Programs\\\\neuron\\\\luna_lab\\\\VIEB\\\\gui.py' -Pattern '\\(QVBoxLayout|QHBoxLayout|QGridLayout\\)\\\\s*\\\\\\(\\\\s*\\\\\\)' | Measure-Object\")"
+    ]
+  }
+}
