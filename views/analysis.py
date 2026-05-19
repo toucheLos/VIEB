@@ -143,6 +143,9 @@ class AnalysisView(QWidget):
         self._jess_df = None
         self._current_tab = 0
         self._t2_state_ids: list[int] = []
+        # Each entry is True when that tab needs a redraw.
+        # Starts True so the first visit always renders.
+        self._tab_dirty = [True] * 6
         self._build()
 
     # ─────────────────────────────────────────────────────────── build ──
@@ -671,25 +674,44 @@ class AnalysisView(QWidget):
 
     # ─────────────────────────────────────────────────── Tab switching ──
 
+    _TAB_LOADERS = None  # populated after first call to avoid forward-ref issues
+
+    def _get_loaders(self):
+        return [
+            self._load_tab1, self._load_tab2, self._load_tab3,
+            self._load_tab4, self._load_tab5, self._load_tab6,
+        ]
+
     def _switch_tab(self, idx: int) -> None:
         if idx < 0 or idx >= self._stack.count():
             return
         self._current_tab = idx
         self._stack.setCurrentIndex(idx)
-        loaders = [
-            self._load_tab1, self._load_tab2, self._load_tab3,
-            self._load_tab4, self._load_tab5, self._load_tab6,
-        ]
-        loaders[idx]()
+        # Only render if dirty — skip if the chart is already up-to-date.
+        if self._tab_dirty[idx]:
+            self._get_loaders()[idx]()
+            self._tab_dirty[idx] = False
 
     def _load_current_tab(self) -> None:
-        self._switch_tab(self._current_tab)
+        """Reload the visible tab unconditionally (e.g. after a pipeline run)."""
+        idx = self._current_tab
+        if 0 <= idx < self._stack.count():
+            self._get_loaders()[idx]()
+            self._tab_dirty[idx] = False
+
+    def _mark_all_dirty(self) -> None:
+        """Flag every tab for redraw on next visit."""
+        self._tab_dirty = [True] * 6
 
     # ────────────────────────────────────────────────── Data loading ──
 
     def update_data(self, data: dict) -> None:
-        self._data = data
-        self._load_current_tab()
+        # Only mark dirty (and re-render current tab) when data actually changes.
+        if data is not self._data:
+            self._data = data
+            self._mark_all_dirty()
+            # Render the currently visible tab immediately; others wait.
+            self._load_current_tab()
 
     # ─────────────────────── Tab 1 loader ──
 
@@ -1486,4 +1508,6 @@ class AnalysisView(QWidget):
 
     def _on_run_done(self, ok: bool) -> None:
         self.worker_running.emit(False)
+        # Pipeline output changed — all tabs need a fresh render on next visit.
+        self._mark_all_dirty()
         self._load_current_tab()
