@@ -1132,6 +1132,36 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
 
 
 # ---------------------------------------------------------------------------
+# Cluster diagnostic (delegates to diagnose_clusters.py)
+# ---------------------------------------------------------------------------
+
+def cmd_diagnose(
+    mcs_list: list | None = None,
+    umap_dims: int = 10,
+    min_samples: int | None = None,
+    umap_sweep: bool = False,
+    hdbscan_jobs: int = 1,
+):
+    """Run the MCS sweep from diagnose_clusters.py and print a recommendation."""
+    try:
+        from diagnose_clusters import cmd_sweep, cmd_umap_sweep, _DEFAULT_MCS
+    except ImportError:
+        sys.exit("[ERROR] diagnose_clusters.py not found in project directory.")
+
+    sweep_mcs = mcs_list if mcs_list else _DEFAULT_MCS
+    rec = cmd_sweep(
+        sweep_mcs,
+        umap_dims=umap_dims,
+        min_samples=min_samples,
+        hdbscan_jobs=hdbscan_jobs,
+    )
+    if umap_sweep:
+        rec_mcs = rec["mcs"] if rec else None
+        cmd_umap_sweep(rec_mcs, umap_dims=umap_dims, min_samples=min_samples,
+                       hdbscan_jobs=hdbscan_jobs)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1155,6 +1185,16 @@ def main():
                         help="Merge similar states by centroid cosine similarity (run after --cluster)")
     parser.add_argument("--collapse-threshold", type=float, default=0.5,
                         help="Cosine similarity threshold for --collapse (default: 0.5)")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Sweep min_cluster_size values and recommend best setting (runs diagnose_clusters.py)")
+    parser.add_argument("--diagnose-mcs", type=str, default=None,
+                        metavar="LIST",
+                        help="Comma-separated min_cluster_size values for --diagnose "
+                             "(default: 50,100,200,300,500,750,1000,1500,2000,3000)")
+    parser.add_argument("--umap-sweep", action="store_true",
+                        help="With --diagnose: also sweep UMAP n_neighbors on a 50k-frame sample")
+    parser.add_argument("--hdbscan-jobs", type=int, default=1,
+                        help="Parallel jobs for HDBSCAN core-distance (--diagnose only, default: 1)")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--n-clusters", type=int, default=None,
                         help="(ignored for HDBSCAN — kept for CLI compatibility)")
@@ -1174,7 +1214,8 @@ def main():
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     args = parser.parse_args()
 
-    if not any([args.extract, args.cluster, args.collapse, args.report, args.summarize, args.quantify]):
+    if not any([args.extract, args.cluster, args.collapse, args.diagnose,
+                args.report, args.summarize, args.quantify]):
         parser.print_help()
         sys.exit(1)
 
@@ -1182,6 +1223,20 @@ def main():
 
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
+    if args.diagnose:
+        mcs_list = None
+        if args.diagnose_mcs:
+            try:
+                mcs_list = [int(x.strip()) for x in args.diagnose_mcs.split(",") if x.strip()]
+            except ValueError:
+                sys.exit("--diagnose-mcs must be a comma-separated list of integers, e.g. 100,200,500")
+        cmd_diagnose(
+            mcs_list=mcs_list,
+            umap_dims=args.umap_dims,
+            min_samples=args.hdbscan_min_samples,
+            umap_sweep=args.umap_sweep,
+            hdbscan_jobs=args.hdbscan_jobs,
+        )
     if args.cluster:
         cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
                     min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
