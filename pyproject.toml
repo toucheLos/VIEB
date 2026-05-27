@@ -11,7 +11,7 @@ authors = [
 
 dependencies = [
     "numpy>=1.24",
-    "opencv-python==4.11.0.86",
+    "opencv-python-headless>=4.11",
     "scikit-learn==1.7.2",
     "scipy==1.15.3",
     "pandas==2.3.3",
@@ -19,7 +19,6 @@ dependencies = [
     "umap-learn>=0.5",
     "hdbscan>=0.8",
     "seaborn>=0.13",
-    "torch>=2.0",
     "pyyaml>=6.0"
 ]
 
@@ -27,8 +26,7 @@ dependencies = [
 tracking = [
     "deeplabcut[gui]==3.0.0rc13",
     "tables==3.10.1",
-    "torch==2.5.1+cu121",
-    "torchvision==0.20.1+cu121",
+    "torchvision",
     "napari==0.4.18",
     "vispy==0.12.2",
     "napari-console==0.1.4",

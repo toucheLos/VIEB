@@ -6,20 +6,20 @@
     "y_max": 960
   },
   "results_dir": "C:\\Users\\playtoe\\Programs\\neuron\\luna_lab\\VIEB\\results",
-  "raw_videos_dir": "C:\\Users\\playtoe\\Programs\\neuron\\luna_lab\\VIEB\\raw_videos",
+  "raw_videos_dir": "/mnt/ssd/Users/playtoe/Programs/neuron/luna_lab/VIEB/raw_videos",
   "fps": 30,
   "window_size": [
-    1136,
+    1080,
     768
   ],
-  "last_view": "Analysis",
+  "last_view": "Pipeline",
   "min_cluster_size": 2000,
   "collapse_threshold": 0.5,
-  "use_wavelets": true,
+  "use_wavelets": false,
   "enable_state_collapse": false,
   "export_clips": false,
-  "onboarding_complete": false,
-  "project_name": "VIEB Project",
+  "onboarding_complete": true,
+  "project_name": "Luna Lab",
   "last_completed_stage": "Comparison Report",
   "stage_status": {
     "5": "pending"
@@ -29,6 +29,14 @@
   },
   "context_groups": "A,B,C",
   "cohort_csv_path": "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB/design_and_cohorts/Luna Wildtype Behavior Checklis.xlsx",
+  "metadata_csv_path": "",
+  "hdbscan_min_samples": 0,
+  "umap_dims": 10,
+  "validate": false,
+  "min_confidence": 0.7,
+  "diagnose_mcs": "",
+  "umap_sweep": false,
+  "hdbscan_jobs": 1,
   "cohort_input_file": "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB/design_and_cohorts/Luna Wildtype Behavior Checklis.xlsx",
   "cohort_file": "cohort_normalized.csv",
   "jess_file": ""

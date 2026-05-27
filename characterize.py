@@ -39,6 +39,10 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter
 
+import vieb_config as _vc
+def _res(): return _vc.get_results_dir()
+def _meta(): return _vc.get_metadata_path()
+
 # ---------------------------------------------------------------------------
 # Feature index constants (from ml/feature_extraction.py _flatten_features)
 # [0:8]  speeds  [8:36]  pairwise dists  [36] centroid_spd
@@ -63,21 +67,21 @@ MIN_BOUT_FRAMES = 6  # 0.2 s
 # ---------------------------------------------------------------------------
 
 def _load_prereqs():
-    for path in ["results/features/index.json",
-                 "results/shared/cluster_info.json",
-                 "results/comparison/summary_table.csv"]:
+    for path in [os.path.join(_res(), "features", "index.json"),
+                 os.path.join(_res(), "shared", "cluster_info.json"),
+                 os.path.join(_res(), "comparison", "summary_table.csv")]:
         if not os.path.exists(path):
             sys.exit(f"Missing {path}. Run compare.py --extract / --cluster / --report first.")
 
-    with open("results/features/index.json") as f:
+    with open(os.path.join(_res(), "features", "index.json")) as f:
         index = json.load(f)
-    with open("results/shared/cluster_info.json") as f:
+    with open(os.path.join(_res(), "shared", "cluster_info.json")) as f:
         cluster_info = json.load(f)
-    df_summary = pd.read_csv("results/comparison/summary_table.csv")
+    df_summary = pd.read_csv(os.path.join(_res(), "comparison", "summary_table.csv"))
 
     meta = pd.DataFrame()
-    if os.path.exists("metadata.csv"):
-        meta = pd.read_csv("metadata.csv")
+    if os.path.exists(_meta()):
+        meta = pd.read_csv(_meta())
         meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
 
     return index, cluster_info, df_summary, meta
@@ -117,7 +121,7 @@ def _build_bouts_df(index, fps, meta):
 
     rows = []
     for stem in sorted(index.keys()):
-        lp = f"results/shared/{stem}_labels.npy"
+        lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(lp):
             continue
         labels = _smooth_labels(np.load(lp))
@@ -169,7 +173,7 @@ def _build_state_summary(index, cluster_info, df_summary, meta, bouts_df, fps):
         spd_vals, ang_vals, ent_vals, blen_vals, elong_vals = [], [], [], [], []
 
         for stem in sorted(index.keys()):
-            lp = f"results/shared/{stem}_labels.npy"
+            lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
             fp = index[stem]["features_path"]
             if not os.path.exists(lp) or not os.path.exists(fp):
                 continue
@@ -304,7 +308,7 @@ def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
     from sklearn.manifold import TSNE
     from ml import BehaviorPreprocessor
 
-    pp_path = "results/shared/preprocessor.pkl"
+    pp_path = os.path.join(_res(), "shared", "preprocessor.pkl")
     if not os.path.exists(pp_path):
         print("  Skipping t-SNE plot: preprocessor not found")
         return
@@ -322,7 +326,7 @@ def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
 
     feats_list, labels_list = [], []
     for stem in sorted(index.keys()):
-        lp = f"results/shared/{stem}_labels.npy"
+        lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         fp = index[stem]["features_path"]
         if not os.path.exists(lp) or not os.path.exists(fp):
             continue
@@ -437,14 +441,14 @@ def _find_hidden_behaviors(index, cluster_info, df_summary, bouts_df, out_dir):
                 })
 
     # --- Definition 2: anomaly bouts (top 1% by distance to cluster center) ---
-    preprocessor_path = "results/shared/preprocessor.pkl"
+    preprocessor_path = os.path.join(_res(), "shared", "preprocessor.pkl")
     if os.path.exists(preprocessor_path):
         from ml import BehaviorPreprocessor
         preprocessor = BehaviorPreprocessor.load(preprocessor_path)
 
         all_dist_by_stem = {}
         for stem in sorted(index.keys()):
-            lp = f"results/shared/{stem}_labels.npy"
+            lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
             fp = index[stem]["features_path"]
             if not os.path.exists(lp) or not os.path.exists(fp):
                 continue
@@ -588,7 +592,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     centers    = np.array(cluster_info["cluster_centers"])
 
     # Load or build bouts
-    bouts_csv = "results/characterization/bouts.csv"
+    bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     if os.path.exists(bouts_csv):
         bouts_df = pd.read_csv(bouts_csv)
         vp_map = {s: info["video_path"] for s, info in index.items()}
@@ -600,13 +604,13 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
 
     # Load preprocessor for "typical" ranking
     preprocessor = None
-    pp_path = "results/shared/preprocessor.pkl"
+    pp_path = os.path.join(_res(), "shared", "preprocessor.pkl")
     if os.path.exists(pp_path):
         from ml import BehaviorPreprocessor
         preprocessor = BehaviorPreprocessor.load(pp_path)
 
     # Which context is most enriched per state?
-    ctx_report_path = "results/characterization/context_report.csv"
+    ctx_report_path = os.path.join(_res(), "characterization", "context_report.csv")
     state_best_ctx = {}
     if os.path.exists(ctx_report_path):
         cr = pd.read_csv(ctx_report_path)
@@ -623,7 +627,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     # Cache smoothed labels per stem for purity-based clip expansion
     labels_cache = {}
     for stem in index.keys():
-        lp = f"results/shared/{stem}_labels.npy"
+        lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if os.path.exists(lp):
             labels_cache[stem] = _smooth_labels(np.load(lp))
 
@@ -632,7 +636,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
         if kb.empty:
             continue
 
-        out_dir = os.path.join("clips", f"state_{k}")
+        out_dir = os.path.join(_vc.get_clips_dir(), f"state_{k}")
         os.makedirs(out_dir, exist_ok=True)
         print(f"\nState {k}: {len(kb)} bouts → {out_dir}")
 
@@ -706,7 +710,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
 def cmd_summarize(fps=30.0):
     index, cluster_info, df_summary, meta = _load_prereqs()
     n_clusters = cluster_info["n_clusters"]
-    out_dir = "results/characterization"
+    out_dir = os.path.join(_res(), "characterization")
     os.makedirs(out_dir, exist_ok=True)
 
     print("Building bouts (smoothed labels, 0.5 s window)...")
@@ -767,7 +771,7 @@ def cmd_summarize(fps=30.0):
 
     parts = []
     for stem in sorted(index.keys()):
-        lp = f"results/shared/{stem}_labels.npy"
+        lp = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(lp):
             continue
         labels = _smooth_labels(np.load(lp))

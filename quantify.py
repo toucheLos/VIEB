@@ -32,10 +32,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-_OUT    = Path("results/quantification")
-_COMP   = Path("results/comparison")
-_CHAR   = Path("results/characterization")
-_SHARED = Path("results/shared")
+import vieb_config as _vc
+
+
+def _RES():    return Path(_vc.get_results_dir())
+def _OUT():    return _RES() / "quantification"
+def _COMP():   return _RES() / "comparison"
+def _CHAR():   return _RES() / "characterization"
+def _SHARED(): return _RES() / "shared"
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ def _require(path, hint=""):
 
 def _load_cluster_info():
     import json
-    p = _SHARED / "cluster_info.json"
+    p = _SHARED() / "cluster_info.json"
     if not p.exists():
         sys.exit("[ERROR] results/shared/cluster_info.json not found. Run compare.py --cluster first.")
     with open(p) as f:
@@ -219,7 +223,7 @@ def compute_transition_entropy(summary, dominant_id):
     col = _ctx_col(summary)
     if col is None:
         return pd.DataFrame()
-    trans_path = _COMP / "transition_table.csv"
+    trans_path = _COMP() / "transition_table.csv"
     if not trans_path.exists():
         return pd.DataFrame()
     trans = pd.read_csv(trans_path)
@@ -281,8 +285,8 @@ def _recompute_fracs_with_confidence(summary: pd.DataFrame, min_confidence: floa
         if not stem:
             rows_out.append(row)
             continue
-        lbl_path = _SHARED / f"{stem}_labels.npy"
-        prob_path = _SHARED / f"{stem}_probs.npy"
+        lbl_path = _SHARED() / f"{stem}_labels.npy"
+        prob_path = _SHARED() / f"{stem}_probs.npy"
         if not lbl_path.exists():
             rows_out.append(row)
             continue
@@ -300,13 +304,13 @@ def _recompute_fracs_with_confidence(summary: pd.DataFrame, min_confidence: floa
     return pd.DataFrame(rows_out)
 
 
-def build_master_table(cohort_path=None, out_dir=_OUT, min_confidence: float = 0.0):
+def build_master_table(cohort_path=None, out_dir=None, min_confidence: float = 0.0):
     """Assemble all per-animal scalars into master_table.csv."""
-    out_dir = Path(out_dir)
+    out_dir = _OUT() if out_dir is None else Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading pipeline outputs...")
-    summary = _require(_COMP / "summary_table.csv",
+    summary = _require(_COMP() / "summary_table.csv",
                        "Run: python compare.py --extract --cluster --report")
 
     if min_confidence > 0.0:
@@ -318,7 +322,7 @@ def build_master_table(cohort_path=None, out_dir=_OUT, min_confidence: float = 0
     dominant_id = _dominant_state_id(summary, cluster_info)
     print(f"  Dominant state (excluded): {dominant_id}")
 
-    fear_states = _identify_fear_states(_CHAR / "context_report.csv")
+    fear_states = _identify_fear_states(_CHAR() / "context_report.csv")
     print(f"  Fear-enriched states: {fear_states or 'none — auto-detecting'}")
 
     animal_ids = sorted(summary["animal_id"].dropna().unique().tolist())
@@ -1035,7 +1039,7 @@ def main():
                         help="With --contrast: run per-animal mode only (skip per-condition)")
     parser.add_argument("--cohort", metavar="FILE", default=None,
                         help="Cohort CSV/Excel (auto-detected if omitted)")
-    parser.add_argument("--out", metavar="DIR", default=str(_OUT),
+    parser.add_argument("--out", metavar="DIR", default=None,
                         help="Output directory (default: results/quantification)")
     args = parser.parse_args()
 
@@ -1043,10 +1047,10 @@ def main():
         parser.print_help(); sys.exit(1)
 
     if args.build:
-        build_master_table(cohort_path=args.cohort, out_dir=args.out)
+        build_master_table(cohort_path=args.cohort, out_dir=args.out or str(_OUT()))
 
     if args.contrast:
-        summary_csv = str(_COMP / "summary_table.csv")
+        summary_csv = str(_COMP() / "summary_table.csv")
         if not Path(summary_csv).exists():
             sys.exit("[ERROR] results/comparison/summary_table.csv not found. "
                      "Run: python compare.py --extract --cluster --report first.")
@@ -1063,36 +1067,36 @@ def main():
             # Per-condition (default) — one vector per cohort group
             compute_contrast_vector(
                 summary_csv=summary_csv,
-                output_dir=args.out,
+                output_dir=args.out or str(_OUT()),
                 cohort_csv=cohort_path,
                 per_condition=True,
             )
-            condition_csv = str(Path(args.out) / "condition_contrast.csv")
+            condition_csv = str(Path(args.out or str(_OUT())) / "condition_contrast.csv")
             if Path(condition_csv).exists():
-                compute_cohort_distances(condition_csv, output_dir=args.out)
+                compute_cohort_distances(condition_csv, output_dir=args.out or str(_OUT()))
 
         # Per-animal always runs (both modes) unless --per-animal forces solo
         compute_contrast_vector(
             summary_csv=summary_csv,
-            output_dir=args.out,
+            output_dir=args.out or str(_OUT()),
             cohort_csv=cohort_path,
             per_condition=False,
         )
 
         # Cohort-level bootstrap + Mann-Whitney on per-animal magnitudes
         if not per_animal_only:
-            animal_csv = str(Path(args.out) / "contrast_vectors.csv")
+            animal_csv = str(Path(args.out or str(_OUT())) / "contrast_vectors.csv")
             if Path(animal_csv).exists():
                 tmp = pd.read_csv(animal_csv)
                 if "cohort_label" in tmp.columns:
                     compute_cohort_contrast(
                         contrast_csv=animal_csv,
                         cohort_csv=cohort_path,
-                        output_dir=args.out,
+                        output_dir=args.out or str(_OUT()),
                     )
 
     if args.jess:
-        master_path = Path(args.out) / "master_table.csv"
+        master_path = Path(args.out or str(_OUT())) / "master_table.csv"
         if not master_path.exists():
             sys.exit(f"[ERROR] {master_path} not found. Run --build first.")
         ext = os.path.splitext(args.jess)[1].lower()

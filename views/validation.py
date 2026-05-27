@@ -233,7 +233,7 @@ class ValidationView(QWidget):
 
         split = QHBoxLayout()
         split.setSpacing(10)
-        ll.addLayout(split, stretch=1)
+        ll.addLayout(split, stretch=2)
 
         left = QGroupBox("Frame Sampler")
         adv_ll = QVBoxLayout(left)
@@ -260,7 +260,8 @@ class ValidationView(QWidget):
         center = QGroupBox("Frame Display")
         cl = QVBoxLayout(center)
         self._adv_frame = QLabel("Select a video and sample frames to begin", alignment=Qt.AlignCenter)
-        self._adv_frame.setMinimumSize(540, 360)
+        self._adv_frame.setMinimumSize(320, 240)
+        self._adv_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._adv_frame.setStyleSheet("background:#111;color:#999;")
         cl.addWidget(self._adv_frame)
         self._adv_frame_info = QLabel("State: - | kinematics: -")
@@ -272,6 +273,7 @@ class ValidationView(QWidget):
 
         right = QGroupBox("Label Assignment")
         rl = QVBoxLayout(right)
+        rl.setContentsMargins(8, 16, 8, 8)
         for name in ("Freeze", "Walk", "Groom", "Rear", "Other"):
             b = QPushButton(name)
             b.setMinimumHeight(44)
@@ -285,18 +287,23 @@ class ValidationView(QWidget):
         split.addWidget(right, stretch=1)
 
         bottom = QGroupBox("Results")
-        bl = QVBoxLayout(bottom)
+        bottom.setMinimumHeight(180)
+        bl_outer = QHBoxLayout(bottom)
         if _MPL:
-            self._adv_cm_canvas = MplCanvas(figsize=(5, 3))
-            bl.addWidget(self._adv_cm_canvas)
+            self._adv_cm_canvas = MplCanvas(figsize=(4, 2.2))
+            bl_outer.addWidget(self._adv_cm_canvas, stretch=3)
         else:
             self._adv_cm_canvas = None
-            bl.addWidget(QLabel("Install matplotlib for confusion matrix heatmap."))
+            bl_outer.addWidget(QLabel("Install matplotlib for confusion matrix heatmap."), stretch=3)
+        bl_right = QVBoxLayout()
         self._adv_agree = QLabel("Agreement per state: -")
-        bl.addWidget(self._adv_agree)
+        self._adv_agree.setWordWrap(True)
+        bl_right.addWidget(self._adv_agree)
         self._adv_export_btn = QPushButton("Export labels CSV")
         self._adv_export_btn.clicked.connect(self._adv_export)
-        bl.addWidget(self._adv_export_btn)
+        bl_right.addWidget(self._adv_export_btn)
+        bl_right.addStretch()
+        bl_outer.addLayout(bl_right, stretch=1)
         ll.addWidget(bottom)
 
     # ------------------------------------------------------------------

@@ -130,6 +130,26 @@ class SettingsView(QWidget):
             "Typical values: 25 (PAL), 30 (NTSC), 60 (high-speed)."
         )
 
+        self._umap_dims = QSpinBox()
+        self._umap_dims.setRange(2, 50)
+        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
+        row(
+            "UMAP dimensions", self._umap_dims,
+            "Number of UMAP output dimensions before HDBSCAN clustering.\n"
+            "Lower values (3–5) run faster and produce coarser clusters.\n"
+            "Higher values (10–15) preserve more structure. Default: 10."
+        )
+
+        self._hdbscan_min_samples = QSpinBox()
+        self._hdbscan_min_samples.setRange(0, 500)
+        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
+        row(
+            "HDBSCAN min_samples", self._hdbscan_min_samples,
+            "HDBSCAN min_samples controls how conservative cluster borders are.\n"
+            "0 = use the same value as min_cluster_size (recommended default).\n"
+            "Lower values produce more clusters with softer borders."
+        )
+
         lay.addLayout(form)
 
         save = QPushButton("Save Settings")
@@ -153,6 +173,8 @@ class SettingsView(QWidget):
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
         self.cfg["fps"] = self._fps.value()
+        self.cfg["umap_dims"] = self._umap_dims.value()
+        self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()
         _save_cfg(self.cfg)
         self.settings_changed.emit(self.cfg)
         QMessageBox.information(self, "Settings", "Saved.")

@@ -175,6 +175,8 @@ class PipelineRunner(QThread):
             use_wavelets = bool(self.cfg.get("use_wavelets", True))
             enable_collapse = bool(self.cfg.get("enable_state_collapse", False))
             export_clips = bool(self.cfg.get("export_clips", False))
+            umap_dims = int(self.cfg.get("umap_dims", 10))
+            hdbscan_min_samples = int(self.cfg.get("hdbscan_min_samples", 0)) or None
 
             for sid in self.stage_ids:
                 if sid == 7 and not enable_collapse:
@@ -194,7 +196,12 @@ class PipelineRunner(QThread):
                             ok = self._run_cluster_wsl(fps, mcs)
                         else:
                             from compare import cmd_cluster
-                            cmd_cluster(fps=fps, min_cluster_size=mcs)
+                            cmd_cluster(
+                                fps=fps,
+                                min_cluster_size=mcs,
+                                umap_dims=umap_dims,
+                                min_samples=hdbscan_min_samples,
+                            )
                             ok = True
                         if ok:
                             for b in (3, 4, 5, 6):

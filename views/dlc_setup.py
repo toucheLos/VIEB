@@ -10,11 +10,24 @@ import pandas as pd
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
     QDialogButtonBox,
 )
+
+# Canonical role names shown in the keypoint-mapping dropdowns
+_ROLE_OPTIONS = [
+    "— unassigned —",
+    "nose",
+    "left_ear",
+    "right_ear",
+    "center/centroid",
+    "left_hip",
+    "right_hip",
+    "tail_base",
+    "tail_tip",
+]
 
 from _utils import ROOT, RESULTS, _load_cfg, _save_cfg, _register_project, _load_projects
 from _workers import SubprocessWorker
@@ -113,10 +126,12 @@ class DLCSetupView(QWidget):
         super().__init__()
         self.cfg = cfg
         self._worker: SubprocessWorker | None = None
+        self._keypoint_combos: dict[str, QComboBox] = {}
         self._build()
         self._refresh_recent()
         self._refresh_project_status()
         QTimer.singleShot(0, self._detect_and_show_status)
+        QTimer.singleShot(50, self._try_preload_keypoints)
 
     # ── Layout ───────────────────────────────────────────────────────────────
 
@@ -172,6 +187,28 @@ class DLCSetupView(QWidget):
         self._tools_visible = True
         outer.addWidget(self._tools_wrapper)
         outer = tools_lay   # redirect remaining build into wrapper
+
+        # ── Import existing project section ───────────────────────────────────
+        self._build_import_section(outer)
+        self._build_keypoint_panel(outer)
+
+        # ── Divider ───────────────────────────────────────────────────────────
+        div_w = QWidget()
+        div_lay = QHBoxLayout(div_w)
+        div_lay.setContentsMargins(0, 6, 0, 6)
+        div_lay.setSpacing(10)
+        left_line = QFrame()
+        left_line.setFrameShape(QFrame.HLine)
+        left_line.setStyleSheet("color:#ccc;")
+        div_lbl = QLabel("— or create a new DLC project —")
+        div_lbl.setStyleSheet("color:#888;font-size:11px;white-space:nowrap;")
+        right_line = QFrame()
+        right_line.setFrameShape(QFrame.HLine)
+        right_line.setStyleSheet("color:#ccc;")
+        div_lay.addWidget(left_line, stretch=1)
+        div_lay.addWidget(div_lbl)
+        div_lay.addWidget(right_line, stretch=1)
+        outer.addWidget(div_w)
 
         # ── Project section ──────────────────────────────────────────────────
         proj_box = QGroupBox("DLC Project")
@@ -323,6 +360,243 @@ class DLCSetupView(QWidget):
 
         outer.addLayout(bottom_row)
         outer.addStretch()
+
+    # ── Import section builders ───────────────────────────────────────────────
+
+    def _build_import_section(self, layout: QVBoxLayout):
+        """'Import Existing DLC Project' group box, inserted at the top of the tools area."""
+        import_box = QGroupBox("Import Existing DLC Project")
+        il = QVBoxLayout(import_box)
+        il.setSpacing(8)
+
+        desc = QLabel(
+            "If you have already trained a DLC model, point VIEB to your config.yaml file. "
+            "VIEB only needs the config.yaml and the dlc-models/ folder in the same directory."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color:#555;")
+        il.addWidget(desc)
+
+        path_row = QHBoxLayout()
+        self._import_path_le = QLineEdit()
+        self._import_path_le.setReadOnly(True)
+        self._import_path_le.setPlaceholderText("No DLC project linked yet…")
+        # Pre-fill from vieb_config (may already be set from a previous session)
+        try:
+            cur = get_dlc_project_path()
+            if cur:
+                self._import_path_le.setText(cur)
+        except Exception:
+            pass
+        path_row.addWidget(self._import_path_le, stretch=1)
+
+        browse_import_btn = QPushButton("Browse…")
+        browse_import_btn.setToolTip("Select a config.yaml from your trained DLC project")
+        browse_import_btn.clicked.connect(self._on_import_browse)
+        path_row.addWidget(browse_import_btn)
+        il.addLayout(path_row)
+
+        layout.addWidget(import_box)
+
+    def _build_keypoint_panel(self, layout: QVBoxLayout):
+        """Keypoint role mapping panel — hidden until a project is successfully imported."""
+        self._keypoint_panel = QGroupBox(
+            "Keypoint Roles (optional — improves postural feature quality)"
+        )
+        self._keypoint_panel.hide()
+        kp_outer = QVBoxLayout(self._keypoint_panel)
+        kp_outer.setSpacing(8)
+
+        # Scroll area hosts the two-column grid (replaced on each import)
+        self._keypoint_scroll = QScrollArea()
+        self._keypoint_scroll.setWidgetResizable(True)
+        self._keypoint_scroll.setMaximumHeight(260)
+        self._keypoint_scroll.setFrameShape(QFrame.NoFrame)
+        kp_outer.addWidget(self._keypoint_scroll)
+
+        save_btn = QPushButton("Save Keypoint Mapping")
+        save_btn.setToolTip(
+            "Write the mapping to config.json under 'keypoint_roles' "
+            "(used by feature_extraction.py for correct postural scalars)"
+        )
+        save_btn.clicked.connect(self._save_keypoint_mapping)
+        kp_outer.addWidget(save_btn, alignment=Qt.AlignRight)
+
+        layout.addWidget(self._keypoint_panel)
+
+    # ── Import logic ──────────────────────────────────────────────────────────
+
+    def _on_import_browse(self):
+        """Open a file dialog to select config.yaml from an existing DLC project."""
+        start_dir = self._import_path_le.text().strip() or str(Path.home())
+        config_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select DLC config.yaml",
+            start_dir,
+            "config.yaml (config.yaml);;All files (*)",
+        )
+        if config_file:
+            self._do_import_config(config_file)
+
+    def _do_import_config(self, config_file: str):
+        """Execute the full import sequence for a selected config.yaml."""
+        # a. Parse YAML
+        try:
+            import yaml as _yaml
+            with open(config_file, encoding="utf-8") as fh:
+                dlc_cfg = _yaml.safe_load(fh)
+        except Exception as exc:
+            QMessageBox.warning(self, "Parse Error", f"Could not read config.yaml:\n{exc}")
+            return
+
+        if not isinstance(dlc_cfg, dict):
+            QMessageBox.warning(
+                self, "Invalid Config",
+                "The selected file does not appear to be a valid DLC config.yaml."
+            )
+            return
+
+        project_dir = os.path.dirname(os.path.abspath(config_file))
+
+        # b. Warn if dlc-models/ is absent (non-fatal)
+        if not os.path.isdir(os.path.join(project_dir, "dlc-models")):
+            QMessageBox.warning(
+                self,
+                "dlc-models/ Not Found",
+                "dlc-models/ folder not found next to config.yaml. The model weights may be "
+                "missing. VIEB can still run analysis if the CSVs already exist in raw_videos/.",
+            )
+
+        # c. Persist the project path via vieb_config
+        set_dlc_project_path(project_dir)
+
+        # d. Also write it into the GUI's live config dict and save to config.json
+        self.cfg["dlc_project_path"] = project_dir
+        _save_cfg(self.cfg)
+
+        # e. Update the read-only display field
+        self._import_path_le.setText(project_dir)
+
+        # f. Success notification
+        QMessageBox.information(self, "DLC Project Linked", "DLC project linked successfully.")
+
+        # Sync the existing project-path line edit and status so the rest of the
+        # UI (pose-estimation buttons, _validate_project, etc.) picks it up too.
+        self._path_le.setText(project_dir)
+        _register_project(project_dir)
+        self._refresh_recent()
+
+        # Show keypoint mapping panel
+        bodyparts = dlc_cfg.get("bodyparts", [])
+        if bodyparts:
+            self._populate_keypoint_panel(bodyparts)
+
+    # ── Keypoint mapping ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _match_role(name: str) -> str:
+        """Case-insensitive heuristic: map a DLC keypoint name to a canonical role."""
+        n = name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+        if n == "nose":
+            return "nose"
+        if n in ("left_ear", "leftear", "l_ear", "lear"):
+            return "left_ear"
+        if n in ("right_ear", "rightear", "r_ear", "rear"):
+            return "right_ear"
+        if n in ("center", "centroid", "centre", "mid", "midbody", "mid_body",
+                 "center_centroid", "center_centroid"):
+            return "center/centroid"
+        if n in ("left_hip", "lefthip", "l_hip", "lhip"):
+            return "left_hip"
+        if n in ("right_hip", "righthip", "r_hip", "rhip"):
+            return "right_hip"
+        if n in ("tail_base", "tailbase", "tail_root", "tailroot"):
+            return "tail_base"
+        if n in ("tail_tip", "tailtip", "tail_end", "tailend", "tail"):
+            return "tail_tip"
+        return "— unassigned —"
+
+    def _populate_keypoint_panel(self, bodyparts: list):
+        """Build (or rebuild) the two-column keypoint → role grid and show the panel."""
+        self._keypoint_combos = {}
+
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(5)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 2)
+
+        # Header row
+        hdr_kp = QLabel("Keypoint Name")
+        hdr_kp.setStyleSheet("font-weight:bold;color:#333;")
+        hdr_role = QLabel("Role")
+        hdr_role.setStyleSheet("font-weight:bold;color:#333;")
+        grid.addWidget(hdr_kp, 0, 0)
+        grid.addWidget(hdr_role, 0, 1)
+
+        for row_idx, name in enumerate(bodyparts, start=1):
+            lbl = QLabel(name)
+            combo = QComboBox()
+            for role in _ROLE_OPTIONS:
+                combo.addItem(role)
+            matched = self._match_role(name)
+            combo.setCurrentIndex(
+                _ROLE_OPTIONS.index(matched) if matched in _ROLE_OPTIONS else 0
+            )
+            grid.addWidget(lbl, row_idx, 0)
+            grid.addWidget(combo, row_idx, 1)
+            self._keypoint_combos[name] = combo
+
+        # Pad so the grid doesn't stretch weirdly when there are few keypoints
+        grid.setRowStretch(len(bodyparts) + 1, 1)
+
+        self._keypoint_scroll.setWidget(container)
+        self._keypoint_panel.show()
+
+    def _save_keypoint_mapping(self):
+        """Write {keypoint_name: role} (skipping unassigned) to config.json."""
+        if not self._keypoint_combos:
+            QMessageBox.information(
+                self, "Nothing to Save",
+                "Import a DLC project first to generate the keypoint mapping."
+            )
+            return
+        mapping = {
+            name: combo.currentText()
+            for name, combo in self._keypoint_combos.items()
+            if combo.currentText() != "— unassigned —"
+        }
+        self.cfg["keypoint_roles"] = mapping
+        _save_cfg(self.cfg)
+        QMessageBox.information(
+            self, "Keypoint Mapping Saved",
+            f"Saved {len(mapping)} keypoint role(s) to config.json."
+        )
+
+    def _try_preload_keypoints(self):
+        """On startup, show the keypoint panel if a valid project is already linked."""
+        try:
+            project_dir = get_dlc_project_path()
+            if not project_dir:
+                return
+            config_yaml = os.path.join(project_dir, "config.yaml")
+            if not os.path.exists(config_yaml):
+                return
+            import yaml as _yaml
+            with open(config_yaml, encoding="utf-8") as fh:
+                dlc_cfg = _yaml.safe_load(fh)
+            bodyparts = dlc_cfg.get("bodyparts", []) if isinstance(dlc_cfg, dict) else []
+            if bodyparts:
+                # Apply any previously saved role assignments as defaults
+                saved_roles: dict = self.cfg.get("keypoint_roles", {})
+                self._populate_keypoint_panel(bodyparts)
+                for name, combo in self._keypoint_combos.items():
+                    if name in saved_roles and saved_roles[name] in _ROLE_OPTIONS:
+                        combo.setCurrentIndex(_ROLE_OPTIONS.index(saved_roles[name]))
+        except Exception:
+            pass  # Non-critical startup enhancement — never crash here
 
     # ── Project management ────────────────────────────────────────────────────
 

@@ -26,6 +26,11 @@ import pandas as pd
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
+import vieb_config as _vc
+def _raw(): return _vc.get_raw_videos_dir()
+def _res(): return _vc.get_results_dir()
+def _meta(): return _vc.get_metadata_path()
+
 
 # ---------------------------------------------------------------------------
 # GPU detection and hardware banner
@@ -93,13 +98,13 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     from ml import PoseFeatureExtractor
     from pose_io import load_pose, _find_dlc_csv
 
-    videos = sorted(glob.glob("raw_videos/*.mp4"))
+    videos = sorted(glob.glob(os.path.join(_raw(), "*.mp4")))
     if not videos:
         sys.exit("No .mp4 files found in raw_videos/")
 
-    os.makedirs("results/features", exist_ok=True)
+    os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
 
-    index_path = "results/features/index.json"
+    index_path = os.path.join(_res(), "features", "index.json")
     index = {}
     if os.path.exists(index_path):
         with open(index_path) as f:
@@ -114,7 +119,7 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     print(f"Extracting features from {len(videos)} videos...")
     for video_path in videos:
         stem = os.path.splitext(os.path.basename(video_path))[0]
-        out_path = os.path.join("results", "features", f"{stem}_features.npy")
+        out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
 
         if os.path.exists(out_path):
             skip_count += 1
@@ -313,8 +318,8 @@ def _run_validation_report(
         "per_state_delta": per_state_delta,
         "mean_delta": round(mean_delta, 6),
     }
-    os.makedirs("results/shared", exist_ok=True)
-    with open("results/shared/validation_report.json", "w") as f:
+    os.makedirs(os.path.join(_res(), "shared"), exist_ok=True)
+    with open(os.path.join(_res(), "shared", "validation_report.json"), "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nValidation report saved: results/shared/validation_report.json")
 
@@ -342,7 +347,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         UMAPClass = umap_lib.UMAP
         HDBSCANClass = hdbscan_lib.HDBSCAN
 
-    index_path = "results/features/index.json"
+    index_path = os.path.join(_res(), "features", "index.json")
     if not os.path.exists(index_path):
         sys.exit("No index found. Run --extract first.")
     with open(index_path) as f:
@@ -350,7 +355,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     if not index:
         sys.exit("Index is empty. Run --extract first.")
 
-    os.makedirs("results/shared", exist_ok=True)
+    os.makedirs(os.path.join(_res(), "shared"), exist_ok=True)
 
     # ---- Load all feature matrices ----
     stems = sorted(index.keys())
@@ -397,12 +402,12 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     else:
         pooled_scaled = preprocessor.fit_transform(pooled)
 
-    preprocessor.save("results/shared/preprocessor.pkl")
+    preprocessor.save(os.path.join(_res(), "shared", "preprocessor.pkl"))
     print(f"  Standardized to {pooled_scaled.shape[1]} features")
 
     # ---- UMAP reduction ----
     print(f"\nFitting UMAP (n_components={umap_dims}, n_neighbors=30)...")
-    umap_save_path = "results/shared/umap_reducer.pkl"
+    umap_save_path = os.path.join(_res(), "shared", "umap_reducer.pkl")
     if os.path.exists(umap_save_path):
         try:
             _saved = joblib.load(umap_save_path)
@@ -457,7 +462,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     elif hasattr(pooled_umap, "get"):
         pooled_umap = pooled_umap.get()
     pooled_umap = np.asarray(pooled_umap, dtype=np.float32)
-    joblib.dump(reducer, "results/shared/umap_reducer.pkl")
+    joblib.dump(reducer, os.path.join(_res(), "shared", "umap_reducer.pkl"))
     print(f"  UMAP embedding: {pooled_umap.shape}")
 
     # ---- HDBSCAN clustering ----
@@ -588,7 +593,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         else:
             cluster_centers.append([0.0] * pooled_scaled.shape[1])
 
-    joblib.dump(clusterer_model, "results/shared/clusterer.pkl")
+    joblib.dump(clusterer_model, os.path.join(_res(), "shared", "clusterer.pkl"))
     cluster_info = {
         "n_clusters": n_found,
         "cluster_centers": cluster_centers,
@@ -597,7 +602,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
     }
-    with open("results/shared/cluster_info.json", "w") as f:
+    with open(os.path.join(_res(), "shared", "cluster_info.json"), "w") as f:
         json.dump(cluster_info, f, indent=2)
 
     # ---- Per-video labels (slice from pooled HDBSCAN result) ----
@@ -623,8 +628,8 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
 
     # ---- Save smoothed labels and probabilities ----
     for stem, smoothed, probs in zip(stems, smoothed_labels_all, raw_probs_all):
-        np.save(f"results/shared/{stem}_labels.npy", smoothed.astype(np.int32))
-        np.save(f"results/shared/{stem}_probs.npy", probs.astype(np.float32))
+        np.save(os.path.join(_res(), "shared", f"{stem}_labels.npy"), smoothed.astype(np.int32))
+        np.save(os.path.join(_res(), "shared", f"{stem}_probs.npy"), probs.astype(np.float32))
 
     all_labels = np.concatenate(smoothed_labels_all)
     n_valid_total = int((all_labels >= 0).sum())
@@ -661,10 +666,10 @@ def cmd_collapse(threshold: float = 0.5):
     """
     from collections import defaultdict
 
-    cluster_info_path = "results/shared/cluster_info.json"
+    cluster_info_path = os.path.join(_res(), "shared", "cluster_info.json")
     if not os.path.exists(cluster_info_path):
         sys.exit("No cluster_info.json found. Run --cluster first.")
-    index_path = "results/features/index.json"
+    index_path = os.path.join(_res(), "features", "index.json")
     if not os.path.exists(index_path):
         sys.exit("No feature index found. Run --extract first.")
 
@@ -733,7 +738,7 @@ def cmd_collapse(threshold: float = 0.5):
 
     print(f"\nRemapping {len(stems)} label files...")
     for stem in stems:
-        labels_path = f"results/shared/{stem}_labels.npy"
+        labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(labels_path):
             continue
         labels = np.load(labels_path)
@@ -877,7 +882,7 @@ def _plot_animal_trajectories(df, state_cols, n_clusters):
 
     plt.suptitle("Per-Animal Behavioral State Trajectory Across Days", fontsize=12)
     plt.tight_layout()
-    save_path = "results/comparison/animal_trajectories.png"
+    save_path = os.path.join(_res(), "comparison", "animal_trajectories.png")
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {save_path}")
@@ -887,13 +892,14 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     import matplotlib.pyplot as plt
     from scipy import stats
 
-    for path in ["results/features/index.json", "results/shared/cluster_info.json"]:
+    for path in [os.path.join(_res(), "features", "index.json"),
+                  os.path.join(_res(), "shared", "cluster_info.json")]:
         if not os.path.exists(path):
             sys.exit(f"Missing {path}. Run --extract and --cluster first.")
 
-    with open("results/features/index.json") as f:
+    with open(os.path.join(_res(), "features", "index.json")) as f:
         index = json.load(f)
-    with open("results/shared/cluster_info.json") as f:
+    with open(os.path.join(_res(), "shared", "cluster_info.json")) as f:
         cluster_info = json.load(f)
     n_clusters = cluster_info["n_clusters"]
     state_cols = [f"state_{k}_frac" for k in range(n_clusters)]
@@ -906,13 +912,13 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     rows = []
     trans_rows = []  # flattened transition probabilities per video
     for stem in sorted(index.keys()):
-        labels_path = f"results/shared/{stem}_labels.npy"
+        labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(labels_path):
             continue
         labels = np.load(labels_path)
 
         if min_confidence > 0.0:
-            probs_path = f"results/shared/{stem}_probs.npy"
+            probs_path = os.path.join(_res(), "shared", f"{stem}_probs.npy")
             if os.path.exists(probs_path):
                 probs = np.load(probs_path)
                 valid = (labels >= 0) & (probs >= min_confidence)
@@ -938,15 +944,15 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     df_states = pd.DataFrame(rows)
 
-    if not os.path.exists("metadata.csv"):
+    if not os.path.exists(_meta()):
         sys.exit("metadata.csv not found.")
-    meta = pd.read_csv("metadata.csv")
+    meta = pd.read_csv(_meta())
     meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
 
     df = df_states.merge(meta, on="stem", how="left")
 
-    os.makedirs("results/comparison", exist_ok=True)
-    df.to_csv("results/comparison/summary_table.csv", index=False)
+    os.makedirs(os.path.join(_res(), "comparison"), exist_ok=True)
+    df.to_csv(os.path.join(_res(), "comparison", "summary_table.csv"), index=False)
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
 
     # ---- Transition matrix outputs ----
@@ -959,7 +965,7 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     df_trans_full = df_states.merge(
         pd.DataFrame(trans_rows), on="stem", how="left"
     ).merge(meta, on="stem", how="left")
-    df_trans_full.to_csv("results/comparison/transition_table.csv", index=False)
+    df_trans_full.to_csv(os.path.join(_res(), "comparison", "transition_table.csv"), index=False)
     print(f"Transition table saved: results/comparison/transition_table.csv")
 
     # Heatmap per context
@@ -974,7 +980,7 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
             group_matrices[ctx] = np.stack(mats).mean(axis=0)
         _plot_transition_heatmaps(
             group_matrices, n_clusters,
-            "results/comparison/transition_by_context.png"
+            os.path.join(_res(), "comparison", "transition_by_context.png")
         )
 
     # ---- Plots ----
@@ -1020,21 +1026,21 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     # Fear comparison (only if column is filled in)
     if df["fear"].notna().any():
-        boxplot_by_group("fear", "results/comparison/state_by_fear.png", "Fear Condition")
+        boxplot_by_group("fear", os.path.join(_res(), "comparison", "state_by_fear.png"), "Fear Condition")
     else:
         print("  SKIP state_by_fear.png: 'fear' column in metadata.csv is empty (fill it in)")
 
     if "day" in df.columns:
-        boxplot_by_group("day", "results/comparison/state_by_day.png", "Day")
+        boxplot_by_group("day", os.path.join(_res(), "comparison", "state_by_day.png"), "Day")
 
     if "context" in df.columns:
-        boxplot_by_group("context", "results/comparison/state_by_context.png", "Context")
+        boxplot_by_group("context", os.path.join(_res(), "comparison", "state_by_context.png"), "Context")
 
     if "experiment" in df.columns:
-        boxplot_by_group("experiment", "results/comparison/state_by_experiment.png", "Experiment (CFC vs CFD)")
+        boxplot_by_group("experiment", os.path.join(_res(), "comparison", "state_by_experiment.png"), "Experiment (CFC vs CFD)")
 
     if "animal_id" in df.columns:
-        boxplot_by_group("animal_id", "results/comparison/state_by_animal.png", "Animal ID")
+        boxplot_by_group("animal_id", os.path.join(_res(), "comparison", "state_by_animal.png"), "Animal ID")
 
     # Per-animal trajectory across days
     if "animal_id" in df.columns and "day" in df.columns:
@@ -1088,12 +1094,12 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     print("\nComputing behavioral contrast vectors...")
     try:
         contrast_df = compute_contrast_vector(
-            summary_csv="results/comparison/summary_table.csv",
-            output_dir="results/quantification",
+            summary_csv=os.path.join(_res(), "comparison", "summary_table.csv"),
+            output_dir=os.path.join(_res(), "quantification"),
             cohort_csv=cohort,
         )
 
-        master_path = "results/quantification/master_table.csv"
+        master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and "animal_id" in contrast_df.columns:
             master = pd.read_csv(master_path)
             master["animal_id"] = master["animal_id"].astype(str)
@@ -1112,11 +1118,11 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     try:
         from quantify import compute_state_learning_rates
         lr_df = compute_state_learning_rates(
-            "results/comparison/summary_table.csv",
-            output_dir="results/quantification",
+            os.path.join(_res(), "comparison", "summary_table.csv"),
+            output_dir=os.path.join(_res(), "quantification"),
             cohort_csv=cohort,
         )
-        master_path = "results/quantification/master_table.csv"
+        master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and not lr_df.empty:
             master = pd.read_csv(master_path)
             master["animal_id"] = master["animal_id"].astype(str)

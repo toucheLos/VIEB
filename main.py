@@ -29,16 +29,19 @@ import sys
 import numpy as np
 import pandas as pd
 
+import vieb_config as _vc
+
 
 # Locate DLC config
 
 def _find_dlc_config(hint=None):
     if hint:
         return hint
-    candidates = glob.glob("VIEB-*/config.yaml") + glob.glob("**/config.yaml", recursive=False)
-    if not candidates:
-        sys.exit("ERROR: Could not find DLC config.yaml. Pass --dlc-config explicitly.")
-    return candidates[0]
+    path = _vc.get_dlc_config_path()
+    if path:
+        return path
+    sys.exit("ERROR: Could not find DLC config.yaml. Pass --dlc-config explicitly.")
+
 
 
 def _load_bodyparts(config_path):
@@ -233,7 +236,7 @@ def main():
     config_path = _find_dlc_config(args.dlc_config)
 
     if args.all:
-        videos = sorted(glob.glob("raw_videos/*.mp4"))
+        videos = sorted(glob.glob(os.path.join(_vc.get_raw_videos_dir(), "*.mp4")))
         if not videos:
             sys.exit("No .mp4 files found in raw_videos/")
         print(f"Found {len(videos)} videos. Processing those with DLC output...")
@@ -242,7 +245,7 @@ def main():
             if _find_dlc_csv(video) is None:
                 continue
             stem = os.path.splitext(os.path.basename(video))[0]
-            out = args.output or os.path.join("results", stem)
+            out = args.output or os.path.join(_vc.get_results_dir(), stem)
             result = analyze_video(
                 video, out,
                 fps=args.fps,
@@ -256,7 +259,7 @@ def main():
         if not os.path.exists(args.video):
             sys.exit(f"ERROR: Video not found: {args.video}")
         stem = os.path.splitext(os.path.basename(args.video))[0]
-        out = args.output or os.path.join("results", stem)
+        out = args.output or os.path.join(_vc.get_results_dir(), stem)
         analyze_video(
             args.video, out,
             fps=args.fps,

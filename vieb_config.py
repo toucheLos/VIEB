@@ -95,6 +95,44 @@ def set_dlc_project_path(path: str) -> None:
     _save_config(cfg)
 
 
+def get_raw_videos_dir() -> str:
+    """Return the raw-videos directory, reading 'raw_videos_dir' from config.json.
+    Falls back to PROJECT_ROOT/raw_videos when the key is absent or empty."""
+    cfg = _load_config()
+    val = cfg.get("raw_videos_dir")
+    if val and isinstance(val, str) and val.strip():
+        return val.strip()
+    return os.path.join(PROJECT_ROOT, "raw_videos")
+
+
+def get_results_dir() -> str:
+    """Return the results directory, reading 'results_dir' from config.json.
+    Falls back to PROJECT_ROOT/results when the key is absent or empty."""
+    cfg = _load_config()
+    val = cfg.get("results_dir")
+    if val and isinstance(val, str) and val.strip():
+        return val.strip()
+    return os.path.join(PROJECT_ROOT, "results")
+
+
+def get_metadata_path() -> str:
+    """Return the metadata CSV path, reading 'metadata_csv_path' from config.json.
+    Falls back to PROJECT_ROOT/metadata.csv when the key is absent or empty."""
+    cfg = _load_config()
+    val = cfg.get("metadata_csv_path")
+    if val and isinstance(val, str) and val.strip():
+        return val.strip()
+    return os.path.join(PROJECT_ROOT, "metadata.csv")
+
+
+def get_clips_dir() -> str:
+    """Return the clips directory.
+    Derived as the sibling of get_results_dir() named 'clips', which reproduces
+    the default PROJECT_ROOT/clips when results_dir is PROJECT_ROOT/results."""
+    from pathlib import Path as _Path
+    return str(_Path(get_results_dir()).parent / "clips")
+
+
 def require_dlc_project_path() -> str:
     """
     Like get_dlc_project_path() but exits with a clear, actionable message if

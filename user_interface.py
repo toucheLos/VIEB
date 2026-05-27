@@ -31,7 +31,9 @@ try:
         QComboBox,
         QDialog,
         QDialogButtonBox,
+        QDoubleSpinBox,
         QFileDialog,
+        QFormLayout,
         QFrame,
         QGridLayout,
         QGroupBox,
@@ -80,16 +82,31 @@ except Exception:
 _CV2 = False
 try:
     import cv2
-
     _CV2 = True
 except Exception:
     pass
 
 ROOT = Path(__file__).parent
-RESULTS = ROOT / "results"
-CLIPS = ROOT / "clips"
 CONFIG_PATH = ROOT / "config.json"
-VALIDATION_DIR = RESULTS / "validation"
+
+
+def _results_path() -> Path:
+    import vieb_config
+    return Path(vieb_config.get_results_dir())
+
+
+def _clips_path() -> Path:
+    import vieb_config
+    return Path(vieb_config.get_clips_dir())
+
+
+def _validation_path() -> Path:
+    return _results_path() / "validation"
+
+
+RESULTS = _results_path()
+CLIPS = _clips_path()
+VALIDATION_DIR = _validation_path()
 
 try:
     from views.analysis import AnalysisView as _AnalysisView
@@ -167,6 +184,18 @@ def _wsl_check_installed() -> bool:
     try:
         r = subprocess.run(["wsl", "--version"], capture_output=True, timeout=8)
         return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _probe_torch_cuda() -> bool:
+    """Return True if torch is installed and reports a usable CUDA GPU.
+
+    Used on Linux/macOS instead of the WSL2 + cuML probe.
+    """
+    try:
+        import torch
+        return torch.cuda.is_available()
     except Exception:
         return False
 
@@ -354,6 +383,14 @@ _DEFAULT_CFG = {
     "stage_last_run": {},
     "context_groups": "A,B,C",
     "cohort_csv_path": "",
+    "metadata_csv_path": "",
+    "hdbscan_min_samples": 0,
+    "umap_dims": 10,
+    "validate": False,
+    "min_confidence": 0.7,
+    "diagnose_mcs": "",
+    "umap_sweep": False,
+    "hdbscan_jobs": 1,
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -509,7 +546,8 @@ class DataLoader(QThread):
             data["labels_per_frame"] = _csv("characterization/labels_per_frame.csv")
             data["validation_labels"] = _csv("validation/frame_labels.csv")
             data["validation_sample"] = _csv("validation/current_sample.csv")
-            meta_p = ROOT / "metadata.csv"
+            import vieb_config as _vc_dl
+            meta_p = Path(_vc_dl.get_metadata_path())
             data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
             data["cohort"] = None
             if self._cohort_path:
@@ -566,11 +604,15 @@ class PipelineRunner(QThread):
         try:
             sys.path.insert(0, str(ROOT))
             fps = float(self.cfg.get("fps", 30))
-            mcs = int(self.cfg.get("min_cluster_size", 2000))
+            mcs = int(self.cfg.get("min_cluster_size", 50))
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
             use_wavelets = bool(self.cfg.get("use_wavelets", True))
             enable_collapse = bool(self.cfg.get("enable_state_collapse", False))
             export_clips = bool(self.cfg.get("export_clips", False))
+            hdbscan_min_samples = int(self.cfg.get("hdbscan_min_samples", 0)) or None
+            umap_dims = int(self.cfg.get("umap_dims", 10))
+            validate = bool(self.cfg.get("validate", False))
+            min_confidence = float(self.cfg.get("min_confidence", 0.7))
 
             for sid in self.stage_ids:
                 if sid == 7 and not enable_collapse:
@@ -586,7 +628,13 @@ class PipelineRunner(QThread):
                     from compare import cmd_cluster
 
                     try:
-                        cmd_cluster(fps=fps, min_cluster_size=mcs)
+                        cmd_cluster(
+                        fps=fps,
+                        min_cluster_size=mcs,
+                        min_samples=hdbscan_min_samples,
+                        umap_dims=umap_dims,
+                        validate=validate,
+                    )
                         for b in (3, 4, 5, 6):
                             self.stage_done.emit(b, True)
                     except Exception:
@@ -614,7 +662,7 @@ class PipelineRunner(QThread):
                     elif sid == 8:
                         from compare import cmd_report
 
-                        cmd_report(fps=fps)
+                        cmd_report(fps=fps, min_confidence=min_confidence)
                     elif sid == 9:
                         from compare import cmd_summarize
 
@@ -1074,32 +1122,67 @@ venv_wsl/bin/python -c "import cuml; import cupy; cupy.cuda.runtime.getDeviceCou
 
 
 class DiagnoseDialog(QDialog):
-    """Run diagnose_clusters.py in the background."""
+    """Run compare.py --diagnose in the background with configurable options."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Cluster Diagnostic")
-        self.resize(760, 520)
+        self.resize(760, 580)
         self._thread = None
         lay = QVBoxLayout(self)
         hdr = QLabel("HDBSCAN min_cluster_size sweep")
         hdr.setFont(QFont("Arial", 12, QFont.Bold))
         lay.addWidget(hdr)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        self._mcs_edit = QLineEdit()
+        self._mcs_edit.setPlaceholderText("50,100,200,300,500,750,1000,1500,2000,3000")
+        self._mcs_edit.setToolTip("Comma-separated min_cluster_size values to sweep. Leave blank to use defaults.")
+        form.addRow("MCS values (blank=defaults):", self._mcs_edit)
+        self._umap_sweep = QCheckBox("Sweep UMAP n_neighbors (slower)")
+        form.addRow("", self._umap_sweep)
+        self._jobs = QSpinBox()
+        self._jobs.setRange(1, 16)
+        self._jobs.setValue(1)
+        self._jobs.setToolTip("Parallel jobs for HDBSCAN core-distance computation.")
+        form.addRow("HDBSCAN parallel jobs:", self._jobs)
+        lay.addLayout(form)
+
+        self._run_btn = QPushButton("Run Diagnostic")
+        self._run_btn.clicked.connect(self.start)
+        lay.addWidget(self._run_btn)
+
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setStyleSheet("background:#111;color:#d4d4d4;font-family:Consolas;font-size:12px;")
         lay.addWidget(self._log, stretch=1)
-        self._status = QLabel("Waiting...")
+        self._status = QLabel("Configure options above and click Run Diagnostic.")
         lay.addWidget(self._status)
 
     def start(self):
+        if self._thread and self._thread.isRunning():
+            return
+        args = ["compare.py", "--diagnose"]
+        mcs_text = self._mcs_edit.text().strip()
+        if mcs_text:
+            args += ["--diagnose-mcs", mcs_text]
+        if self._umap_sweep.isChecked():
+            args.append("--umap-sweep")
+        jobs = self._jobs.value()
+        if jobs > 1:
+            args += ["--hdbscan-jobs", str(jobs)]
+
         class _DiagThread(QThread):
             log = pyqtSignal(str)
             done = pyqtSignal(bool)
+            def __init__(self, args):
+                super().__init__()
+                self._args = args
             def run(self):
                 try:
                     proc = subprocess.Popen(
-                        [sys.executable, "diagnose_clusters.py"],
+                        [sys.executable, *self._args],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace", cwd=str(ROOT),
                     )
@@ -1111,9 +1194,14 @@ class DiagnoseDialog(QDialog):
                     self.log.emit(f"[error] {exc}\n")
                     self.done.emit(False)
 
-        self._thread = _DiagThread(self)
+        self._log.clear()
+        self._thread = _DiagThread(args)
         self._thread.log.connect(lambda s: (self._log.insertPlainText(s), self._log.verticalScrollBar().setValue(self._log.verticalScrollBar().maximum())))
-        self._thread.done.connect(lambda ok: self._status.setText("Done." if ok else "Failed."))
+        self._thread.done.connect(lambda ok: (
+            self._status.setText("Done." if ok else "Failed."),
+            self._run_btn.setEnabled(True),
+        ))
+        self._run_btn.setEnabled(False)
         self._status.setText("Running...")
         self._thread.start()
 
@@ -1172,9 +1260,12 @@ class OverviewView(QWidget):
 
         box = QGroupBox("Mean State Occupancy")
         bl = QVBoxLayout(box)
+        chk_row = QHBoxLayout()
+        chk_row.addStretch()
         self._hide_leading = QCheckBox("Hide leading state and rescale")
         self._hide_leading.toggled.connect(self._render_state_occupancy)
-        bl.addWidget(self._hide_leading)
+        chk_row.addWidget(self._hide_leading)
+        bl.addLayout(chk_row)
         if _MPL:
             self._canvas = MplCanvas(figsize=(8, 4))
             bl.addWidget(self._canvas)
@@ -1355,22 +1446,68 @@ class StageRow(QFrame):
         dl.addWidget(cmd)
 
         params = QHBoxLayout()
-        if self.stage["id"] in (2, 3):
-            self._mcs = QSlider(Qt.Horizontal)
-            self._mcs.setRange(500, 5000)
-            self._mcs.setValue(int(self.cfg.get("min_cluster_size", 2000)))
-            self._mcs.valueChanged.connect(lambda v: self.changed.emit("min_cluster_size", v))
+        if self.stage["id"] == 2:
             self._wave = QCheckBox("Use Morlet wavelets")
             self._wave.setChecked(bool(self.cfg.get("use_wavelets", True)))
             self._wave.toggled.connect(lambda v: self.changed.emit("use_wavelets", v))
-            params.addWidget(QLabel("min_cluster_size"))
-            params.addWidget(self._mcs)
             params.addWidget(self._wave)
+            params.addWidget(QLabel("  FPS"))
+            self._fps_spin = QDoubleSpinBox()
+            self._fps_spin.setRange(1.0, 120.0)
+            self._fps_spin.setSingleStep(1.0)
+            self._fps_spin.setDecimals(1)
+            self._fps_spin.setValue(float(self.cfg.get("fps", 30.0)))
+            self._fps_spin.valueChanged.connect(lambda v: self.changed.emit("fps", v))
+            params.addWidget(self._fps_spin)
+        if self.stage["id"] == 5:
+            params.addWidget(QLabel("min_cluster_size"))
+            self._mcs = QSpinBox()
+            self._mcs.setRange(10, 10000)
+            self._mcs.setValue(int(self.cfg.get("min_cluster_size", 50)))
+            self._mcs.valueChanged.connect(lambda v: self.changed.emit("min_cluster_size", v))
+            params.addWidget(self._mcs)
+            params.addWidget(QLabel("  min_samples (0=auto)"))
+            self._hms = QSpinBox()
+            self._hms.setRange(0, 5000)
+            self._hms.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
+            self._hms.valueChanged.connect(lambda v: self.changed.emit("hdbscan_min_samples", v))
+            params.addWidget(self._hms)
+            params.addWidget(QLabel("  UMAP dims"))
+            self._udims = QSpinBox()
+            self._udims.setRange(2, 50)
+            self._udims.setValue(int(self.cfg.get("umap_dims", 10)))
+            self._udims.valueChanged.connect(lambda v: self.changed.emit("umap_dims", v))
+            params.addWidget(self._udims)
+            self._validate_cb = QCheckBox("80/20 validation split")
+            self._validate_cb.setChecked(bool(self.cfg.get("validate", False)))
+            self._validate_cb.toggled.connect(lambda v: self.changed.emit("validate", v))
+            params.addWidget(self._validate_cb)
         if self.stage["id"] == 7:
             self._collapse = QCheckBox("Enable state collapsing")
             self._collapse.setChecked(bool(self.cfg.get("enable_state_collapse", False)))
             self._collapse.toggled.connect(lambda v: self.changed.emit("enable_state_collapse", v))
             params.addWidget(self._collapse)
+            params.addWidget(QLabel("  threshold"))
+            self._ct = QDoubleSpinBox()
+            self._ct.setRange(0.0, 1.0)
+            self._ct.setSingleStep(0.05)
+            self._ct.setDecimals(2)
+            self._ct.setValue(float(self.cfg.get("collapse_threshold", 0.5)))
+            self._ct.valueChanged.connect(lambda v: self.changed.emit("collapse_threshold", v))
+            params.addWidget(self._ct)
+        if self.stage["id"] == 8:
+            params.addWidget(QLabel("min confidence"))
+            self._mconf = QDoubleSpinBox()
+            self._mconf.setRange(0.0, 1.0)
+            self._mconf.setSingleStep(0.05)
+            self._mconf.setDecimals(2)
+            self._mconf.setToolTip(
+                "Exclude frames whose HDBSCAN soft probability is below this threshold.\n"
+                "Literature default: 0.7 (Luxem et al. 2022; Gordon et al. 2023)."
+            )
+            self._mconf.setValue(float(self.cfg.get("min_confidence", 0.7)))
+            self._mconf.valueChanged.connect(lambda v: self.changed.emit("min_confidence", v))
+            params.addWidget(self._mconf)
         if self.stage["id"] == 11:
             self._clips = QCheckBox("Export video clips")
             self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
@@ -1532,7 +1669,11 @@ class RunPipelineView(QWidget):
         class _ProbeThread(QThread):
             result = pyqtSignal(bool)
             def run(self):
-                self.result.emit(_probe_wsl_cuml())
+                if sys.platform == "win32":
+                    self.result.emit(_probe_wsl_cuml())
+                else:
+                    # Linux / macOS: probe CUDA directly via torch
+                    self.result.emit(_probe_torch_cuda())
 
         if self._wsl_thread and self._wsl_thread.isRunning():
             return
@@ -1546,22 +1687,41 @@ class RunPipelineView(QWidget):
         self.refresh_gpu_badge()
 
     def refresh_gpu_badge(self):
+        on_windows = sys.platform == "win32"
         if _WSL_CUML is True:
-            self._gpu_badge.setText("GPU ready: WSL2 + cuML")
-            self._gpu_badge.setStyleSheet("background:#e8f5e9;border:1px solid #a5d6a7;border-radius:4px;padding:4px 10px;color:#1b5e20;")
-            self._gpu_setup_btn.setText("GPU Setup")
+            badge_text = "GPU ready: WSL2 + cuML" if on_windows else "GPU ready: CUDA (torch)"
+            self._gpu_badge.setText(badge_text)
+            self._gpu_badge.setStyleSheet(
+                "background:#e8f5e9;border:1px solid #a5d6a7;"
+                "border-radius:4px;padding:4px 10px;color:#1b5e20;"
+            )
+            # WSL setup button is only relevant on Windows
+            self._gpu_setup_btn.setVisible(on_windows)
+            if on_windows:
+                self._gpu_setup_btn.setText("GPU Setup")
         elif _WSL_CUML is False:
-            self._gpu_badge.setText("CPU mode: WSL2 + cuML not found")
-            self._gpu_badge.setStyleSheet("background:#fff8e1;border:1px solid #ffe082;border-radius:4px;padding:4px 10px;color:#795548;")
-            self._gpu_setup_btn.setText("Set up GPU acceleration")
+            badge_text = (
+                "CPU mode: WSL2 + cuML not found"
+                if on_windows else
+                "CPU mode: no CUDA GPU detected"
+            )
+            self._gpu_badge.setText(badge_text)
+            self._gpu_badge.setStyleSheet(
+                "background:#fff8e1;border:1px solid #ffe082;"
+                "border-radius:4px;padding:4px 10px;color:#795548;"
+            )
+            self._gpu_setup_btn.setVisible(on_windows)
+            if on_windows:
+                self._gpu_setup_btn.setText("Set up GPU acceleration")
         else:
             self._gpu_badge.setText("Checking GPU...")
 
     def _open_wsl_setup(self):
-        dlg = WslSetupDialog(self)
-        dlg.exec_()
-        wsl_cuml_reset_cache()
-        self._probe_gpu_async()
+        if sys.platform == "win32":
+            dlg = WslSetupDialog(self)
+            dlg.exec_()
+            wsl_cuml_reset_cache()
+            self._probe_gpu_async()
 
     def _param_changed(self, key, value):
         self.cfg[key] = value
@@ -1671,7 +1831,6 @@ class RunPipelineView(QWidget):
     def _run_diagnose(self):
         dlg = DiagnoseDialog(self)
         dlg.show()
-        dlg.start()
 
     def _run_subcluster(self, dom_state_id: int):
         if dom_state_id < 0:
@@ -3348,12 +3507,47 @@ class SettingsView(QWidget):
 
         self._results = dir_row("Results directory", "results_dir")
         self._raw = dir_row("Raw videos directory", "raw_videos_dir")
+
+        # Metadata CSV file picker
+        self._meta_le = QLineEdit(self.cfg.get("metadata_csv_path", ""))
+        meta_browse = QPushButton("Browse...")
+        meta_browse.clicked.connect(lambda: self._browse_file(self._meta_le))
+        meta_h = QHBoxLayout()
+        meta_h.addWidget(self._meta_le)
+        meta_h.addWidget(meta_browse)
+        form.addWidget(QLabel("Metadata CSV file"), r, 0)
+        form.addLayout(meta_h, r, 1)
+        r += 1
+
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row("Context groups (comma-separated)", self._ctx_groups)
         self._fps = QSpinBox()
         self._fps.setRange(1, 240)
         self._fps.setValue(int(self.cfg.get("fps", 30)))
         row("FPS", self._fps)
+
+        _umap_tip = (
+            "Number of UMAP output dimensions before HDBSCAN clustering.\n"
+            "Lower values (3–5) run faster and produce coarser clusters.\n"
+            "Higher values (10–15) preserve more structure. Default: 10."
+        )
+        self._umap_dims = QSpinBox()
+        self._umap_dims.setRange(2, 50)
+        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
+        self._umap_dims.setToolTip(_umap_tip)
+        row("UMAP dimensions", self._umap_dims)
+
+        _hms_tip = (
+            "HDBSCAN min_samples controls how conservative cluster borders are.\n"
+            "0 = use the same value as min_cluster_size (recommended default).\n"
+            "Lower values produce more clusters with softer borders."
+        )
+        self._hdbscan_min_samples = QSpinBox()
+        self._hdbscan_min_samples.setRange(0, 500)
+        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
+        self._hdbscan_min_samples.setToolTip(_hms_tip)
+        row("HDBSCAN min_samples", self._hdbscan_min_samples)
+
         lay.addLayout(form)
 
         save = QPushButton("Save Settings")
@@ -3366,6 +3560,11 @@ class SettingsView(QWidget):
         if d:
             le.setText(d)
 
+    def _browse_file(self, le):
+        path, _ = QFileDialog.getOpenFileName(self, "Select File", le.text(), "CSV files (*.csv)")
+        if path:
+            le.setText(path)
+
     def _save(self):
         self.cfg["arena_bounds"] = {
             "x_min": self._xmin.value(),
@@ -3375,8 +3574,11 @@ class SettingsView(QWidget):
         }
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
+        self.cfg["metadata_csv_path"] = self._meta_le.text()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
         self.cfg["fps"] = self._fps.value()
+        self.cfg["umap_dims"] = self._umap_dims.value()
+        self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()
         _save_cfg(self.cfg)
         self.settings_changed.emit(self.cfg)
         QMessageBox.information(self, "Settings", "Saved.")
@@ -3414,185 +3616,6 @@ class NavBtn(QPushButton):
         """)
 
 
-class OnboardingDialog(QDialog):
-    completed = pyqtSignal()
-
-    def __init__(self, cfg, parent=None):
-        super().__init__(parent)
-        self.cfg = cfg
-        self._worker = None
-        self._pipeline = None
-        self.setWindowTitle("Welcome to VIEB")
-        self.setModal(True)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(30, 30, 30, 30)
-        self._steps = QLabel("Step 1 - Project Setup   >   Step 2 - Pose Estimation   >   Step 3 - Pipeline Configuration")
-        self._steps.setFont(QFont("Arial", 12, QFont.Bold))
-        lay.addWidget(self._steps)
-        self._stack = QStackedWidget()
-        lay.addWidget(self._stack, stretch=1)
-        self._build_step1()
-        self._build_step2()
-        self._build_step3()
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumHeight(150)
-        self._log.setStyleSheet("background:#111;color:#ddd;")
-        lay.addWidget(self._log)
-
-    def _build_step1(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        l.addWidget(QLabel("Raw videos directory"))
-        h = QHBoxLayout()
-        self._raw_dir = QLineEdit(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        b = QPushButton("Browse...")
-        b.clicked.connect(self._browse_raw)
-        h.addWidget(self._raw_dir)
-        h.addWidget(b)
-        l.addLayout(h)
-        l.addWidget(QLabel("Project name"))
-        self._proj = QLineEdit(self.cfg.get("project_name", "VIEB Project"))
-        l.addWidget(self._proj)
-        self._have_dlc = QCheckBox("I have already run DeepLabCut pose estimation")
-        l.addWidget(self._have_dlc)
-        nxt = QPushButton("Continue")
-        nxt.clicked.connect(self._step1_next)
-        l.addWidget(nxt)
-        l.addStretch()
-        self._stack.addWidget(w)
-
-    def _build_step2(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        card = QLabel(
-            "VIEB uses DeepLabCut to track 8 body keypoints per frame.\n"
-            "This requires labeling ~20 frames per video to train the model.\n"
-            "This step takes several hours but only needs to be done once."
-        )
-        card.setStyleSheet("background:#eef4ff;padding:12px;border:1px solid #c8dafc;border-radius:8px;")
-        l.addWidget(card)
-        self._btn_label = QPushButton("Start Labeling Queue")
-        self._btn_train = QPushButton("Train Model")
-        self._btn_analyze = QPushButton("Run Pose Estimation on All Videos")
-        self._btn_label.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--label"]))
-        self._btn_train.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--train"]))
-        self._btn_analyze.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--analyze"]))
-        l.addWidget(self._btn_label)
-        l.addWidget(self._btn_train)
-        l.addWidget(self._btn_analyze)
-        self._csv_prog = QProgressBar()
-        l.addWidget(self._csv_prog)
-        nxt = QPushButton("Continue to Pipeline Configuration")
-        nxt.clicked.connect(lambda: self._stack.setCurrentIndex(2))
-        l.addWidget(nxt)
-        l.addStretch()
-        self._stack.addWidget(w)
-        self._csv_timer = QTimer(self)
-        self._csv_timer.timeout.connect(self._update_csv_progress)
-        self._csv_timer.start(2000)
-
-    def _build_step3(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        self._mcs = QSlider(Qt.Horizontal)
-        self._mcs.setRange(500, 5000)
-        self._mcs.setValue(int(self.cfg.get("min_cluster_size", 2000)))
-        self._mcs_lbl = QLabel(f"min_cluster_size: {self._mcs.value()}")
-        self._mcs.valueChanged.connect(lambda v: self._mcs_lbl.setText(f"min_cluster_size: {v}"))
-        l.addWidget(self._mcs_lbl)
-        l.addWidget(self._mcs)
-        self._wave = QCheckBox("Use Morlet wavelets")
-        self._wave.setChecked(bool(self.cfg.get("use_wavelets", True)))
-        l.addWidget(self._wave)
-        g = QGridLayout()
-        self._xmin = QSpinBox(); self._xmin.setRange(0, 9999); self._xmin.setValue(int(self.cfg.get("arena_bounds", {}).get("x_min", 0)))
-        self._ymin = QSpinBox(); self._ymin.setRange(0, 9999); self._ymin.setValue(int(self.cfg.get("arena_bounds", {}).get("y_min", 0)))
-        self._xmax = QSpinBox(); self._xmax.setRange(0, 9999); self._xmax.setValue(int(self.cfg.get("arena_bounds", {}).get("x_max", 1280)))
-        self._ymax = QSpinBox(); self._ymax.setRange(0, 9999); self._ymax.setValue(int(self.cfg.get("arena_bounds", {}).get("y_max", 960)))
-        g.addWidget(QLabel("x_min"), 0, 0); g.addWidget(self._xmin, 0, 1)
-        g.addWidget(QLabel("y_min"), 0, 2); g.addWidget(self._ymin, 0, 3)
-        g.addWidget(QLabel("x_max"), 1, 0); g.addWidget(self._xmax, 1, 1)
-        g.addWidget(QLabel("y_max"), 1, 2); g.addWidget(self._ymax, 1, 3)
-        l.addLayout(g)
-        self._run = QPushButton("Run Full Pipeline")
-        self._run.clicked.connect(self._run_full)
-        l.addWidget(self._run)
-        self._run_prog = QProgressBar()
-        self._run_prog.setRange(0, 1)
-        l.addWidget(self._run_prog)
-        l.addStretch()
-        self._stack.addWidget(w)
-
-    def _browse_raw(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Raw Videos", self._raw_dir.text())
-        if d:
-            self._raw_dir.setText(d)
-
-    def _step1_next(self):
-        self.cfg["raw_videos_dir"] = self._raw_dir.text()
-        self.cfg["project_name"] = self._proj.text().strip() or "VIEB Project"
-        _save_cfg(self.cfg)
-        self._stack.setCurrentIndex(2 if self._have_dlc.isChecked() else 1)
-
-    def _run_setup(self, args):
-        if self._worker and self._worker.isRunning():
-            return
-        self._worker = SubprocessWorker(args)
-        self._worker.log.connect(lambda t: self._log.insertPlainText(t))
-        self._worker.done.connect(lambda ok: self._log.insertPlainText(f"\n{'OK' if ok else 'FAIL'}: {' '.join(args)}\n"))
-        self._worker.start()
-
-    def _update_csv_progress(self):
-        raw = Path(self._raw_dir.text())
-        vids = list(raw.glob("*.mp4")) if raw.exists() else []
-        csvs = list(raw.glob("*DLC*.csv")) if raw.exists() else []
-        total = max(1, len(vids))
-        self._csv_prog.setRange(0, total)
-        self._csv_prog.setValue(min(total, len(csvs)))
-        self._csv_prog.setFormat(f"{len(csvs)} / {len(vids)} videos with CSV")
-
-    def _on_stage_started(self, sid):
-        self._log.insertPlainText(f"\nStage {sid} started...\n")
-
-    def _on_stage_done(self, sid, ok):
-        self._log.insertPlainText(f"Stage {sid} {'done' if ok else 'failed'}.\n")
-        self._run_prog.setValue(min(1, self._run_prog.value() + 1))
-
-    def _run_full(self):
-        if self._pipeline and self._pipeline.isRunning():
-            return
-        self.cfg["min_cluster_size"] = int(self._mcs.value())
-        self.cfg["use_wavelets"] = bool(self._wave.isChecked())
-        self.cfg["arena_bounds"] = {
-            "x_min": self._xmin.value(),
-            "y_min": self._ymin.value(),
-            "x_max": self._xmax.value(),
-            "y_max": self._ymax.value(),
-        }
-        _save_cfg(self.cfg)
-        stages = [2, 3, 8, 9, 10, 11] if self._have_dlc.isChecked() else [1, 2, 3, 8, 9, 10, 11]
-        self._run_prog.setRange(0, len(stages))
-        self._run_prog.setValue(0)
-        self._pipeline = PipelineRunner(stages, self.cfg)
-        self._pipeline.log.connect(lambda t: self._log.insertPlainText(t))
-        self._pipeline.stage_started.connect(self._on_stage_started)
-        self._pipeline.stage_done.connect(self._on_stage_done)
-        self._pipeline.all_done.connect(self._pipeline_done)
-        self._pipeline.start()
-
-    def _pipeline_done(self, ok):
-        if ok:
-            self.cfg["onboarding_complete"] = True
-            _save_cfg(self.cfg)
-            self.completed.emit()
-            self.accept()
-        else:
-            QMessageBox.warning(self, "Onboarding", "Pipeline failed. Review logs and retry.")
 
 
 class ExportResultsDialog(QDialog):
@@ -4121,14 +4144,13 @@ class MainWindow(QMainWindow):
     def _maybe_onboarding(self):
         if self.cfg.get("onboarding_complete"):
             return
-        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        no_results = not _results_exist()
-        no_dlc_project = _find_dlc_project() is None
-        if no_results and no_dlc_project:
-            dlg = OnboardingDialog(self.cfg, self)
-            dlg.completed.connect(lambda: self._load_data())
-            dlg.showMaximized()
-            dlg.exec_()
+        self.cfg["onboarding_complete"] = True
+        _save_cfg(self.cfg)
+        QMessageBox.information(
+            self,
+            "Welcome to VIEB",
+            "Welcome to VIEB. To get started, go to Pipeline and press Run.",
+        )
 
     def closeEvent(self, e):
         self.cfg["window_size"] = [self.width(), self.height()]
@@ -4373,6 +4395,21 @@ QDialog { background: #FAFAFA; }
 
 
 def main():
+    # Fix OpenCV/Qt plugin conflict: cv2 ships its own Qt5 platform plugins and
+    # may set QT_QPA_PLATFORM_PLUGIN_PATH to its own cv2/qt/plugins directory.
+    # We override it here — after cv2 has been imported — to point Qt at
+    # PyQt5's own plugins so that libqxcb.so loads correctly.
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.find_spec("PyQt5")
+        if _spec and _spec.submodule_search_locations:
+            _base = next(iter(_spec.submodule_search_locations))
+            _plugins = os.path.join(_base, "Qt5", "plugins")
+            if os.path.isdir(_plugins):
+                os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _plugins
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.setApplicationName("VIEB")
     app.setStyle("Fusion")

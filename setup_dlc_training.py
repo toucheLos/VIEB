@@ -69,16 +69,28 @@ def detect_hardware():
 HW = detect_hardware()
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-DLC_CONFIG = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "config.yaml")
-RAW_VIDEOS_DIR = os.path.join(PROJECT_ROOT, "raw_videos")
+
+import vieb_config
+
+
+def _get_dlc_config():
+    path = vieb_config.get_dlc_config_path()
+    if not path:
+        sys.exit("[ERROR] No DLC project found. Set 'dlc_project_path' in config.json "
+                 "or place a VIEB-*-YYYY-MM-DD/ directory in the project root.")
+    return path
+
+
+def _get_raw_videos_dir():
+    return vieb_config.get_raw_videos_dir()
 
 
 def add_videos_to_config():
     """Register all mp4 videos in raw_videos/ to the DLC config."""
-    with open(DLC_CONFIG, "r") as f:
+    with open(_get_dlc_config(), "r") as f:
         config = yaml.safe_load(f)
 
-    video_files = glob.glob(os.path.join(RAW_VIDEOS_DIR, "*.mp4"))
+    video_files = glob.glob(os.path.join(_get_raw_videos_dir(), "*.mp4"))
     if not video_files:
         print("No .mp4 files found in raw_videos/. Add your videos there first.")
         sys.exit(1)
@@ -101,7 +113,7 @@ def add_videos_to_config():
             print(f"  Added: {os.path.basename(vpath)}")
 
     if added > 0 or stale:
-        with open(DLC_CONFIG, "w") as f:
+        with open(_get_dlc_config(), "w") as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
         print(f"\n{added} new video(s) registered in DLC config.")
     else:
@@ -117,7 +129,7 @@ def extract_frames():
 
     print("\nExtracting frames for labeling (kmeans selection)...")
     deeplabcut.extract_frames(
-        DLC_CONFIG,
+        _get_dlc_config(),
         mode="automatic",
         algo="kmeans",
         userfeedback=False,
@@ -125,21 +137,20 @@ def extract_frames():
     print("Frame extraction complete.")
 
 
-QUEUE_FILE = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeling_queue.txt")
-
-
 def _get_queue():
     """Load or create a random shuffled queue of all video folders that have frames."""
     import random
-    labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
+    dlc_root = vieb_config.get_dlc_project_path()
+    queue_file = os.path.join(dlc_root, "labeling_queue.txt")
+    labeled_dir = os.path.join(dlc_root, "labeled-data")
     has_frames = sorted([
         d for d in os.listdir(labeled_dir)
         if os.path.isdir(os.path.join(labeled_dir, d))
         and any(f.endswith(".png") for f in os.listdir(os.path.join(labeled_dir, d)))
     ])
 
-    if os.path.exists(QUEUE_FILE):
-        with open(QUEUE_FILE) as f:
+    if os.path.exists(queue_file):
+        with open(queue_file) as f:
             queue = [line.strip() for line in f if line.strip()]
         # Add any new folders not yet in the queue
         existing = set(queue)
@@ -147,13 +158,13 @@ def _get_queue():
         if new:
             random.shuffle(new)
             queue.extend(new)
-            with open(QUEUE_FILE, "w") as f:
+            with open(queue_file, "w") as f:
                 f.write("\n".join(queue) + "\n")
             print(f"  Added {len(new)} new video(s) to queue.")
     else:
         queue = list(has_frames)
         random.shuffle(queue)
-        with open(QUEUE_FILE, "w") as f:
+        with open(queue_file, "w") as f:
             f.write("\n".join(queue) + "\n")
         print(f"  Created labeling queue with {len(queue)} videos (randomized).")
 
@@ -161,7 +172,7 @@ def _get_queue():
 
 
 def _is_labeled(folder_name):
-    labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
+    labeled_dir = os.path.join(vieb_config.get_dlc_project_path(), "labeled-data")
     folder = os.path.join(labeled_dir, folder_name)
     return any(f.startswith("CollectedData") and f.endswith(".h5") for f in os.listdir(folder))
 
@@ -198,13 +209,13 @@ def label_frames(index=None):
     print("  left_ear, right_ear, nose, center,")
     print("  left_hip, right_hip, tail_base, tail_tip")
     print("\nSave with Ctrl+S before closing.\n")
-    deeplabcut.label_frames(DLC_CONFIG, video_name)
+    deeplabcut.label_frames(_get_dlc_config(), video_name)
     napari.run()
 
 
 def check_labeled_data():
     """Verify that at least some frames have been labeled before training."""
-    labeled_dir = os.path.join(PROJECT_ROOT, "VIEB-Carlos-2026-02-11", "labeled-data")
+    labeled_dir = os.path.join(vieb_config.get_dlc_project_path(), "labeled-data")
     h5_files = glob.glob(os.path.join(labeled_dir, "*", "CollectedData_Carlos.h5"))
     if not h5_files:
         print("\nERROR: No labeled data found!")
@@ -221,7 +232,7 @@ def create_training_dataset():
     import deeplabcut
 
     print("\nCreating training dataset...")
-    deeplabcut.create_training_dataset(DLC_CONFIG, Shuffles=[2], userfeedback=False)
+    deeplabcut.create_training_dataset(_get_dlc_config(), Shuffles=[2], userfeedback=False)
     print("Training dataset created.")
 
 
@@ -233,7 +244,7 @@ def train():
     print("You can stop early with Ctrl+C — DLC saves snapshots periodically.\n")
     with prevent_sleep():
         deeplabcut.train_network(
-            DLC_CONFIG,
+            _get_dlc_config(),
             shuffle=2,
             maxiters=200000,
             displayiters=1000,
@@ -248,7 +259,7 @@ def evaluate():
     import deeplabcut
 
     print("\nEvaluating model...")
-    deeplabcut.evaluate_network(DLC_CONFIG, Shuffles=[2], plotting=True)
+    deeplabcut.evaluate_network(_get_dlc_config(), Shuffles=[2], plotting=True)
     print("Evaluation complete. Check the evaluation-results folder.")
 
 
@@ -256,11 +267,11 @@ def analyze_videos():
     """Run pose estimation on all videos."""
     import deeplabcut
 
-    video_files = glob.glob(os.path.join(RAW_VIDEOS_DIR, "*.mp4"))
+    video_files = glob.glob(os.path.join(_get_raw_videos_dir(), "*.mp4"))
     print(f"\nAnalyzing {len(video_files)} video(s)...")
     with prevent_sleep():
         deeplabcut.analyze_videos(
-            DLC_CONFIG,
+            _get_dlc_config(),
             video_files,
             shuffle=2,
             save_as_csv=True,
@@ -291,8 +302,8 @@ def main():
     else:
         # Default: setup flow
         print("=== VIEB DLC Training Setup ===\n")
-        print(f"DLC config: {DLC_CONFIG}")
-        print(f"Videos dir: {RAW_VIDEOS_DIR}\n")
+        print(f"DLC config: {_get_dlc_config()}")
+        print(f"Videos dir: {_get_raw_videos_dir()}\n")
 
         print("Step 1: Registering videos...")
         add_videos_to_config()
