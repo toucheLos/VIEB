@@ -37,13 +37,24 @@ def _meta(): return _vc.get_metadata_path()
 # ---------------------------------------------------------------------------
 
 def _detect_gpu() -> bool:
-    """Return True if cuML (RAPIDS) is importable and CUDA is available."""
+    """Return True if cuML (RAPIDS) is importable and CUDA is actually usable."""
     if platform.system() == "Windows":
         return False  # cuML has no Windows wheels; requires WSL2
     try:
         import cuml  # noqa: F401
         import cupy as cp
-        cp.cuda.runtime.getDeviceCount()  # raises if no CUDA device
+        cp.cuda.runtime.getDeviceCount()
+        # Trigger a minimal GPU op to verify the driver is actually compatible
+        cp.array([1.0])
+        return True
+    except Exception:
+        return False
+
+
+def _cuml_importable() -> bool:
+    """Return True if cuML can be imported (regardless of driver compatibility)."""
+    try:
+        import cuml  # noqa: F401
         return True
     except Exception:
         return False
@@ -83,6 +94,8 @@ def _print_hardware_banner():
             print("        GPU acceleration (cuML) requires WSL2 on Windows")
         elif gpu_accel:
             print("        cuML available — GPU acceleration ready for --cluster")
+        elif _cuml_importable():
+            print("        cuML installed but GPU unusable (driver/CUDA version mismatch) — using CPU")
         else:
             print("        cuML not installed — install via pip for GPU acceleration")
     else:
@@ -110,7 +123,33 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         with open(index_path) as f:
             index = json.load(f)
 
-    extractor = PoseFeatureExtractor(fps=fps, use_wavelets=use_wavelets)
+    # Load keypoint role mapping from config.json
+    keypoint_roles = {}
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        with open(cfg_path, encoding="utf-8") as _f:
+            keypoint_roles = json.load(_f).get("keypoint_roles", {})
+    except Exception:
+        pass
+
+    # Load bodypart names from DLC config.yaml (defines index → name ordering)
+    bodypart_names = None
+    try:
+        dlc_cfg_path = _vc.get_dlc_config_path()
+        if dlc_cfg_path and os.path.exists(dlc_cfg_path):
+            import yaml as _yaml
+            with open(dlc_cfg_path, encoding="utf-8") as _f:
+                _dlc_cfg = _yaml.safe_load(_f)
+            bodypart_names = _dlc_cfg.get("bodyparts") or None
+    except Exception:
+        pass
+
+    extractor = PoseFeatureExtractor(
+        fps=fps,
+        use_wavelets=use_wavelets,
+        keypoint_roles=keypoint_roles,
+        bodypart_names=bodypart_names,
+    )
     new_count = 0
     skip_count = 0
 
@@ -324,6 +363,168 @@ def _run_validation_report(
     print(f"\nValidation report saved: results/shared/validation_report.json")
 
 
+# ---------------------------------------------------------------------------
+# Run versioning helpers
+# ---------------------------------------------------------------------------
+
+def _next_run_n(runs_dir: str) -> int:
+    """Return the next integer N for naming a run directory."""
+    max_n = 0
+    if os.path.isdir(runs_dir):
+        for name in os.listdir(runs_dir):
+            if name.startswith("run_") and os.path.isdir(os.path.join(runs_dir, name)):
+                try:
+                    n = int(name.split("_")[1])
+                    max_n = max(max_n, n)
+                except (IndexError, ValueError):
+                    pass
+    return max_n + 1
+
+
+def _auto_save_previous_run() -> str | None:
+    """Copy results/shared/ to results/runs/{run_id}/ before a new run overwrites it."""
+    import shutil
+    from datetime import datetime as _dt
+
+    shared_dir = os.path.join(_res(), "shared")
+    cluster_info_path = os.path.join(shared_dir, "cluster_info.json")
+    if not os.path.exists(cluster_info_path):
+        return None
+
+    with open(cluster_info_path) as f:
+        ci = json.load(f)
+
+    manifest_path = os.path.join(shared_dir, "run_manifest.json")
+    existing_manifest: dict = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            existing_manifest = json.load(f)
+
+    prev_mcs = existing_manifest.get("min_cluster_size", ci.get("min_cluster_size", 50))
+    prev_umap = existing_manifest.get("umap_dims", ci.get("umap_dims", 10))
+
+    runs_dir = os.path.join(_res(), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    n = _next_run_n(runs_dir)
+    now = _dt.now()
+    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{prev_mcs}_umap{prev_umap}"
+    run_dir = os.path.join(runs_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+
+    for fname in os.listdir(shared_dir):
+        src = os.path.join(shared_dir, fname)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(run_dir, fname))
+
+    # Compute noise_frac from existing label files
+    noise_frac = 0.0
+    try:
+        total_frames = 0
+        noise_frames = 0
+        for fname in os.listdir(shared_dir):
+            if fname.endswith("_labels.npy"):
+                lbl = np.load(os.path.join(shared_dir, fname))
+                total_frames += len(lbl)
+                noise_frames += int((lbl == -1).sum())
+        if total_frames > 0:
+            noise_frac = float(noise_frames / total_frames)
+    except Exception:
+        pass
+
+    manifest = {
+        "run_id": run_id,
+        "date": existing_manifest.get("date", now.strftime("%Y-%m-%d %H:%M")),
+        "min_cluster_size": int(prev_mcs),
+        "umap_dims": int(prev_umap),
+        "hdbscan_min_samples": int(existing_manifest.get("hdbscan_min_samples", 0)),
+        "n_clusters": int(ci.get("n_clusters", 0)),
+        "mean_confidence": float(ci.get("mean_confidence", 0.0)),
+        "low_confidence_frac": float(ci.get("low_confidence_frac", 0.0)),
+        "noise_frac": round(noise_frac, 4),
+        "saved": False,
+    }
+    with open(os.path.join(run_dir, "run_manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"Auto-saved previous run to results/runs/{run_id}/")
+    return run_id
+
+
+def _write_current_run_manifest(
+    min_cluster_size: int,
+    umap_dims: int,
+    effective_min_samples: int,
+    n_found: int,
+    mean_conf: float,
+    low_conf_frac: float,
+    noise_frac: float,
+) -> str:
+    """Write results/shared/run_manifest.json and update config.json."""
+    from datetime import datetime as _dt
+
+    runs_dir = os.path.join(_res(), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    n = _next_run_n(runs_dir)
+    now = _dt.now()
+    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{min_cluster_size}_umap{umap_dims}"
+
+    manifest = {
+        "run_id": run_id,
+        "date": now.strftime("%Y-%m-%d %H:%M"),
+        "min_cluster_size": min_cluster_size,
+        "umap_dims": umap_dims,
+        "hdbscan_min_samples": effective_min_samples,
+        "n_clusters": n_found,
+        "mean_confidence": round(mean_conf, 4),
+        "low_confidence_frac": round(low_conf_frac, 4),
+        "noise_frac": round(noise_frac, 4),
+        "saved": False,
+    }
+    with open(os.path.join(_res(), "shared", "run_manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_data: dict = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg_data = json.load(f)
+        except Exception:
+            pass
+    cfg_data["current_run_saved"] = False
+    cfg_data["current_run_id"] = run_id
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg_data, f, indent=2)
+
+    return run_id
+
+
+def _mark_run_saved() -> None:
+    """Set saved=true in results/shared/run_manifest.json and config.json."""
+    manifest_path = os.path.join(_res(), "shared", "run_manifest.json")
+    if not os.path.exists(manifest_path):
+        print("[warn] No run_manifest.json found — nothing to mark as saved.")
+        return
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    manifest["saved"] = True
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_data: dict = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg_data = json.load(f)
+        except Exception:
+            pass
+    cfg_data["current_run_saved"] = True
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg_data, f, indent=2)
+    print("Run saved.")
+
+
 def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10, validate: bool = False):
     import joblib
     from ml import BehaviorPreprocessor
@@ -356,6 +557,20 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         sys.exit("Index is empty. Run --extract first.")
 
     os.makedirs(os.path.join(_res(), "shared"), exist_ok=True)
+
+    # ---- Run versioning: auto-save previous run if it exists and wasn't saved ----
+    _prev_cluster_info = os.path.join(_res(), "shared", "cluster_info.json")
+    if os.path.exists(_prev_cluster_info):
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _cfg_data: dict = {}
+        if os.path.exists(_cfg_path):
+            try:
+                with open(_cfg_path, encoding="utf-8") as _f:
+                    _cfg_data = json.load(_f)
+            except Exception:
+                pass
+        if not _cfg_data.get("current_run_saved", False):
+            _auto_save_previous_run()
 
     # ---- Load all feature matrices ----
     stems = sorted(index.keys())
@@ -643,6 +858,19 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     print(f"\nShared models → results/shared/")
     print(f"Per-video labels → results/shared/<stem>_labels.npy")
     print(f"Per-video probabilities → results/shared/<stem>_probs.npy")
+
+    # ---- Write run manifest for this run ----
+    _noise_frac = float(n_noise / len(all_raw_labels)) if len(all_raw_labels) > 0 else 0.0
+    _current_run_id = _write_current_run_manifest(
+        min_cluster_size=min_cluster_size,
+        umap_dims=umap_dims,
+        effective_min_samples=effective_min_samples,
+        n_found=n_found,
+        mean_conf=mean_conf,
+        low_conf_frac=low_conf_frac,
+        noise_frac=_noise_frac,
+    )
+    print(f"Run manifest → results/shared/run_manifest.json  (run_id: {_current_run_id})")
 
     # ---- Validation report ----
     if validate:
@@ -1218,10 +1446,12 @@ def main():
                         help="With --report/--quantify: exclude frames with prob < threshold")
     parser.add_argument("--cohort", metavar="FILE", default=None,
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
+    parser.add_argument("--save-run", action="store_true",
+                        help="Mark the cluster run as saved after --cluster completes")
     args = parser.parse_args()
 
     if not any([args.extract, args.cluster, args.collapse, args.diagnose,
-                args.report, args.summarize, args.quantify]):
+                args.report, args.summarize, args.quantify, args.save_run]):
         parser.print_help()
         sys.exit(1)
 
@@ -1247,6 +1477,10 @@ def main():
         cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
                     min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
                     validate=args.validate)
+        if args.save_run:
+            _mark_run_saved()
+    if args.save_run and not args.cluster:
+        _mark_run_saved()
     if args.collapse:
         cmd_collapse(threshold=args.collapse_threshold)
     if args.report:

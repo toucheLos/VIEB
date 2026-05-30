@@ -21,6 +21,7 @@ from typing import Optional
 
 PROJECT_ROOT: str = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "config.json")
+_APP_CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "app_config.json")
 
 # Standard DLC project directory naming: VIEB-<anything>-YYYY-MM-DD
 _DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
@@ -31,6 +32,20 @@ _DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
 # ---------------------------------------------------------------------------
 
 def _load_config() -> dict:
+    # Check app_config.json for the active project first
+    if os.path.exists(_APP_CONFIG_PATH):
+        try:
+            with open(_APP_CONFIG_PATH, encoding="utf-8") as f:
+                app_cfg = json.load(f)
+            active = app_cfg.get("active_project", "")
+            if active:
+                project_cfg = os.path.join(active, "config.json")
+                if os.path.exists(project_cfg):
+                    with open(project_cfg, encoding="utf-8") as f:
+                        return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Fallback: ROOT/config.json
     if os.path.exists(_CONFIG_PATH):
         try:
             with open(_CONFIG_PATH, encoding="utf-8") as f:
@@ -41,7 +56,17 @@ def _load_config() -> dict:
 
 
 def _save_config(data: dict) -> None:
-    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+    config_path = _CONFIG_PATH
+    if os.path.exists(_APP_CONFIG_PATH):
+        try:
+            with open(_APP_CONFIG_PATH, encoding="utf-8") as f:
+                app_cfg = json.load(f)
+            active = app_cfg.get("active_project", "")
+            if active and os.path.isdir(active):
+                config_path = os.path.join(active, "config.json")
+        except Exception:
+            pass
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 

@@ -39,9 +39,43 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter
 
+import platform
+
 import vieb_config as _vc
 def _res(): return _vc.get_results_dir()
 def _meta(): return _vc.get_metadata_path()
+
+# ---------------------------------------------------------------------------
+# GPU detection (mirrors compare.py)
+# ---------------------------------------------------------------------------
+
+def _detect_gpu() -> bool:
+    if platform.system() == "Windows":
+        return False
+    try:
+        import cuml  # noqa: F401
+        import cupy as cp
+        cp.cuda.runtime.getDeviceCount()
+        cp.array([1.0])
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_video_path(path: str) -> str:
+    """Resolve a video path that may be relative (from index.json built on another OS)."""
+    if os.path.exists(path):
+        return path
+    proj_root = os.path.dirname(os.path.abspath(__file__))
+    abs_path = os.path.join(proj_root, path)
+    if os.path.exists(abs_path):
+        return abs_path
+    raw_dir = _vc.get_raw_videos_dir()
+    if raw_dir:
+        candidate = os.path.join(raw_dir, os.path.basename(path))
+        if os.path.exists(candidate):
+            return candidate
+    return path
 
 # ---------------------------------------------------------------------------
 # Feature index constants (from ml/feature_extraction.py _flatten_features)
@@ -65,6 +99,17 @@ MIN_BOUT_FRAMES = 6  # 0.2 s
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _load_context_descriptions() -> dict:
+    """Load context label→description mapping from config.json (falls back to {})."""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        import json as _j
+        with open(config_path, encoding="utf-8") as fh:
+            return _j.load(fh).get("context_descriptions", {})
+    except Exception:
+        return {}
+
 
 def _load_prereqs():
     for path in [os.path.join(_res(), "features", "index.json"),
@@ -138,7 +183,7 @@ def _build_bouts_df(index, fps, meta):
                 "animal_id": animal_map.get(stem, ""),
                 "day": day_map.get(stem, ""),
                 "experiment": exp_map.get(stem, ""),
-                "video_path": index[stem]["video_path"],
+                "video_path": _resolve_video_path(index[stem]["video_path"]),
                 "features_path": index[stem]["features_path"],
             })
     return pd.DataFrame(rows)
@@ -167,6 +212,10 @@ def _heuristic_label(row, thr):
 
 def _build_state_summary(index, cluster_info, df_summary, meta, bouts_df, fps):
     n_clusters = cluster_info["n_clusters"]
+    contexts = (
+        sorted(df_summary["context"].dropna().unique())
+        if "context" in df_summary.columns else []
+    )
     rows = []
 
     for k in range(n_clusters):
@@ -200,8 +249,8 @@ def _build_state_summary(index, cluster_info, df_summary, meta, bouts_df, fps):
 
         col   = f"state_{k}_frac"
         ctx_fracs = {}
-        for ctx in ["A", "B", "C"]:
-            sub = df_summary[df_summary["context"] == ctx][col] if "context" in df_summary else pd.Series(dtype=float)
+        for ctx in contexts:
+            sub = df_summary[df_summary["context"] == ctx][col]
             ctx_fracs[f"context_{ctx}_frac"] = float(sub.mean()) if len(sub) else float("nan")
 
         kb = bouts_df[bouts_df["state"] == k]
@@ -261,8 +310,11 @@ def _cohen_d(a, b):
 
 def _build_context_report(cluster_info, df_summary):
     n_clusters = cluster_info["n_clusters"]
-    ctx_data = {c: df_summary[df_summary["context"] == c]
-                for c in ["A", "B", "C"]}
+    contexts = (
+        sorted(df_summary["context"].dropna().unique())
+        if "context" in df_summary.columns else []
+    )
+    ctx_data = {c: df_summary[df_summary["context"] == c] for c in contexts}
 
     rows = []
     for k in range(n_clusters):
@@ -271,12 +323,14 @@ def _build_context_report(cluster_info, df_summary):
         vals = {}
 
         for ctx, sub in ctx_data.items():
-            if len(sub) > 0:
+            if len(sub) > 0 and col in sub.columns:
                 row[f"{ctx}_frac"] = float(sub[col].mean())
                 vals[ctx] = sub[col].values
 
-        for c1, c2 in [("A", "B"), ("A", "C"), ("B", "C")]:
-            if c1 in vals and c2 in vals:
+        # Pairwise comparisons for all context pairs
+        ctx_list = sorted(vals.keys())
+        for i, c1 in enumerate(ctx_list):
+            for c2 in ctx_list[i + 1:]:
                 diff = float(vals[c1].mean() - vals[c2].mean())
                 ci_lo, ci_hi = _bootstrap_diff(vals[c1], vals[c2])
                 row[f"{c1}_minus_{c2}"]        = round(diff, 4)
@@ -284,10 +338,10 @@ def _build_context_report(cluster_info, df_summary):
                 row[f"{c1}_minus_{c2}_ci_hi"]  = round(ci_hi, 4)
                 row[f"cohen_d_{c1}_{c2}"]      = round(_cohen_d(vals[c1], vals[c2]), 3)
 
-        # Enrichment scores (each context vs. mean of the other two)
-        for ctx in ["A", "B", "C"]:
-            others = [vals[c].mean() for c in ["A", "B", "C"] if c != ctx and c in vals]
-            if ctx in vals and others:
+        # Enrichment scores (each context vs. mean of all others)
+        for ctx in ctx_list:
+            others = [vals[c].mean() for c in ctx_list if c != ctx]
+            if others:
                 row[f"{ctx}_enrichment"] = round(vals[ctx].mean() - np.mean(others), 4)
 
         rows.append(row)
@@ -295,7 +349,7 @@ def _build_context_report(cluster_info, df_summary):
     df = pd.DataFrame(rows)
 
     # Add per-state enrichment rankings
-    for ctx in ["A", "B", "C"]:
+    for ctx in contexts:
         col = f"{ctx}_enrichment"
         if col in df:
             df[f"{ctx}_rank"] = df[col].rank(ascending=False).astype(int)
@@ -305,8 +359,14 @@ def _build_context_report(cluster_info, df_summary):
 
 def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
     import matplotlib.pyplot as plt
-    from sklearn.manifold import TSNE
     from ml import BehaviorPreprocessor
+
+    if _detect_gpu():
+        from cuml.manifold import TSNE
+        _tsne_backend = "cuML GPU"
+    else:
+        from sklearn.manifold import TSNE
+        _tsne_backend = "sklearn CPU"
 
     pp_path = os.path.join(_res(), "shared", "preprocessor.pkl")
     if not os.path.exists(pp_path):
@@ -348,9 +408,12 @@ def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
         warnings.simplefilter("ignore")
         pca_all = preprocessor.transform(feats_all)
 
-    print(f"  Running t-SNE on {len(feats_all):,} frames ({pca_all.shape[1]} PCA dims)...")
-    tsne = TSNE(n_components=2, perplexity=40, max_iter=1000, random_state=42, n_jobs=-1)
-    emb = tsne.fit_transform(pca_all)
+    print(f"  Running t-SNE on {len(feats_all):,} frames ({pca_all.shape[1]} dims) [{_tsne_backend}]...")
+    if _tsne_backend.startswith("cuML"):
+        tsne = TSNE(n_components=2, perplexity=40, n_epochs=1000, random_state=42)
+    else:
+        tsne = TSNE(n_components=2, perplexity=40, max_iter=1000, random_state=42, n_jobs=-1)
+    emb = np.asarray(tsne.fit_transform(pca_all))
 
     colors = plt.cm.tab20(np.linspace(0, 1, n_clusters))
     fig, ax = plt.subplots(figsize=(11, 8))
@@ -375,23 +438,28 @@ def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
 def _plot_context_fractions(df_ctx, n_clusters, out_dir):
     import matplotlib.pyplot as plt
 
-    present = [c for c in ["A", "B", "C"] if f"{c}_frac" in df_ctx.columns]
+    ctx_descriptions = _load_context_descriptions()
+    # Detect contexts dynamically from columns present in df_ctx
+    present = [
+        c for c in sorted({
+            col.split("_")[0] for col in df_ctx.columns
+            if col.endswith("_frac") and len(col.split("_")) == 2
+        })
+        if f"{c}_frac" in df_ctx.columns
+    ]
     if not present:
         return
 
-    colors = {"A": "#E74C3C", "B": "#3498DB", "C": "#2ECC71"}
-    ctx_desc = {
-        "A": "shock context",
-        "B": "same floor, no shock",
-        "C": "novel context",
-    }
+    _palette = ["#E74C3C", "#3498DB", "#2ECC71", "#9B59B6", "#F39C12", "#1ABC9C"]
+    colors = {c: _palette[i % len(_palette)] for i, c in enumerate(sorted(set(present)))}
     x = np.arange(n_clusters)
     w = 0.25
 
     fig, ax = plt.subplots(figsize=(max(8, 2 * n_clusters), 5))
     for i, ctx in enumerate(present):
+        desc = ctx_descriptions.get(ctx, ctx)
         ax.bar(x + i * w, df_ctx[f"{ctx}_frac"], w,
-               label=f"Context {ctx}  ({ctx_desc.get(ctx, '')})",
+               label=f"Context {ctx}  ({desc})" if desc != ctx else f"Context {ctx}",
                color=colors.get(ctx, f"C{i}"), alpha=0.85)
 
     ax.set_xticks(x + w * (len(present) - 1) / 2)
@@ -415,13 +483,19 @@ def _plot_context_fractions(df_ctx, n_clusters, out_dir):
 def _find_hidden_behaviors(index, cluster_info, df_summary, bouts_df, out_dir):
     n_clusters = cluster_info["n_clusters"]
     centers = np.array(cluster_info["cluster_centers"])
+    contexts = (
+        sorted(df_summary["context"].dropna().unique())
+        if "context" in df_summary.columns else []
+    )
     rows = []
 
     # --- Definition 1: enriched states ---
     for k in range(n_clusters):
         col = f"state_{k}_frac"
+        if col not in df_summary.columns:
+            continue
         overall = float(df_summary[col].mean())
-        for ctx in ["A", "B", "C"]:
+        for ctx in contexts:
             sub = df_summary[df_summary["context"] == ctx][col]
             if len(sub) == 0:
                 continue
@@ -484,7 +558,7 @@ def _find_hidden_behaviors(index, cluster_info, df_summary, bouts_df, out_dir):
                             "duration_sec": round((e - s) / 30.0, 2),
                             "context": ctx_val,
                             "mean_distance": round(float(dist[s:e].mean()), 3),
-                            "video_path": index[stem]["video_path"],
+                            "video_path": _resolve_video_path(index[stem]["video_path"]),
                         })
 
             if anomaly_rows:
@@ -590,12 +664,14 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     index, cluster_info, df_summary, meta = _load_prereqs()
     n_clusters = cluster_info["n_clusters"]
     centers    = np.array(cluster_info["cluster_centers"])
+    clips_written = 0
+    clips_attempted = 0
 
     # Load or build bouts
     bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     if os.path.exists(bouts_csv):
         bouts_df = pd.read_csv(bouts_csv)
-        vp_map = {s: info["video_path"] for s, info in index.items()}
+        vp_map = {s: _resolve_video_path(info["video_path"]) for s, info in index.items()}
         fp_map = {s: info["features_path"] for s, info in index.items()}
         bouts_df["video_path"]    = bouts_df["stem"].map(vp_map)
         bouts_df["features_path"] = bouts_df["stem"].map(fp_map)
@@ -614,13 +690,19 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     state_best_ctx = {}
     if os.path.exists(ctx_report_path):
         cr = pd.read_csv(ctx_report_path)
+        enrich_cols = [c for c in cr.columns if c.endswith("_enrichment")]
         for _, r in cr.iterrows():
             k = int(r["state"])
             best, best_val = None, -np.inf
-            for ctx in ["A", "B", "C"]:
-                col = f"{ctx}_enrichment"
-                if col in r and not np.isnan(r[col]) and r[col] > best_val:
-                    best, best_val = ctx, r[col]
+            for col in enrich_cols:
+                ctx = col.replace("_enrichment", "")
+                val = r[col]
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if not np.isnan(val) and val > best_val:
+                    best, best_val = ctx, val
             if best:
                 state_best_ctx[k] = best
 
@@ -631,9 +713,12 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
         if os.path.exists(lp):
             labels_cache[stem] = _smooth_labels(np.load(lp))
 
+    skipped_states = []
     for k in range(n_clusters):
         kb = bouts_df[bouts_df["state"] == k].copy()
         if kb.empty:
+            print(f"\nState {k}: SKIPPED — no bouts found in bouts.csv.")
+            skipped_states.append(k)
             continue
 
         out_dir = os.path.join(_vc.get_clips_dir(), f"state_{k}")
@@ -641,6 +726,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
         print(f"\nState {k}: {len(kb)} bouts → {out_dir}")
 
         # ── Longest bouts ──────────────────────────────────────────────────
+        n_ok = 0
         for i, (_, b) in enumerate(kb.nlargest(n_clips, "duration_sec").iterrows()):
             stem = b["stem"]
             anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
@@ -648,46 +734,71 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
                 left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
             else:
                 left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
-            _export_clip(b["video_path"], left, right - 1,
-                         os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
-                         pad_to_secs=0.0, max_secs=max_clip_frames / fps)
-        print(f"  longest: {min(n_clips, len(kb))} clips")
+            clips_attempted += 1
+            ok = _export_clip(b["video_path"], left, right - 1,
+                              os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
+                              pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+            clips_written += int(ok)
+            n_ok += int(ok)
+        print(f"  longest: {n_ok}/{min(n_clips, len(kb))} clips written")
 
         # ── Typical bouts (nearest to cluster centroid in PCA space) ───────
         if preprocessor is not None:
             ck = centers[k]
-            dists = []
-            for _, b in kb.iterrows():
-                fp = b.get("features_path", "")
-                if not fp or not os.path.exists(str(fp)):
-                    dists.append(np.inf)
-                    continue
-                feats = np.load(fp)[int(b["start_frame"]):int(b["end_frame"]) + 1].astype(np.float64)
-                if len(feats) == 0:
-                    dists.append(np.inf)
-                    continue
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    pca = preprocessor.transform(feats)
-                dists.append(float(np.linalg.norm(pca.mean(axis=0) - ck)))
-            kb["_dist"] = dists
+            # Probe feature dimension using the first available bout
+            _feat_dim = None
+            for _, _b in kb.iterrows():
+                _fp = _b.get("features_path", "")
+                if _fp and os.path.exists(str(_fp)):
+                    _feat_dim = preprocessor.transform(
+                        np.load(str(_fp))[:1].astype(np.float64)
+                    ).shape[1]
+                    break
 
-            for i, (_, b) in enumerate(kb.nsmallest(n_clips, "_dist").iterrows()):
-                stem = b["stem"]
-                anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
-                if stem in labels_cache:
-                    left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
-                else:
-                    left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
-                _export_clip(b["video_path"], left, right - 1,
-                             os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
-                             pad_to_secs=0.0, max_secs=max_clip_frames / fps)
-            print(f"  typical: {min(n_clips, len(kb))} clips")
+            if _feat_dim is not None and _feat_dim != len(ck):
+                print(
+                    f"  typical: skipped — feature dim ({_feat_dim}D) does not match "
+                    f"cluster center dim ({len(ck)}D). "
+                    "Re-run compare.py --cluster to fix."
+                )
+            elif _feat_dim is not None:
+                dists = []
+                for _, b in kb.iterrows():
+                    fp = b.get("features_path", "")
+                    if not fp or not os.path.exists(str(fp)):
+                        dists.append(np.inf)
+                        continue
+                    feats = np.load(fp)[int(b["start_frame"]):int(b["end_frame"]) + 1].astype(np.float64)
+                    if len(feats) == 0:
+                        dists.append(np.inf)
+                        continue
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        pca = preprocessor.transform(feats)
+                    dists.append(float(np.linalg.norm(pca.mean(axis=0) - ck)))
+                kb["_dist"] = dists
+
+                n_ok = 0
+                for i, (_, b) in enumerate(kb.nsmallest(n_clips, "_dist").iterrows()):
+                    stem = b["stem"]
+                    anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
+                    if stem in labels_cache:
+                        left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
+                    else:
+                        left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
+                    clips_attempted += 1
+                    ok = _export_clip(b["video_path"], left, right - 1,
+                                      os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
+                                      pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+                    clips_written += int(ok)
+                    n_ok += int(ok)
+                print(f"  typical: {n_ok}/{min(n_clips, len(kb))} clips written")
 
         # ── Context-specific bouts ─────────────────────────────────────────
         best_ctx = state_best_ctx.get(k)
         if best_ctx:
             ctx_bouts = kb[kb["context"] == best_ctx]
+            n_ok = 0
             for i, (_, b) in enumerate(ctx_bouts.nlargest(n_clips, "duration_sec").iterrows()):
                 stem = b["stem"]
                 anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
@@ -695,12 +806,36 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
                     left, right = _expand_clip(labels_cache[stem], anchor, k, clip_purity, max_clip_frames)
                 else:
                     left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
-                _export_clip(b["video_path"], left, right - 1,
-                             os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
-                             pad_to_secs=0.0, max_secs=max_clip_frames / fps)
-            print(f"  context-{best_ctx}: {min(n_clips, len(ctx_bouts))} clips")
+                clips_attempted += 1
+                ok = _export_clip(b["video_path"], left, right - 1,
+                                  os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
+                                  pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+                clips_written += int(ok)
+                n_ok += int(ok)
+            print(f"  context-{best_ctx}: {n_ok}/{min(n_clips, len(ctx_bouts))} clips written")
 
-    print(f"\nClips saved under clips/state_<id>/")
+    if skipped_states:
+        print(
+            f"\nWARNING: States {skipped_states} had no bouts in bouts.csv and were skipped.\n"
+            "  bouts.csv may be stale — re-run:  python characterize.py  (without --clips)\n"
+            "  then re-run:                       python characterize.py --clips"
+        )
+
+    failed = clips_attempted - clips_written
+    if clips_attempted == 0:
+        raise RuntimeError(
+            "No clips were attempted — bouts.csv may be empty or no states were found."
+        )
+    if clips_written == 0:
+        raise RuntimeError(
+            f"All {clips_attempted} clip exports failed.\n"
+            "Most likely cause: video files could not be opened.\n"
+            f"  raw_videos dir : {_vc.get_raw_videos_dir()}\n"
+            "Check that the directory is mounted and readable, then re-run."
+        )
+    if failed:
+        print(f"\nWARNING: {failed}/{clips_attempted} clips failed to export.")
+    print(f"\nDone: {clips_written}/{clips_attempted} clips saved under clips/state_<id>/")
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +851,11 @@ def cmd_summarize(fps=30.0):
     print("Building bouts (smoothed labels, 0.5 s window)...")
     bouts_df = _build_bouts_df(index, fps, meta)
 
+    contexts = (
+        sorted(df_summary["context"].dropna().unique())
+        if "context" in df_summary.columns else []
+    )
+
     # ── A: State summary ──────────────────────────────────────────────────
     print(f"Computing kinematic profiles for {n_clusters} states...")
     df_states = _build_state_summary(index, cluster_info, df_summary, meta, bouts_df, fps)
@@ -724,7 +864,7 @@ def cmd_summarize(fps=30.0):
     for _, r in df_states.iterrows():
         ctx_line = "  ".join(
             f"{c}={r.get(f'context_{c}_frac', float('nan')):.1%}"
-            for c in ["A", "B", "C"]
+            for c in contexts
         )
         print(f"  {r['heuristic_label']}")
         print(f"    speed={r['mean_centroid_speed']:.2f}  "
@@ -746,10 +886,12 @@ def cmd_summarize(fps=30.0):
 
     print("\n  Context enrichment summary:")
     for _, r in df_ctx.iterrows():
-        enrichments = {c: r.get(f"{c}_enrichment", float("nan")) for c in ["A", "B", "C"]}
-        best = max(enrichments, key=lambda c: enrichments[c] if not np.isnan(enrichments[c]) else -np.inf)
-        print(f"  State {int(r['state'])}: most enriched in Context {best} "
-              f"(Δ={enrichments[best]:+.3f})")
+        enrichments = {c: r.get(f"{c}_enrichment", float("nan")) for c in contexts}
+        valid = {c: v for c, v in enrichments.items() if not (isinstance(v, float) and np.isnan(v))}
+        if valid:
+            best = max(valid, key=lambda c: valid[c])
+            print(f"  State {int(r['state'])}: most enriched in Context {best} "
+                  f"(Δ={valid[best]:+.3f})")
 
     _plot_context_fractions(df_ctx, n_clusters, out_dir)
     print(f"Context plot → {out_dir}/context_fractions.png")

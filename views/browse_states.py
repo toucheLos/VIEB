@@ -12,9 +12,11 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
-    QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
+
+import vieb_config as _vc
 
 from _utils import ROOT, RESULTS, CLIPS, _open_folder, _fmt_ts, _state_colors, _CV2, _MPL, _thumb_from_video
 from _widgets import VideoPlayer, MplCanvas, KinematicsPanel
@@ -24,6 +26,25 @@ if _CV2:
 if _MPL:
     from _utils import Figure, FigureCanvas, mpl_cm
     import numpy as np
+
+
+def _thumb_at_frame(video_path: str, frame: int, size=(140, 90)):
+    """Extract a single thumbnail frame from a video at the given frame index."""
+    if not _CV2:
+        return None
+    try:
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+        ret, frm = cap.read()
+        cap.release()
+        if not ret:
+            return None
+        frm = cv2.resize(frm, size)
+        frm = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
+        img = QImage(frm.data, size[0], size[1], 3 * size[0], QImage.Format_RGB888)
+        return QPixmap.fromImage(img.copy())
+    except Exception:
+        return None
 
 
 class StateDetailDialog(QDialog):
@@ -73,26 +94,71 @@ class StateDetailDialog(QDialog):
             f"context: {row.get('context', '-')}, animal: {row.get('animal_id', '-')}, day: {row.get('day', '-')}"
         )
 
-    def _build_kinematics(self, tabs):
-        w = QWidget()
-        lay = QVBoxLayout(w)
+    def _build_kinematics_panel(self):
+        panel = QFrame()
+        panel.setObjectName("kinPanel")
+        panel.setMinimumWidth(280)
+        panel.setStyleSheet("QFrame#kinPanel{background:#f8f8f8;border:1px solid #e0e0e0;}")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("State Profile")
+        title.setFont(QFont("Arial", 11, QFont.Bold))
+        lay.addWidget(title)
+
+        subtitle = QLabel("Mean across all frames in this state")
+        subtitle.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
+        lay.addWidget(subtitle)
+
         if _MPL and self.s_row is not None:
-            c = MplCanvas(figsize=(6, 3))
             metrics = {
-                "Speed": self.s_row.get("mean_centroid_speed", 0),
-                "AngVel": self.s_row.get("mean_angular_vel", 0),
-                "BodyLen": self.s_row.get("mean_body_length_px", 0),
-                "Elongation": self.s_row.get("mean_elongation", 0),
-                "Entropy": self.s_row.get("mean_entropy", 0),
-                "BoutSec": self.s_row.get("mean_bout_dur_sec", 0),
+                "Speed":      float(self.s_row.get("mean_centroid_speed", 0) or 0),
+                "AngVel":     float(self.s_row.get("mean_angular_vel", 0) or 0),
+                "BodyLen":    float(self.s_row.get("mean_body_length_px", 0) or 0),
+                "Elongation": float(self.s_row.get("mean_elongation", 0) or 0),
+                "Entropy":    float(self.s_row.get("mean_entropy", 0) or 0),
+                "BoutSec":    float(self.s_row.get("mean_bout_dur_sec", 0) or 0),
             }
-            c.ax.bar(list(metrics.keys()), [float(v or 0) for v in metrics.values()], color="#4a90d9")
-            c.ax.set_title("Kinematic Profile")
+            c = MplCanvas(figsize=(3.5, 2.5))
+            c.ax.barh(list(metrics.keys()), list(metrics.values()), color="#4a90d9")
+            c.ax.set_xlabel("Value", fontsize=7)
+            c.ax.tick_params(labelsize=7)
             c.fig.tight_layout()
             lay.addWidget(c)
+
+            tbl = QWidget()
+            gl = QGridLayout(tbl)
+            gl.setContentsMargins(0, 4, 0, 0)
+            gl.setSpacing(3)
+            mono = QFont("Courier New", 9)
+            rows_data = [
+                ("Speed",         f"{metrics['Speed']:.1f} px/s"),
+                ("Angular Vel",   f"{metrics['AngVel']:.2f} rad/f"),
+                ("Body Length",   f"{metrics['BodyLen']:.0f} px"),
+                ("Elongation",    f"{metrics['Elongation']:.2f}"),
+                ("Entropy",       f"{metrics['Entropy']:.2f}"),
+                ("Bout Duration", f"{metrics['BoutSec']:.1f} s"),
+            ]
+            for i, (name, val_str) in enumerate(rows_data):
+                name_lbl = QLabel(name)
+                name_lbl.setStyleSheet("color:#444;font-size:9px;")
+                val_lbl = QLabel(val_str)
+                val_lbl.setFont(mono)
+                val_lbl.setStyleSheet("color:#222;font-size:9px;")
+                val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                gl.addWidget(name_lbl, i, 0)
+                gl.addWidget(val_lbl, i, 1)
+            lay.addWidget(tbl)
         else:
-            lay.addWidget(QLabel("Run Characterization + Clip Export to generate state kinematics."))
-        tabs.addTab(w, "Kinematics")
+            no_data = QLabel("Run Characterize to view state profile.")
+            no_data.setAlignment(Qt.AlignCenter)
+            no_data.setStyleSheet("color:#888;font-style:italic;")
+            no_data.setWordWrap(True)
+            lay.addWidget(no_data)
+
+        lay.addStretch()
+        return panel
 
     def _start_generate(self):
         self.request_clip_generation.emit(self.sid)
@@ -103,7 +169,7 @@ class StateDetailDialog(QDialog):
         )
         self.close()
 
-    def _build_clips(self, tabs):
+    def _build_clips_panel(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         groups, has_any = self._clip_groups()
@@ -168,7 +234,7 @@ class StateDetailDialog(QDialog):
             self._gen_btn.clicked.connect(self._start_generate)
             lay.addWidget(self._gen_btn)
             lay.addWidget(QLabel("Generation runs in background so you can continue browsing."))
-        tabs.addTab(w, "Video Clips")
+        return w
 
     def _update_clip_card_sizes(self):
         if not self._clip_sections:
@@ -204,10 +270,11 @@ class StateDetailDialog(QDialog):
         hdr = QLabel(f"State {self.sid}")
         hdr.setFont(QFont("Arial", 14, QFont.Bold))
         lay.addWidget(hdr)
-        tabs = QTabWidget()
-        self._build_kinematics(tabs)
-        self._build_clips(tabs)
-        lay.addWidget(tabs)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._build_clips_panel())
+        splitter.addWidget(self._build_kinematics_panel())
+        splitter.setSizes([600, 400])
+        lay.addWidget(splitter, stretch=1)
         btn = QDialogButtonBox(QDialogButtonBox.Close)
         btn.rejected.connect(self.reject)
         lay.addWidget(btn)
@@ -280,6 +347,7 @@ class BrowseStatesView(QWidget):
         self._clip_page = 0
         self._clip_files: list = []
         self._state_order: list = []
+        self._kin_individual = False
         self._build()
 
     def _build(self):
@@ -349,6 +417,33 @@ class BrowseStatesView(QWidget):
         self._detail_subtitle = QLabel("")
         self._detail_subtitle.setStyleSheet("color:#666;")
         rl.addWidget(self._detail_subtitle)
+
+        # Kinematics header: label + toggle
+        kin_hdr = QHBoxLayout()
+        kin_lbl = QLabel("Kinematics")
+        kin_lbl.setStyleSheet("font-weight:bold;font-size:10px;color:#444;")
+        kin_hdr.addWidget(kin_lbl)
+        kin_hdr.addStretch()
+        self._kin_toggle = QPushButton("Individual")
+        self._kin_toggle.setCheckable(True)
+        self._kin_toggle.setFixedHeight(22)
+        self._kin_toggle.setFixedWidth(80)
+        self._kin_toggle.setStyleSheet(
+            "QPushButton{font-size:9px;border:1px solid #bbb;border-radius:3px;"
+            "background:#f5f5f5;padding:0 6px;color:#333;}"
+            "QPushButton:checked{background:#1976D2;color:white;border-color:#1565C0;}"
+        )
+        self._kin_toggle.toggled.connect(self._on_kin_toggle)
+        kin_hdr.addWidget(self._kin_toggle)
+        rl.addLayout(kin_hdr)
+
+        # Per-video stem selector (only visible in Individual mode)
+        self._kin_stem_combo = QComboBox()
+        self._kin_stem_combo.setFixedHeight(24)
+        self._kin_stem_combo.setStyleSheet("font-size:9px;")
+        self._kin_stem_combo.currentIndexChanged.connect(self._on_kin_stem_changed)
+        self._kin_stem_combo.hide()
+        rl.addWidget(self._kin_stem_combo)
 
         # Compact kinematic chart
         if _MPL:
@@ -535,38 +630,107 @@ class BrowseStatesView(QWidget):
         self._detail_title.setText(label)
         self._detail_subtitle.setText("  |  ".join(subtitle_parts) if subtitle_parts else "")
 
+        if self._kin_individual:
+            self._populate_kin_stems(sid)
         self._render_kinematics(sid)
         self._populate_filters(sid)
         self._refresh_clips()
 
+    # ── Kinematics toggle & per-video rendering ───────────────────────────────
+
+    def _on_kin_toggle(self, checked: bool):
+        self._kin_individual = checked
+        self._kin_stem_combo.setVisible(checked)
+        if self._selected_sid is not None:
+            if checked:
+                self._populate_kin_stems(self._selected_sid)
+            self._render_kinematics(self._selected_sid)
+
+    def _on_kin_stem_changed(self, _idx: int):
+        if self._kin_individual and self._selected_sid is not None:
+            self._render_kinematics(self._selected_sid)
+
+    def _populate_kin_stems(self, sid: int):
+        self._kin_stem_combo.blockSignals(True)
+        self._kin_stem_combo.clear()
+        summary = self._data.get("summary")
+        col = f"state_{sid}_frac"
+        entries: list[tuple[str, str]] = []
+        if summary is not None and col in summary.columns:
+            stem_col = next((c for c in ("filename", "stem") if c in summary.columns), None)
+            if stem_col:
+                sub = summary[summary[col] > 0]
+                for _, row in sub.iterrows():
+                    stem = str(row[stem_col]).replace(".mp4", "")
+                    animal = str(row.get("animal_id", ""))
+                    ctx    = str(row.get("context", ""))
+                    day    = str(row.get("day", ""))
+                    label  = " · ".join(p for p in (animal, ctx, f"Day {day}" if day else "") if p)
+                    entries.append((stem, label or stem))
+        if not entries:
+            shared = RESULTS / "shared"
+            for f in sorted(shared.glob("*_labels.npy")):
+                stem = f.name.replace("_labels.npy", "")
+                entries.append((stem, stem))
+        for stem, label in entries:
+            self._kin_stem_combo.addItem(label, userData=stem)
+        self._kin_stem_combo.blockSignals(False)
+
+    _KIN_FEATURE_INDICES = {
+        "Speed":       36,
+        "Elongation":  38,
+        "Ang Vel":     39,
+        "Entropy":     40,
+        "Rearing":     41,
+    }
+
+    def _compute_per_video_kinematics(self, stem: str, sid: int) -> dict | None:
+        labels_path = RESULTS / "shared" / f"{stem}_labels.npy"
+        feats_path  = RESULTS / "features" / f"{stem}_features.npy"
+        if not labels_path.exists() or not feats_path.exists():
+            return None
+        labels = np.load(str(labels_path))
+        mask   = labels == sid
+        if not mask.any():
+            return None
+        feats = np.load(str(feats_path))
+        if len(feats) != len(labels):
+            return None
+        state_feats = feats[mask]
+        return {
+            name: float(np.mean(np.abs(state_feats[:, idx])))
+            for name, idx in self._KIN_FEATURE_INDICES.items()
+            if idx < state_feats.shape[1]
+        }
+
     def _render_kinematics(self, sid):
         if not self._kin_canvas or not _MPL:
             return
-        ss = self._data.get("state_summary")
         self._kin_canvas.fig.clf()
         ax = self._kin_canvas.fig.add_subplot(111)
+        if self._kin_individual:
+            self._render_kin_individual(sid, ax)
+        else:
+            self._render_kin_mean(sid, ax)
+        self._kin_canvas.fig.tight_layout(pad=0.5)
+        self._kin_canvas.draw()
+
+    def _render_kin_mean(self, sid, ax):
+        ss = self._data.get("state_summary")
         if ss is None:
-            ax.axis("off")
-            self._kin_canvas.draw()
-            return
+            ax.axis("off"); return
         ss_col = "state_id" if "state_id" in ss.columns else ("state" if "state" in ss.columns else None)
         if ss_col is None:
-            ax.axis("off")
-            self._kin_canvas.draw()
-            return
+            ax.axis("off"); return
         r = ss[ss[ss_col] == sid]
         if r.empty:
-            ax.axis("off")
-            self._kin_canvas.draw()
-            return
+            ax.axis("off"); return
         row = r.iloc[0]
         kin_cols = [c for c in ("mean_speed", "mean_acceleration", "mean_body_length",
                                 "mean_head_angle", "mean_tail_angle")
                     if c in ss.columns]
         if not kin_cols:
-            ax.axis("off")
-            self._kin_canvas.draw()
-            return
+            ax.axis("off"); return
         vals = []
         for c in kin_cols:
             try:
@@ -576,10 +740,22 @@ class BrowseStatesView(QWidget):
         short = [c.replace("mean_", "").replace("_", " ") for c in kin_cols]
         colors = ["#1976D2", "#388E3C", "#F57C00", "#7B1FA2", "#D32F2F"][:len(kin_cols)]
         ax.barh(short, vals, color=colors)
-        ax.set_xlabel("Value", fontsize=7)
+        ax.set_xlabel("Mean (all videos)", fontsize=7)
         ax.tick_params(labelsize=7)
-        self._kin_canvas.fig.tight_layout(pad=0.5)
-        self._kin_canvas.draw()
+
+    def _render_kin_individual(self, sid, ax):
+        stem = self._kin_stem_combo.currentData()
+        if not stem:
+            ax.axis("off"); return
+        metrics = self._compute_per_video_kinematics(stem, sid)
+        if not metrics:
+            ax.text(0.5, 0.5, "No data for this video", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=8, color="#888")
+            ax.axis("off"); return
+        colors = ["#1976D2", "#388E3C", "#F57C00", "#7B1FA2", "#D32F2F"][:len(metrics)]
+        ax.barh(list(metrics.keys()), list(metrics.values()), color=colors)
+        ax.set_xlabel("Mean (this video)", fontsize=7)
+        ax.tick_params(labelsize=7)
 
     def _populate_filters(self, sid):
         summary = self._data.get("summary")
@@ -601,12 +777,99 @@ class BrowseStatesView(QWidget):
             for d in sorted(summary["day"].dropna().astype(str).unique()):
                 self._flt_day.addItem(str(d))
 
+    def _resolve_stem_video(self, stem: str) -> str | None:
+        """Return the absolute path to the source .mp4 for a stem, or None."""
+        raw_dir = _vc.get_raw_videos_dir()
+        if raw_dir:
+            p = os.path.join(raw_dir, f"{stem}.mp4")
+            if os.path.exists(p):
+                return p
+        fi = self._data.get("feature_index") or {}
+        if stem in fi:
+            vp = fi[stem].get("video_path", "")
+            if vp:
+                for candidate in (
+                    vp,
+                    os.path.join(os.path.dirname(os.path.dirname(RESULTS)), vp),
+                    os.path.join(raw_dir or "", os.path.basename(vp)),
+                ):
+                    if os.path.exists(candidate):
+                        return candidate
+        return None
+
     def _refresh_clips(self):
         sid = self._selected_sid
         if sid is None:
             self._gen_clips_btn.hide()
             self._clear_clip_grid()
             return
+
+        flt_animal = self._flt_animal.currentText()
+        flt_ctx    = self._flt_context.currentText()
+        flt_day    = self._flt_day.currentText()
+
+        # ── Bouts-based approach: one entry per source video ───────────────
+        bouts = self._data.get("bouts")
+        if bouts is not None and not bouts.empty and "state" in bouts.columns:
+            sb = bouts[bouts["state"] == sid]
+            if flt_animal != "All":
+                sb = sb[sb.get("animal_id", pd.Series(dtype=str)).astype(str) == flt_animal] \
+                    if "animal_id" in sb.columns else sb
+            if flt_ctx != "All":
+                sb = sb[sb.get("context", pd.Series(dtype=str)).astype(str) == flt_ctx] \
+                    if "context" in sb.columns else sb
+            if flt_day != "All":
+                sb = sb[sb.get("day", pd.Series(dtype=str)).astype(str) == flt_day] \
+                    if "day" in sb.columns else sb
+
+            if not sb.empty:
+                # One representative bout per stem (longest)
+                per_stem = (
+                    sb.sort_values("duration_sec", ascending=False)
+                    .drop_duplicates("stem")
+                    .reset_index(drop=True)
+                )
+                entries = []
+                for _, row in per_stem.iterrows():
+                    stem = str(row["stem"])
+                    vp = self._resolve_stem_video(stem)
+                    if not vp:
+                        continue
+                    entries.append({
+                        "stem":        stem,
+                        "video_path":  vp,
+                        "start_frame": int(row.get("start_frame", 0)),
+                        "end_frame":   int(row.get("end_frame", 0)),
+                        "context":     str(row.get("context", "")),
+                        "animal_id":   str(row.get("animal_id", "")),
+                        "day":         str(row.get("day", "")),
+                        "duration_sec": float(row.get("duration_sec", 0)),
+                    })
+                if entries:
+                    self._clip_files = entries
+                    self._clip_page = 0
+                    self._gen_clips_btn.hide()
+                    self._render_clip_page()
+                    return
+
+            # No entries after filtering
+            self._clip_files = []
+            self._clip_page = 0
+            self._clear_clip_grid()
+            msg = "No videos match the current filters for this state." if (
+                flt_animal != "All" or flt_ctx != "All" or flt_day != "All"
+            ) else "No bouts found for this state.\nRe-run:  python characterize.py"
+            no_lbl = QLabel(msg)
+            no_lbl.setAlignment(Qt.AlignCenter)
+            no_lbl.setStyleSheet("color:#888;font-style:italic;")
+            self._clips_grid.addWidget(no_lbl, 0, 0, 1, self._CLIPS_PER_ROW)
+            self._page_lbl.setText("Page 0 of 0")
+            self._prev_page_btn.setEnabled(False)
+            self._next_page_btn.setEnabled(False)
+            self._gen_clips_btn.hide()
+            return
+
+        # ── Fallback: pre-generated clip files ────────────────────────────
         clip_dir = Path(os.path.abspath(str(CLIPS / f"state_{sid}")))
         if not clip_dir.exists() or not list(clip_dir.glob("*.mp4")):
             self._clip_files = []
@@ -614,8 +877,7 @@ class BrowseStatesView(QWidget):
             self._clear_clip_grid()
             lpf = self._data.get("labels_per_frame")
             has_frames = (
-                lpf is not None
-                and not lpf.empty
+                lpf is not None and not lpf.empty
                 and "state" in lpf.columns
                 and int(sid) in lpf["state"].values
             )
@@ -635,10 +897,6 @@ class BrowseStatesView(QWidget):
             return
         self._gen_clips_btn.hide()
         all_clips = sorted(clip_dir.glob("*.mp4"), key=lambda p: p.name)
-        # Apply filters
-        flt_animal = self._flt_animal.currentText()
-        flt_ctx = self._flt_context.currentText()
-        flt_day = self._flt_day.currentText()
         filtered = []
         for p in all_clips:
             name = p.stem
@@ -707,17 +965,33 @@ class BrowseStatesView(QWidget):
             self._prev_page_btn.setEnabled(False)
             self._next_page_btn.setEnabled(False)
             return
+
+        # Bout-dict entries: render all at once (no pagination cap)
+        if isinstance(files[0], dict):
+            self._page_lbl.setText(f"{len(files)} videos")
+            self._prev_page_btn.setEnabled(False)
+            self._next_page_btn.setEnabled(False)
+            for i, entry in enumerate(files):
+                row_idx = i // self._CLIPS_PER_ROW
+                col_idx = i % self._CLIPS_PER_ROW
+                mid = (entry["start_frame"] + entry["end_frame"]) // 2
+                pm = _thumb_at_frame(entry["video_path"], mid)
+                self._clips_grid.addWidget(
+                    self._make_bout_cell(entry, pm), row_idx, col_idx
+                )
+            return
+
+        # Fallback: pre-generated clip Path list with pagination
         total_pages = max(1, math.ceil(len(files) / self._CLIPS_PER_PAGE))
         self._clip_page = max(0, min(self._clip_page, total_pages - 1))
         start = self._clip_page * self._CLIPS_PER_PAGE
-        end = start + self._CLIPS_PER_PAGE
-        page_files = files[start:end]
+        end   = start + self._CLIPS_PER_PAGE
         self._page_lbl.setText(f"Page {self._clip_page + 1} of {total_pages}")
         self._prev_page_btn.setEnabled(self._clip_page > 0)
         self._next_page_btn.setEnabled(self._clip_page < total_pages - 1)
-        for i, fp in enumerate(page_files):
-            row = i // self._CLIPS_PER_ROW
-            col = i % self._CLIPS_PER_ROW
+        for i, fp in enumerate(files[start:end]):
+            row_idx = i // self._CLIPS_PER_ROW
+            col_idx = i % self._CLIPS_PER_ROW
             fp = Path(os.path.abspath(str(fp)))
             thumb_lbl = QLabel()
             thumb_lbl.setFixedSize(140, 90)
@@ -731,7 +1005,6 @@ class BrowseStatesView(QWidget):
             thumb_lbl.setCursor(Qt.PointingHandCursor)
             fp_cap = fp
             thumb_lbl.mousePressEvent = lambda _e, p=fp_cap: self._play_clip(p)
-
             meta = self._clip_meta(fp)
             name_lbl = QLabel(fp.name)
             name_lbl.setAlignment(Qt.AlignCenter)
@@ -746,7 +1019,6 @@ class BrowseStatesView(QWidget):
             dur_lbl = QLabel(f"Duration: {dur_text}")
             dur_lbl.setAlignment(Qt.AlignCenter)
             dur_lbl.setStyleSheet("font-size:9px;color:#444;")
-
             cell = QWidget()
             cl = QVBoxLayout(cell)
             cl.setContentsMargins(2, 2, 2, 2)
@@ -756,7 +1028,87 @@ class BrowseStatesView(QWidget):
             cl.addWidget(animal_lbl, alignment=Qt.AlignCenter)
             cl.addWidget(ctx_lbl, alignment=Qt.AlignCenter)
             cl.addWidget(dur_lbl, alignment=Qt.AlignCenter)
-            self._clips_grid.addWidget(cell, row, col)
+            self._clips_grid.addWidget(cell, row_idx, col_idx)
+
+    def _make_bout_cell(self, entry: dict, pm) -> QWidget:
+        thumb_lbl = QLabel()
+        thumb_lbl.setFixedSize(140, 90)
+        thumb_lbl.setAlignment(Qt.AlignCenter)
+        thumb_lbl.setStyleSheet("background:#222;border-radius:4px;color:#aaa;font-size:10px;")
+        if pm:
+            thumb_lbl.setPixmap(pm)
+        else:
+            thumb_lbl.setText(entry["stem"][-20:])
+        thumb_lbl.setCursor(Qt.PointingHandCursor)
+        thumb_lbl.mousePressEvent = lambda _e, e=entry: self._play_bout(e)
+
+        animal = entry.get("animal_id", "") or "—"
+        ctx    = entry.get("context", "")   or "—"
+        day    = entry.get("day", "")       or "—"
+        dur    = entry.get("duration_sec", 0)
+
+        cell = QWidget()
+        cl = QVBoxLayout(cell)
+        cl.setContentsMargins(2, 2, 2, 2)
+        cl.setSpacing(2)
+        cl.addWidget(thumb_lbl, alignment=Qt.AlignCenter)
+        for text, style in (
+            (f"Animal: {animal}",          "font-size:9px;color:#444;"),
+            (f"Ctx: {ctx}  Day: {day}",    "font-size:9px;color:#444;"),
+            (f"Longest bout: {dur:.1f}s",  "font-size:9px;color:#888;"),
+        ):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(style)
+            cl.addWidget(lbl, alignment=Qt.AlignCenter)
+        return cell
+
+    def _play_bout(self, entry: dict):
+        """Open source video seeked to the representative bout for this entry."""
+        vp = entry.get("video_path", "")
+        if not vp or not os.path.isfile(vp):
+            QMessageBox.warning(self, "File Not Found",
+                                f"Source video not found:\n{vp}")
+            return
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"{entry.get('animal_id','?')} · {entry.get('context','?')} · Day {entry.get('day','?')}")
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(4, 4, 4, 4)
+            lay.setSpacing(4)
+            player = VideoPlayer(parent=dlg)
+            lay.addWidget(player, stretch=7)
+            kin_panel = KinematicsPanel(parent=dlg)
+            lay.addWidget(kin_panel, stretch=3)
+            player.load(vp)
+            # Seek to start of the representative bout
+            start = entry.get("start_frame", 0)
+            if start > 0 and hasattr(player, "_cap") and player._cap:
+                player._cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+                player._cur = start
+            stem = entry["stem"]
+            fi = self._data.get("feature_index") or {}
+            if stem in fi:
+                feat_path = fi[stem].get("features_path", "")
+                if feat_path and os.path.exists(feat_path):
+                    import threading
+                    end = entry.get("end_frame", start + 300)
+                    threading.Thread(
+                        target=kin_panel.load_clip,
+                        args=(feat_path, start, end),
+                        daemon=True
+                    ).start()
+                    cursor_timer = QTimer(kin_panel)
+                    cursor_timer.timeout.connect(
+                        lambda: kin_panel.set_frame(player._cur) if hasattr(player, "_cur") else None
+                    )
+                    cursor_timer.start(33)
+                    kin_panel._cursor_timer = cursor_timer
+            dlg.resize(700, 620)
+            dlg.finished.connect(lambda: _cleanup_clip_dialog(player, kin_panel))
+            dlg.exec_()
+        except Exception as exc:
+            QMessageBox.warning(self, "Playback Error", str(exc))
 
     def _clear_clip_grid(self):
         while self._clips_grid.count():

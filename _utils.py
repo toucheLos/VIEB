@@ -47,9 +47,28 @@ from PyQt5.QtGui import QImage, QPixmap
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).parent
-RESULTS = ROOT / "results"
-CLIPS = ROOT / "clips"
+APP_CONFIG_PATH = ROOT / "app_config.json"
 CONFIG_PATH = ROOT / "config.json"
+
+
+def _get_results_dir_vc() -> Path:
+    try:
+        import vieb_config as _vc
+        return Path(_vc.get_results_dir())
+    except Exception:
+        return ROOT / "results"
+
+
+def _get_clips_dir_vc() -> Path:
+    try:
+        import vieb_config as _vc
+        return Path(_vc.get_clips_dir())
+    except Exception:
+        return ROOT / "clips"
+
+
+RESULTS = _get_results_dir_vc()
+CLIPS = _get_clips_dir_vc()
 VALIDATION_DIR = RESULTS / "validation"
 
 # ---------------------------------------------------------------------------
@@ -257,12 +276,15 @@ _DEFAULT_CFG = {
     "stage_last_run": {},
     "context_groups": "A,B,C",
     "cohort_csv_path": "",
+    "current_run_saved": False,
+    "current_run_id": "",
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
 _NAV_VIEWS = [
     "Overview",
     "Pipeline",
+    "Cluster Runs",
     "Browse States",
     "Analysis",
     "Validation",
@@ -272,6 +294,7 @@ _NAV_VIEWS = [
 _NAV_ICONS = {
     "Overview":       "⊞",
     "Pipeline":       "▶",
+    "Cluster Runs":   "⊙",
     "Browse States":  "▣",
     "Analysis":       "◈",
     "Validation":     "✓",
@@ -308,11 +331,27 @@ def _register_project(path: str) -> None:
     _save_projects(projects[:20])  # keep at most 20 recent entries
 
 
+def _get_project_config_path() -> Path:
+    """Return the config.json path for the currently active project."""
+    if APP_CONFIG_PATH.exists():
+        try:
+            app_cfg = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+            active = app_cfg.get("active_project", "")
+            if active:
+                p = Path(active)
+                if p.exists():
+                    return p / "config.json"
+        except Exception:
+            pass
+    return CONFIG_PATH
+
+
 def _load_cfg():
     cfg = json.loads(json.dumps(_DEFAULT_CFG))
-    if CONFIG_PATH.exists():
+    path = _get_project_config_path()
+    if path.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            cfg.update(json.loads(path.read_text(encoding="utf-8")))
         except Exception:
             pass
     if "arena_bounds" not in cfg:
@@ -324,7 +363,7 @@ def _load_cfg():
 
 
 def _save_cfg(cfg):
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _get_project_config_path().write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _fmt_ts(ts):

@@ -533,6 +533,134 @@ class DiagnoseDialog(QDialog):
         self._status_lbl.setStyleSheet(f"color:{'#1b5e20' if ok else '#b71c1c'};font-weight:bold;")
 
 
+class LinuxGpuSetupDialog(QDialog):
+    """Guide the user through installing cuML (RAPIDS) on Linux for GPU-accelerated clustering."""
+
+    _INSTALL_CMD = (
+        "pip install --extra-index-url https://pypi.nvidia.com cuml-cu12"
+    )
+
+    def __init__(self, gpu_name: str | None = None, parent=None):
+        super().__init__(parent)
+        self._gpu_name = gpu_name or "NVIDIA GPU"
+        self._worker = None
+        self.setWindowTitle("GPU Acceleration Setup")
+        self.resize(620, 480)
+        self.setModal(True)
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(10)
+
+        hdr = QLabel(f"GPU detected: {self._gpu_name}")
+        hdr.setFont(QFont("Arial", 13, QFont.Bold))
+        lay.addWidget(hdr)
+
+        info = QLabel(
+            "cuML (RAPIDS) is not installed. It enables 10–50× faster UMAP + HDBSCAN "
+            "clustering on your GPU.\n\n"
+            "Run the command below inside your VIEB virtual environment, then click Verify."
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        cmd_box = QTextEdit(self._INSTALL_CMD)
+        cmd_box.setReadOnly(True)
+        cmd_box.setMaximumHeight(44)
+        cmd_box.setStyleSheet(
+            "background:#1e1e1e;color:#cfd8dc;font-family:Consolas,monospace;"
+            "font-size:12px;border-radius:4px;padding:4px;"
+        )
+        lay.addWidget(cmd_box)
+
+        btn_row = QHBoxLayout()
+        self._install_btn = QPushButton("Run Install")
+        self._install_btn.setToolTip(
+            "Run the install command inside the active Python environment.\n"
+            "This may take several minutes on the first run."
+        )
+        self._install_btn.clicked.connect(self._run_install)
+        btn_row.addWidget(self._install_btn)
+
+        self._verify_btn = QPushButton("Verify")
+        self._verify_btn.clicked.connect(self._run_verify)
+        btn_row.addWidget(self._verify_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setStyleSheet(
+            "background:#151515;color:#cfd8dc;font-family:Consolas,monospace;font-size:11px;"
+        )
+        lay.addWidget(self._log)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet("font-weight:bold;")
+        lay.addWidget(self._status)
+
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        lay.addWidget(close, alignment=Qt.AlignRight)
+
+    def _append(self, line: str):
+        self._log.insertPlainText(line)
+        self._log.verticalScrollBar().setValue(self._log.verticalScrollBar().maximum())
+
+    def _run_install(self):
+        if self._worker and self._worker.isRunning():
+            return
+        self._install_btn.setEnabled(False)
+        self._verify_btn.setEnabled(False)
+        self._status.setText("")
+        self._log.clear()
+        self._append("Running install…\n")
+        self._worker = SubprocessWorker([sys.executable, "-m", "pip", "install",
+                                         "--extra-index-url", "https://pypi.nvidia.com",
+                                         "cuml-cu12"])
+        self._worker.log.connect(self._append)
+        self._worker.done.connect(self._on_install_done)
+        self._worker.start()
+
+    def _on_install_done(self, ok: bool):
+        self._install_btn.setEnabled(True)
+        self._verify_btn.setEnabled(True)
+        if ok:
+            self._status.setText("Install succeeded — click Verify to confirm GPU access.")
+            self._status.setStyleSheet("color:#1b5e20;font-weight:bold;")
+            self._run_verify()
+        else:
+            self._status.setText("Install failed — see output above.")
+            self._status.setStyleSheet("color:#b71c1c;font-weight:bold;")
+
+    def _run_verify(self):
+        if self._worker and self._worker.isRunning():
+            return
+        self._verify_btn.setEnabled(False)
+        self._log.clear()
+        self._append("Verifying cuML + GPU…\n")
+        verify_script = (
+            "import cuml; import cupy as cp; "
+            "cp.cuda.runtime.getDeviceCount(); cp.array([1.0]); "
+            "print('cuML GPU verified OK')"
+        )
+        self._worker = SubprocessWorker([sys.executable, "-c", verify_script])
+        self._worker.log.connect(self._append)
+        self._worker.done.connect(self._on_verify_done)
+        self._worker.start()
+
+    def _on_verify_done(self, ok: bool):
+        self._verify_btn.setEnabled(True)
+        if ok:
+            self._status.setText("GPU acceleration is ready — close this dialog and re-run the pipeline.")
+            self._status.setStyleSheet("color:#1b5e20;font-weight:bold;")
+        else:
+            self._status.setText("Verification failed — check the output above.")
+            self._status.setStyleSheet("color:#b71c1c;font-weight:bold;")
+
+
 class OnboardingDialog(QDialog):
     completed = pyqtSignal()
 

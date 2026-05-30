@@ -161,14 +161,12 @@ class PipelineRunner(QThread):
         return p.wait() == 0
 
     def run(self):
-        cap = _Capture()
-        cap.text.connect(self.log)
-        old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = sys.stderr = cap
+        # All stages run as subprocesses so stdout is streamed line-by-line via
+        # self.log without redirecting sys.stdout globally (which caused the GUI
+        # to freeze and the terminal box to show nothing).
         ok_all = True
         cluster_bundle_ran = False
         try:
-            sys.path.insert(0, str(ROOT))
             fps = float(self.cfg.get("fps", 30))
             mcs = int(self.cfg.get("min_cluster_size", 2000))
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
@@ -195,26 +193,22 @@ class PipelineRunner(QThread):
                             # Delegate to WSL2 where cuML / GPU UMAP+HDBSCAN are available
                             ok = self._run_cluster_wsl(fps, mcs)
                         else:
-                            from compare import cmd_cluster
-                            cmd_cluster(
-                                fps=fps,
-                                min_cluster_size=mcs,
-                                umap_dims=umap_dims,
-                                min_samples=hdbscan_min_samples,
-                            )
-                            ok = True
+                            cluster_args = [
+                                "compare.py", "--cluster",
+                                "--fps", str(fps),
+                                "--min-cluster-size", str(mcs),
+                                "--umap-dims", str(umap_dims),
+                            ]
+                            if hdbscan_min_samples:
+                                cluster_args += ["--hdbscan-min-samples", str(hdbscan_min_samples)]
+                            ok = self._run_subprocess(cluster_args)
                         if ok:
                             for b in (3, 4, 5, 6):
                                 self.stage_done.emit(b, True)
                         else:
-                            raise RuntimeError("WSL2 clustering subprocess returned non-zero exit code.")
-                    except (Exception, SystemExit) as _exc:
-                        msg = (
-                            f"Clustering exited: {_exc}"
-                            if isinstance(_exc, SystemExit)
-                            else traceback.format_exc()
-                        )
-                        print(msg)
+                            raise RuntimeError("Clustering subprocess returned non-zero exit code.")
+                    except Exception as _exc:
+                        self.log.emit(traceback.format_exc())
                         for b in (3, 4, 5, 6):
                             self.stage_done.emit(b, False)
                         ok_all = False
@@ -228,44 +222,56 @@ class PipelineRunner(QThread):
                         if not ok:
                             raise RuntimeError("Pose estimation failed.")
                     elif sid == 2:
-                        from compare import cmd_extract
-
-                        cmd_extract(fps=fps, use_wavelets=use_wavelets)
+                        # Run as subprocess so stdout streams line-by-line to the
+                        # terminal box.  Direct import blocked the event loop because
+                        # compare.py's module-level code reassigns sys.stdout and
+                        # tqdm progress never emitted complete lines through _Capture.
+                        extract_args = ["compare.py", "--extract", "--fps", str(fps)]
+                        if not use_wavelets:
+                            extract_args.append("--no-wavelets")
+                        ok = self._run_subprocess(extract_args)
+                        if not ok:
+                            raise RuntimeError("Feature extraction failed.")
                     elif sid == 7:
-                        from compare import cmd_collapse
-
-                        cmd_collapse(threshold=collapse_threshold)
+                        ok = self._run_subprocess([
+                            "compare.py", "--collapse",
+                            "--collapse-threshold", str(collapse_threshold),
+                        ])
+                        if not ok:
+                            raise RuntimeError("State collapsing failed.")
                     elif sid == 8:
-                        from compare import cmd_report
-
-                        cmd_report(fps=fps)
+                        ok = self._run_subprocess(["compare.py", "--report", "--fps", str(fps)])
+                        if not ok:
+                            raise RuntimeError("Report generation failed.")
                     elif sid == 9:
-                        from compare import cmd_summarize
-
-                        cmd_summarize()
+                        ok = self._run_subprocess(["compare.py", "--summarize"])
+                        if not ok:
+                            raise RuntimeError("Per-animal scalar computation failed.")
                     elif sid == 10:
-                        from compare import cmd_motifs
-
-                        cmd_motifs()
+                        # compare.py --motifs is not yet implemented; skip gracefully
+                        # so the full pipeline can still complete.
+                        self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
                     elif sid == 11:
-                        from characterize import cmd_clips, cmd_summarize as csum
-
-                        csum(fps=fps)
+                        char_args = ["characterize.py", "--fps", str(fps)]
                         if export_clips:
-                            cmd_clips(fps=fps)
+                            char_args.append("--clips")
+                        ok = self._run_subprocess(char_args)
+                        if not ok:
+                            raise RuntimeError("Characterization failed.")
                     self.stage_done.emit(sid, True)
                 except (Exception, SystemExit) as _exc:
                     msg = (
-                        f"Stage {sid} exited: {_exc}"
+                        f"Stage {sid} exited: {_exc}\n"
                         if isinstance(_exc, SystemExit)
                         else traceback.format_exc()
                     )
-                    print(msg)
+                    self.log.emit(msg)
                     self.stage_done.emit(sid, False)
                     ok_all = False
                     break
-        finally:
-            sys.stdout, sys.stderr = old_out, old_err
+        except Exception:
+            self.log.emit(traceback.format_exc())
+            ok_all = False
         self.all_done.emit(ok_all)
 
 

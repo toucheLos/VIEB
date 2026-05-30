@@ -120,6 +120,18 @@ class SettingsView(QWidget):
             "Must exactly match the values in the context column of metadata.csv."
         )
 
+        # Context descriptions — serialize dict as "A=shock context,B=safe context,..."
+        _ctx_desc_dict = self.cfg.get("context_descriptions", {})
+        _ctx_desc_str = ",".join(f"{k}={v}" for k, v in _ctx_desc_dict.items())
+        self._ctx_desc = QLineEdit(_ctx_desc_str)
+        _ctx_desc_tip = (
+            "Comma-separated list of context=description pairs matching your metadata.csv\n"
+            "context column. Used to label plots and reports.\n"
+            "Example: A=shock context,B=safe context,C=novel context"
+        )
+        self._ctx_desc.setToolTip(_ctx_desc_tip)
+        row("Context descriptions", self._ctx_desc, _ctx_desc_tip)
+
         self._fps = QSpinBox()
         self._fps.setRange(1, 240)
         self._fps.setValue(int(self.cfg.get("fps", 30)))
@@ -172,6 +184,17 @@ class SettingsView(QWidget):
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
+        # Parse "A=shock context,B=safe context" → {"A": "shock context", ...}
+        ctx_desc_raw = self._ctx_desc.text().strip()
+        ctx_desc_dict: dict = {}
+        if ctx_desc_raw:
+            for part in ctx_desc_raw.split(","):
+                if "=" in part:
+                    k, _, v = part.partition("=")
+                    k, v = k.strip(), v.strip()
+                    if k:
+                        ctx_desc_dict[k] = v
+        self.cfg["context_descriptions"] = ctx_desc_dict
         self.cfg["fps"] = self._fps.value()
         self.cfg["umap_dims"] = self._umap_dims.value()
         self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()

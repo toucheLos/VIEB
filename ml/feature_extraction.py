@@ -30,12 +30,27 @@ class PoseFeatureExtractor:
     - Postural configurations
     """
 
+    # Semantic roles used for postural features
+    _KNOWN_ROLES: tuple = ("nose", "left_ear", "right_ear", "center/centroid", "tail_base")
+
+    # Hardcoded defaults for the 8-point Luna lab mouse model
+    # (0=left_ear, 1=right_ear, 2=nose, 3=center, 4=left_hip, 5=right_hip, 6=tail_base, 7=tail_tip)
+    _DEFAULT_ROLE_IDX: dict = {
+        "nose": 2,
+        "left_ear": 0,
+        "right_ear": 1,
+        "center/centroid": 3,
+        "tail_base": 6,
+    }
+
     def __init__(
         self,
         fps: float = 30.0,
         smooth_window: int = 5,
         feature_window: int = 30,
         use_wavelets: bool = True,
+        keypoint_roles: Optional[dict] = None,
+        bodypart_names: Optional[List[str]] = None,
     ):
         """
         Parameters
@@ -46,6 +61,11 @@ class PoseFeatureExtractor:
             Window size for Savitzky-Golay smoothing filter.
         feature_window : int
             Number of frames for temporal aggregation features.
+        keypoint_roles : dict, optional
+            Mapping from keypoint name → semantic role string (from config.json).
+        bodypart_names : list of str, optional
+            Ordered keypoint names from DLC config (defines index → name mapping).
+            When provided, role indices are resolved from this list.
         """
         self.fps = fps
         self.smooth_window = smooth_window
@@ -53,6 +73,77 @@ class PoseFeatureExtractor:
         self.use_wavelets = use_wavelets
         # Morlet wavelet frequencies (Hz)
         self._wavelet_freqs = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+
+        # Start with hardcoded defaults; resolve from config when bodypart_names provided
+        self._role_idx: dict = dict(self._DEFAULT_ROLE_IDX)
+        self._roles_resolved: bool = False
+
+        if bodypart_names is not None:
+            resolved = self._resolve_keypoint_indices(bodypart_names, keypoint_roles or {})
+            if resolved:
+                self._role_idx = resolved
+                self._roles_resolved = True
+
+    @classmethod
+    def _resolve_keypoint_indices(
+        cls,
+        bodypart_names: List[str],
+        keypoint_roles: dict,
+    ) -> dict:
+        """
+        Build a role → index mapping from bodypart_names and keypoint_roles config.
+
+        Parameters
+        ----------
+        bodypart_names : list of str
+            Ordered keypoint names from the DLC config bodyparts list.
+        keypoint_roles : dict
+            Mapping from keypoint name → semantic role string (from config.json).
+
+        Returns
+        -------
+        dict mapping role string → integer index into the pose keypoint axis.
+        Empty dict if bodypart_names is empty.
+        """
+        if not bodypart_names:
+            return {}
+
+        name_exact_to_idx: dict = {name: i for i, name in enumerate(bodypart_names)}
+        name_lower_to_idx: dict = {name.lower(): i for i, name in enumerate(bodypart_names)}
+
+        # Invert keypoint_roles: role → list of keypoint names
+        role_to_names: dict = {}
+        for kp_name, role in (keypoint_roles or {}).items():
+            role_to_names.setdefault(role, []).append(kp_name)
+
+        result: dict = {}
+        for role in cls._KNOWN_ROLES:
+            # 1. Try explicit entry in keypoint_roles
+            if role in role_to_names:
+                for kp_name in role_to_names[role]:
+                    if kp_name in name_exact_to_idx:
+                        result[role] = name_exact_to_idx[kp_name]
+                        break
+                    if kp_name.lower() in name_lower_to_idx:
+                        result[role] = name_lower_to_idx[kp_name.lower()]
+                        break
+                if role in result:
+                    continue
+
+            # 2. Case-insensitive match of role name (or aliases) against bodypart names
+            candidates = [role.lower()]
+            if "/" in role:
+                candidates = [p.lower() for p in role.split("/")]
+            for cand in candidates:
+                if cand in name_lower_to_idx:
+                    result[role] = name_lower_to_idx[cand]
+                    break
+
+        return result
+
+    def _get_role_idx(self, role: str) -> Optional[int]:
+        """Return the keypoint index for a semantic role, or None if unavailable."""
+        return self._role_idx.get(role, None)
 
     def extract_features(self, pose: np.ndarray, confidence: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
@@ -226,43 +317,52 @@ class PoseFeatureExtractor:
 
     def _compute_centroid(self, pose: np.ndarray) -> np.ndarray:
         """
-        Compute body centroid (mean position of all keypoints).
+        Compute body centroid.
+
+        Uses the "center/centroid" keypoint directly when roles were explicitly
+        resolved from a DLC config; otherwise falls back to the mean of all keypoints.
 
         Returns
         -------
-        centroid : np.nd rray
+        centroid : np.ndarray
             Shape (T, D)
         """
+        if self._roles_resolved:
+            center_idx = self._get_role_idx("center/centroid")
+            if center_idx is not None:
+                return pose[:, center_idx, :]
         return np.mean(pose, axis=1)
 
     def _compute_body_orientation(self, pose: np.ndarray) -> np.ndarray:
         """
-        Compute body orientation angle using PCA of keypoint positions.
+        Compute body orientation angle.
+
+        Uses the tail_base → nose axis when roles were explicitly resolved from a
+        DLC config. Falls back to PCA over all keypoints for backward compatibility
+        (or when the required roles are unavailable).
 
         Returns
         -------
         orientation : np.ndarray
             Shape (T,) - angle in radians
         """
+        if self._roles_resolved:
+            nose_idx      = self._get_role_idx("nose")
+            tail_base_idx = self._get_role_idx("tail_base")
+            if nose_idx is not None and tail_base_idx is not None:
+                body_vec = pose[:, nose_idx, :] - pose[:, tail_base_idx, :]
+                return np.arctan2(body_vec[:, 1], body_vec[:, 0])
+
+        # PCA fallback (original algorithm)
         T = pose.shape[0]
         orientation = np.zeros(T)
-
         for t in range(T):
-            points = pose[t]  # (K, 2)
-
-            # Center the points
+            points = pose[t]
             centered = points - points.mean(axis=0)
-
-            # Compute covariance and PCA
             cov = np.cov(centered.T)
             eigenvalues, eigenvectors = np.linalg.eig(cov)
-
-            # Principal axis (largest eigenvalue)
             principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
-
-            # Compute angle
             orientation[t] = np.arctan2(principal_axis[1], principal_axis[0])
-
         return orientation
 
     def _compute_elongation(self, pose: np.ndarray) -> np.ndarray:
@@ -317,22 +417,29 @@ class PoseFeatureExtractor:
         closer to the tail base relative to the inter-ear span.
         High score = more contracted / likely rearing.
 
-        Keypoint indices (8-point DLC model):
-          0=left_ear, 1=right_ear, 2=nose, 3=center,
-          4=left_hip, 5=right_hip, 6=tail_base, 7=tail_tip
+        Returns zeros if any required role (nose, tail_base, left_ear, right_ear)
+        cannot be resolved for the current keypoint configuration.
 
         Returns
         -------
         rearing_score : np.ndarray
             Shape (T,) - ratio of inter-ear span to nose-tail distance.
         """
-        nose      = pose[:, 2, :]   # (T, 2)
-        tail_base = pose[:, 6, :]   # (T, 2)
-        left_ear  = pose[:, 0, :]
-        right_ear = pose[:, 1, :]
+        nose_idx      = self._get_role_idx("nose")
+        tail_base_idx = self._get_role_idx("tail_base")
+        left_ear_idx  = self._get_role_idx("left_ear")
+        right_ear_idx = self._get_role_idx("right_ear")
 
-        nose_tail_dist = np.linalg.norm(nose - tail_base, axis=1)        # (T,)
-        ear_span       = np.linalg.norm(left_ear - right_ear, axis=1)    # (T,)
+        if any(idx is None for idx in [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]):
+            return np.zeros(len(pose))
+
+        nose      = pose[:, nose_idx, :]
+        tail_base = pose[:, tail_base_idx, :]
+        left_ear  = pose[:, left_ear_idx, :]
+        right_ear = pose[:, right_ear_idx, :]
+
+        nose_tail_dist = np.linalg.norm(nose - tail_base, axis=1)
+        ear_span       = np.linalg.norm(left_ear - right_ear, axis=1)
 
         # Avoid division by zero; large ratio means body is contracted
         score = ear_span / np.maximum(nose_tail_dist, 1e-6)
@@ -348,20 +455,31 @@ class PoseFeatureExtractor:
         High absolute value = head turned sideways (exploration/investigation).
         Near zero = head aligned with body (locomotion/freezing).
 
+        Returns zeros if any required role (nose, tail_base, left_ear, right_ear)
+        cannot be resolved for the current keypoint configuration.
+
         Returns
         -------
         head_angle : np.ndarray
             Shape (T,) in radians, range [-pi, pi].
         """
-        nose      = pose[:, 2, :]
-        tail_base = pose[:, 6, :]
-        left_ear  = pose[:, 0, :]
-        right_ear = pose[:, 1, :]
+        nose_idx      = self._get_role_idx("nose")
+        tail_base_idx = self._get_role_idx("tail_base")
+        left_ear_idx  = self._get_role_idx("left_ear")
+        right_ear_idx = self._get_role_idx("right_ear")
 
-        ear_mid = (left_ear + right_ear) / 2.0   # (T, 2)
+        if any(idx is None for idx in [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]):
+            return np.zeros(len(pose))
 
-        body_vec = nose - tail_base               # tail → nose
-        head_vec = nose - ear_mid                 # ear_mid → nose
+        nose      = pose[:, nose_idx, :]
+        tail_base = pose[:, tail_base_idx, :]
+        left_ear  = pose[:, left_ear_idx, :]
+        right_ear = pose[:, right_ear_idx, :]
+
+        ear_mid = (left_ear + right_ear) / 2.0
+
+        body_vec = nose - tail_base
+        head_vec = nose - ear_mid
 
         # Signed angle: arctan2 of 2D cross product / dot product
         cross = body_vec[:, 0] * head_vec[:, 1] - body_vec[:, 1] * head_vec[:, 0]

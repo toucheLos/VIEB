@@ -173,6 +173,8 @@ class RunPipelineView(QWidget):
             self._gpu_badge.setText("⏳ Checking GPU…")
 
     def _open_wsl_setup(self):
+        if sys.platform != "win32":
+            return
         dlg = WslSetupDialog(self)
         dlg.exec_()
         # Re-probe after dialog closes in case user just finished setup

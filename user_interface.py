@@ -42,6 +42,7 @@ try:
         QLabel,
         QLineEdit,
         QMainWindow,
+        QMenu,
         QMessageBox,
         QPushButton,
         QProgressBar,
@@ -64,20 +65,39 @@ except ImportError:
     sys.exit(1)
 
 _MPL = False
-try:
-    import matplotlib
+# All matplotlib globals — populated lazily on first call to _init_mpl()
+mpl_cm = None
+mpimg = None
+plt = None
+PdfPages = None
+FigureCanvas = None
+Figure = None
 
-    matplotlib.use("Qt5Agg")
-    import matplotlib.cm as mpl_cm
-    import matplotlib.image as mpimg
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.figure import Figure
 
-    _MPL = True
-except Exception:
-    pass
+def _init_mpl() -> bool:
+    """Import matplotlib on first call; subsequent calls return the cached result."""
+    global _MPL, mpl_cm, mpimg, plt, PdfPages, FigureCanvas, Figure
+    if _MPL:
+        return True
+    try:
+        import matplotlib as _mpl
+        _mpl.use("Qt5Agg")
+        import matplotlib.cm as _cm
+        import matplotlib.image as _img
+        import matplotlib.pyplot as _plt
+        from matplotlib.backends.backend_pdf import PdfPages as _PdfPages
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as _FC
+        from matplotlib.figure import Figure as _Fig
+        mpl_cm = _cm
+        mpimg = _img
+        plt = _plt
+        PdfPages = _PdfPages
+        FigureCanvas = _FC
+        Figure = _Fig
+        _MPL = True
+    except Exception:
+        pass
+    return _MPL
 
 _CV2 = False
 try:
@@ -88,6 +108,7 @@ except Exception:
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / "config.json"
+APP_CONFIG_PATH = ROOT / "app_config.json"
 
 
 def _results_path() -> Path:
@@ -115,11 +136,44 @@ except Exception:
     _AnalysisView = None
     _HAS_ANALYSIS_VIEW = False
 
+try:
+    from views.cluster_runs import ClusterRunsView as _ClusterRunsView
+    _HAS_CLUSTER_RUNS_VIEW = True
+except Exception:
+    _ClusterRunsView = None
+    _HAS_CLUSTER_RUNS_VIEW = False
+
 # ---------------------------------------------------------------------------
-# WSL2 GPU detection - cached at first use
+# WSL2 / Linux GPU detection - cached at first use
 # ---------------------------------------------------------------------------
 
 _WSL_CUML: bool | None = None
+_linux_gpu_name: str | None = None  # populated by _probe_gpu_async on Linux
+
+
+def _probe_nvidia_smi() -> str | None:
+    """Return the first GPU name from nvidia-smi, or None if unavailable."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = r.stdout.strip().splitlines()[0].strip()
+        return name if name else None
+    except Exception:
+        return None
+
+
+def _probe_linux_cuml() -> bool:
+    """Return True if cuML (RAPIDS) is importable and a GPU op succeeds on Linux."""
+    try:
+        import cuml  # noqa: F401
+        import cupy as cp
+        cp.cuda.runtime.getDeviceCount()
+        cp.array([1.0])
+        return True
+    except Exception:
+        return False
 
 
 def _wsl_path(win_path: str) -> str:
@@ -382,6 +436,7 @@ _DEFAULT_CFG = {
     "stage_status": {},
     "stage_last_run": {},
     "context_groups": "A,B,C",
+    "context_descriptions": {},
     "cohort_csv_path": "",
     "metadata_csv_path": "",
     "hdbscan_min_samples": 0,
@@ -391,12 +446,15 @@ _DEFAULT_CFG = {
     "diagnose_mcs": "",
     "umap_sweep": False,
     "hdbscan_jobs": 1,
+    "current_run_saved": False,
+    "current_run_id": "",
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
 _NAV_VIEWS = [
     "Overview",
     "Pipeline",
+    "Cluster Runs",
     "Browse States",
     "Analysis",
     "Validation",
@@ -406,6 +464,7 @@ _NAV_VIEWS = [
 _NAV_ICONS = {
     "Overview":       "⊞",
     "Pipeline":       "▶",
+    "Cluster Runs":   "⊙",
     "Browse States":  "▣",
     "Analysis":       "◈",
     "Validation":     "✓",
@@ -413,11 +472,40 @@ _NAV_ICONS = {
 }
 
 
+def _load_app_config() -> dict:
+    if APP_CONFIG_PATH.exists():
+        try:
+            return json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"projects": [], "active_project": "", "default_project": ""}
+
+
+def _save_app_config(app_cfg: dict) -> None:
+    APP_CONFIG_PATH.write_text(json.dumps(app_cfg, indent=2), encoding="utf-8")
+
+
+def _get_project_config_path() -> Path:
+    """Return the config.json path for the currently active project."""
+    if APP_CONFIG_PATH.exists():
+        try:
+            app_cfg = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+            active = app_cfg.get("active_project", "")
+            if active:
+                p = Path(active)
+                if p.exists():
+                    return p / "config.json"
+        except Exception:
+            pass
+    return CONFIG_PATH
+
+
 def _load_cfg():
     cfg = json.loads(json.dumps(_DEFAULT_CFG))
-    if CONFIG_PATH.exists():
+    path = _get_project_config_path()
+    if path.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            cfg.update(json.loads(path.read_text(encoding="utf-8")))
         except Exception:
             pass
     if "arena_bounds" not in cfg:
@@ -429,7 +517,49 @@ def _load_cfg():
 
 
 def _save_cfg(cfg):
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _get_project_config_path().write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _migrate_to_project() -> Path:
+    """Create projects/luna_fear_conditioning/ from the existing ROOT/config.json.
+
+    Called silently on first launch when no app_config.json exists.
+    Returns the new project directory path.
+    """
+    projects_dir = ROOT / "projects"
+    projects_dir.mkdir(exist_ok=True)
+
+    # Read existing config (or use defaults)
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = json.loads(json.dumps(_DEFAULT_CFG))
+    else:
+        cfg = json.loads(json.dumps(_DEFAULT_CFG))
+
+    # Ensure paths are absolute
+    for key in ("results_dir", "raw_videos_dir"):
+        val = cfg.get(key, "")
+        if val and not Path(val).is_absolute():
+            cfg[key] = str((ROOT / val).resolve())
+
+    # Derive project folder name from project_name or default
+    project_name = cfg.get("project_name", "VIEB Project")
+    import re as _re
+    slug = project_name.lower().strip()
+    slug = _re.sub(r"[^\w\s-]", "", slug)
+    slug = _re.sub(r"[\s_-]+", "_", slug)
+    slug = slug.strip("_") or "vieb_project"
+
+    project_dir = projects_dir / slug
+    # If directory already exists (e.g. a previous partial migration), use it
+    project_dir.mkdir(exist_ok=True)
+
+    project_cfg_path = project_dir / "config.json"
+    project_cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+    return project_dir
 
 
 def _fmt_ts(ts):
@@ -488,23 +618,34 @@ class _Capture(QObject):
         return False
 
 
-if _MPL:
-    class MplCanvas(FigureCanvas):
-        def __init__(self, parent=None, figsize=(6, 4)):
-            self.fig = Figure(figsize=figsize, tight_layout=True)
-            super().__init__(self.fig)
-            self.setParent(parent)
-            self.ax = self.fig.add_subplot(111)
+class _MplCanvasStub(QWidget):
+    """Fallback canvas used when matplotlib is not available."""
+    def __init__(self, parent=None, figsize=(6, 4)):  # noqa: ARG002
+        super().__init__(parent)
+        self.fig = None
+        self.ax = None
 
-else:
-    class MplCanvas(QWidget):
-        def __init__(self, parent=None, figsize=(6, 4)):
-            super().__init__(parent)
-            self.fig = None
-            self.ax = None
+    def draw(self):
+        pass
 
-        def draw(self):
-            pass
+
+_MplCanvasReal = None  # cached real class, created after first successful _init_mpl()
+
+
+def MplCanvas(parent=None, figsize=(6, 4)):
+    """Factory that returns a real FigureCanvas when matplotlib is available."""
+    global _MplCanvasReal
+    if _init_mpl():
+        if _MplCanvasReal is None:
+            class _Impl(FigureCanvas):
+                def __init__(self, _parent=None, _figsize=(6, 4)):
+                    self.fig = Figure(figsize=_figsize, tight_layout=True)
+                    super().__init__(self.fig)
+                    self.setParent(_parent)
+                    self.ax = self.fig.add_subplot(111)
+            _MplCanvasReal = _Impl
+        return _MplCanvasReal(_parent=parent, _figsize=figsize)
+    return _MplCanvasStub(parent=parent, figsize=figsize)
 
 
 class DataLoader(QThread):
@@ -594,15 +735,33 @@ class PipelineRunner(QThread):
         rc = p.wait()
         return rc == 0
 
+    def _run_cluster_wsl(self, fps: float, mcs: int) -> bool:
+        wsl_py = _wsl_python()
+        wsl_cwd = _wsl_path(str(ROOT))
+        cmd = (
+            f"cd {shlex.quote(wsl_cwd)} && "
+            f"{shlex.quote(wsl_py)} compare.py --cluster "
+            f"--fps {fps} --min-cluster-size {mcs}"
+        )
+        self.log.emit("[GPU] Delegating clustering to WSL2 (cuML UMAP + HDBSCAN)…\n")
+        p = subprocess.Popen(
+            ["wsl", "bash", "-lc", cmd],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert p.stdout is not None
+        for line in p.stdout:
+            self.log.emit(line)
+        return p.wait() == 0
+
     def run(self):
-        cap = _Capture()
-        cap.text.connect(self.log)
-        old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = sys.stderr = cap
         ok_all = True
         cluster_bundle_ran = False
         try:
-            sys.path.insert(0, str(ROOT))
             fps = float(self.cfg.get("fps", 30))
             mcs = int(self.cfg.get("min_cluster_size", 50))
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
@@ -625,20 +784,28 @@ class PipelineRunner(QThread):
                     cluster_bundle_ran = True
                     for b in (3, 4, 5, 6):
                         self.stage_started.emit(b)
-                    from compare import cmd_cluster
-
                     try:
-                        cmd_cluster(
-                        fps=fps,
-                        min_cluster_size=mcs,
-                        min_samples=hdbscan_min_samples,
-                        umap_dims=umap_dims,
-                        validate=validate,
-                    )
-                        for b in (3, 4, 5, 6):
-                            self.stage_done.emit(b, True)
+                        if wsl_cuml_available():
+                            ok = self._run_cluster_wsl(fps, mcs)
+                        else:
+                            cluster_args = [
+                                "compare.py", "--cluster",
+                                "--fps", str(fps),
+                                "--min-cluster-size", str(mcs),
+                                "--umap-dims", str(umap_dims),
+                            ]
+                            if hdbscan_min_samples:
+                                cluster_args += ["--hdbscan-min-samples", str(hdbscan_min_samples)]
+                            if validate:
+                                cluster_args.append("--validate")
+                            ok = self._run_subprocess(cluster_args)
+                        if ok:
+                            for b in (3, 4, 5, 6):
+                                self.stage_done.emit(b, True)
+                        else:
+                            raise RuntimeError("Clustering subprocess returned non-zero exit code.")
                     except Exception:
-                        print(traceback.format_exc())
+                        self.log.emit(traceback.format_exc())
                         for b in (3, 4, 5, 6):
                             self.stage_done.emit(b, False)
                         ok_all = False
@@ -652,39 +819,53 @@ class PipelineRunner(QThread):
                         if not ok:
                             raise RuntimeError("Pose estimation failed.")
                     elif sid == 2:
-                        from compare import cmd_extract
-
-                        cmd_extract(fps=fps, use_wavelets=use_wavelets)
+                        extract_args = ["compare.py", "--extract", "--fps", str(fps)]
+                        if not use_wavelets:
+                            extract_args.append("--no-wavelets")
+                        ok = self._run_subprocess(extract_args)
+                        if not ok:
+                            raise RuntimeError("Feature extraction failed.")
                     elif sid == 7:
-                        from compare import cmd_collapse
-
-                        cmd_collapse(threshold=collapse_threshold)
+                        ok = self._run_subprocess([
+                            "compare.py", "--collapse",
+                            "--collapse-threshold", str(collapse_threshold),
+                        ])
+                        if not ok:
+                            raise RuntimeError("State collapsing failed.")
                     elif sid == 8:
-                        from compare import cmd_report
-
-                        cmd_report(fps=fps, min_confidence=min_confidence)
+                        ok = self._run_subprocess([
+                            "compare.py", "--report", "--fps", str(fps),
+                            "--min-confidence", str(min_confidence),
+                        ])
+                        if not ok:
+                            raise RuntimeError("Report generation failed.")
                     elif sid == 9:
-                        from compare import cmd_summarize
-
-                        cmd_summarize()
+                        ok = self._run_subprocess(["compare.py", "--summarize"])
+                        if not ok:
+                            raise RuntimeError("Per-animal scalar computation failed.")
                     elif sid == 10:
-                        from compare import cmd_motifs
-
-                        cmd_motifs()
+                        self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
                     elif sid == 11:
-                        from characterize import cmd_clips, cmd_summarize as csum
-
-                        csum(fps=fps)
+                        char_args = ["characterize.py", "--fps", str(fps)]
                         if export_clips:
-                            cmd_clips(fps=fps)
+                            char_args.append("--clips")
+                        ok = self._run_subprocess(char_args)
+                        if not ok:
+                            raise RuntimeError("Characterization failed.")
                     self.stage_done.emit(sid, True)
-                except Exception:
-                    print(traceback.format_exc())
+                except (Exception, SystemExit) as _exc:
+                    msg = (
+                        f"Stage {sid} exited: {_exc}\n"
+                        if isinstance(_exc, SystemExit)
+                        else traceback.format_exc()
+                    )
+                    self.log.emit(msg)
                     self.stage_done.emit(sid, False)
                     ok_all = False
                     break
-        finally:
-            sys.stdout, sys.stderr = old_out, old_err
+        except Exception:
+            self.log.emit(traceback.format_exc())
+            ok_all = False
         self.all_done.emit(ok_all)
 
 
@@ -1266,7 +1447,7 @@ class OverviewView(QWidget):
         self._hide_leading.toggled.connect(self._render_state_occupancy)
         chk_row.addWidget(self._hide_leading)
         bl.addLayout(chk_row)
-        if _MPL:
+        if _init_mpl():
             self._canvas = MplCanvas(figsize=(8, 4))
             bl.addWidget(self._canvas)
         else:
@@ -1591,6 +1772,7 @@ class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
     navigate_dlc = pyqtSignal()
+    cluster_finished = pyqtSignal()
 
     def __init__(self, cfg):
         super().__init__()
@@ -1669,11 +1851,12 @@ class RunPipelineView(QWidget):
         class _ProbeThread(QThread):
             result = pyqtSignal(bool)
             def run(self):
+                global _linux_gpu_name
                 if sys.platform == "win32":
                     self.result.emit(_probe_wsl_cuml())
                 else:
-                    # Linux / macOS: probe CUDA directly via torch
-                    self.result.emit(_probe_torch_cuda())
+                    _linux_gpu_name = _probe_nvidia_smi()
+                    self.result.emit(_probe_linux_cuml())
 
         if self._wsl_thread and self._wsl_thread.isRunning():
             return
@@ -1689,30 +1872,41 @@ class RunPipelineView(QWidget):
     def refresh_gpu_badge(self):
         on_windows = sys.platform == "win32"
         if _WSL_CUML is True:
-            badge_text = "GPU ready: WSL2 + cuML" if on_windows else "GPU ready: CUDA (torch)"
+            badge_text = "GPU ready: WSL2 + cuML" if on_windows else f"GPU ready: cuML ({_linux_gpu_name or 'NVIDIA'})"
             self._gpu_badge.setText(badge_text)
             self._gpu_badge.setStyleSheet(
                 "background:#e8f5e9;border:1px solid #a5d6a7;"
                 "border-radius:4px;padding:4px 10px;color:#1b5e20;"
             )
-            # WSL setup button is only relevant on Windows
             self._gpu_setup_btn.setVisible(on_windows)
             if on_windows:
                 self._gpu_setup_btn.setText("GPU Setup")
         elif _WSL_CUML is False:
-            badge_text = (
-                "CPU mode: WSL2 + cuML not found"
-                if on_windows else
-                "CPU mode: no CUDA GPU detected"
-            )
-            self._gpu_badge.setText(badge_text)
-            self._gpu_badge.setStyleSheet(
-                "background:#fff8e1;border:1px solid #ffe082;"
-                "border-radius:4px;padding:4px 10px;color:#795548;"
-            )
-            self._gpu_setup_btn.setVisible(on_windows)
             if on_windows:
+                badge_text = "CPU mode: WSL2 + cuML not found"
+                self._gpu_badge.setText(badge_text)
+                self._gpu_badge.setStyleSheet(
+                    "background:#fff8e1;border:1px solid #ffe082;"
+                    "border-radius:4px;padding:4px 10px;color:#795548;"
+                )
+                self._gpu_setup_btn.setVisible(True)
                 self._gpu_setup_btn.setText("Set up GPU acceleration")
+            elif _linux_gpu_name:
+                # GPU hardware found but cuML not installed
+                self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML not installed")
+                self._gpu_badge.setStyleSheet(
+                    "background:#fff3e0;border:1px solid #ffb74d;"
+                    "border-radius:4px;padding:4px 10px;color:#e65100;"
+                )
+                self._gpu_setup_btn.setVisible(True)
+                self._gpu_setup_btn.setText("Install cuML (GPU acceleration)")
+            else:
+                self._gpu_badge.setText("No NVIDIA GPU detected — running on CPU")
+                self._gpu_badge.setStyleSheet(
+                    "background:#f5f5f5;border:1px solid #ddd;"
+                    "border-radius:4px;padding:4px 10px;color:#888;"
+                )
+                self._gpu_setup_btn.setVisible(False)
         else:
             self._gpu_badge.setText("Checking GPU...")
 
@@ -1721,6 +1915,11 @@ class RunPipelineView(QWidget):
             dlg = WslSetupDialog(self)
             dlg.exec_()
             wsl_cuml_reset_cache()
+            self._probe_gpu_async()
+        else:
+            from _dialogs import LinuxGpuSetupDialog
+            dlg = LinuxGpuSetupDialog(_linux_gpu_name, self)
+            dlg.exec_()
             self._probe_gpu_async()
 
     def _param_changed(self, key, value):
@@ -1807,6 +2006,8 @@ class RunPipelineView(QWidget):
         self._rows[sid].set_status("done" if ok else "error")
         self._rows[sid].set_last_run(self.cfg["stage_last_run"].get(key))
         _save_cfg(self.cfg)
+        if sid == 6 and ok:
+            self.cluster_finished.emit()
 
     def _on_all_done(self, ok):
         self._set_buttons(True)
@@ -2176,7 +2377,7 @@ class StateDetailDialog(QDialog):
     def _build_kinematics(self, tabs):
         w = QWidget()
         lay = QVBoxLayout(w)
-        if _MPL and self.s_row is not None:
+        if _init_mpl() and self.s_row is not None:
             c = MplCanvas(figsize=(6, 3))
             metrics = {
                 "Speed": self.s_row.get("mean_centroid_speed", 0),
@@ -2629,7 +2830,7 @@ class ValidationView(QWidget):
 
         bottom = QGroupBox("Results")
         bl = QVBoxLayout(bottom)
-        if _MPL:
+        if _init_mpl():
             self._cm_canvas = MplCanvas(figsize=(5, 3))
             bl.addWidget(self._cm_canvas)
         else:
@@ -2892,7 +3093,7 @@ class TransitionMatrixView(QWidget):
         ctrl.addWidget(self._v_combo)
         ctrl.addStretch()
         lay.addLayout(ctrl)
-        if _MPL:
+        if _init_mpl():
             self._canvas = MplCanvas(figsize=(12, 5))
             lay.addWidget(self._canvas)
         else:
@@ -2985,7 +3186,7 @@ class MotifsView(QWidget):
         lay.addLayout(top)
         self._summary = QLabel("Motif summary: -")
         lay.addWidget(self._summary)
-        if _MPL:
+        if _init_mpl():
             self._canvas = MplCanvas(figsize=(9, 3))
             lay.addWidget(self._canvas)
         else:
@@ -3108,7 +3309,7 @@ class AnimalExplorerView(QWidget):
         top.addStretch()
         lay.addLayout(top)
 
-        if _MPL:
+        if _init_mpl():
             self._line = MplCanvas(figsize=(10, 3))
             lay.addWidget(self._line)
         else:
@@ -3125,7 +3326,7 @@ class AnimalExplorerView(QWidget):
 
         self._disc_w = QWidget()
         dl = QVBoxLayout(self._disc_w)
-        if _MPL:
+        if _init_mpl():
             self._disc_canvas = MplCanvas(figsize=(10, 3))
             dl.addWidget(self._disc_canvas)
         else:
@@ -3135,7 +3336,7 @@ class AnimalExplorerView(QWidget):
 
         self._heat_w = QWidget()
         hl = QVBoxLayout(self._heat_w)
-        if _MPL:
+        if _init_mpl():
             self._heat_canvas = MplCanvas(figsize=(5, 4))
             hl.addWidget(self._heat_canvas)
         else:
@@ -3350,7 +3551,7 @@ class QuantificationView(QWidget):
         ctrl.addWidget(self._lc_indiv_chk)
         ctrl.addStretch()
         lay.addLayout(ctrl)
-        if _MPL:
+        if _init_mpl():
             self._lc_canvas = MplCanvas(figsize=(10, 4))
             lay.addWidget(self._lc_canvas, stretch=1)
         else:
@@ -3420,7 +3621,7 @@ class QuantificationView(QWidget):
             QMessageBox.information(self, "Export", f"Saved to {path}")
 
     def _render_learning_curves(self):
-        if not self._lc_canvas or not _MPL:
+        if not self._lc_canvas or not _init_mpl():
             return
         self._lc_canvas.ax.clear()
         summary = self._data.get("summary")
@@ -3677,7 +3878,7 @@ class ExportResultsDialog(QDialog):
 
 
 def export_pdf_report():
-    if not _MPL:
+    if not _init_mpl():
         raise RuntimeError("matplotlib is required for PDF export.")
 
     summary = RESULTS / "comparison" / "summary_table.csv"
@@ -3778,6 +3979,7 @@ def export_pdf_report():
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._init_project()
         self.cfg = _load_cfg()
         self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
         self.setMinimumSize(1024, 768)
@@ -3788,8 +3990,10 @@ class MainWindow(QMainWindow):
         self._pipeline_running = False
         self._clip_running = False
         self._clip_worker = None
+        self._clip_log_buf: list[str] = []
         self._initial_load_done = False
         self._cached_data = None
+        self._crv = None
         self._pulse_timer = QTimer(self)
         self._pulse_timer.timeout.connect(self._pulse)
         self._reload_timer = QTimer(self)
@@ -3839,6 +4043,30 @@ class MainWindow(QMainWindow):
         brand_row.addWidget(ver)
         brand_row.addStretch()
         sl.addLayout(brand_row)
+
+        # Project name row
+        proj_row = QHBoxLayout()
+        proj_row.setContentsMargins(18, 0, 14, 12)
+        proj_row.setSpacing(4)
+        self._proj_name_lbl = QLabel("—")
+        self._proj_name_lbl.setStyleSheet(
+            "font-size:11px;font-weight:600;color:#3A3A3A;"
+            "background:transparent;border:none;"
+        )
+        proj_row.addWidget(self._proj_name_lbl, stretch=1)
+        self._proj_btn = QToolButton()
+        self._proj_btn.setText("⊿")
+        self._proj_btn.setFixedSize(22, 22)
+        self._proj_btn.setCursor(Qt.PointingHandCursor)
+        self._proj_btn.setStyleSheet(
+            "QToolButton{border:none;background:transparent;"
+            "color:#9B9B9B;font-size:12px;border-radius:3px;}"
+            "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
+        )
+        self._proj_btn.clicked.connect(self._open_project_menu)
+        proj_row.addWidget(self._proj_btn)
+        sl.addLayout(proj_row)
+        self._refresh_project_label()
 
         # Section label
         ws_lbl = QLabel("WORKSPACE")
@@ -3912,7 +4140,14 @@ class MainWindow(QMainWindow):
         self._pv.pipeline_done.connect(self._load_data)
         self._pv.worker_running.connect(self._set_running)
         self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
+        self._pv.cluster_finished.connect(self._show_cluster_runs)
         add("Pipeline", self._pv)
+
+        if _HAS_CLUSTER_RUNS_VIEW:
+            self._crv = _ClusterRunsView(self.cfg)
+            add("Cluster Runs", self._crv)
+        else:
+            self._crv = None
 
         self._sv = BrowseStatesView(self.cfg)
         self._sv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
@@ -4010,6 +4245,7 @@ class MainWindow(QMainWindow):
         if self._clip_worker and self._clip_worker.isRunning():
             self.statusBar().showMessage("Clip generation already running in background.", 5000)
             return
+        self._clip_log_buf.clear()
         self._clip_worker = ClipGenerationWorker(self.cfg)
         self._clip_worker.log.connect(self._on_clip_log)
         self._clip_worker.done.connect(self._on_clip_done)
@@ -4019,15 +4255,30 @@ class MainWindow(QMainWindow):
         self._clip_worker.start()
 
     def _on_clip_log(self, text):
+        self._clip_log_buf.append(text)
         if text.strip():
             self.statusBar().showMessage("Generating clips in background...", 2000)
 
     def _on_clip_done(self, ok):
         self._clip_running = False
         self._sync_running()
-        self.statusBar().showMessage("Clip generation complete." if ok else "Clip generation failed.", 7000)
         if ok:
+            self.statusBar().showMessage("Clip generation complete.", 7000)
             self._load_data()
+        else:
+            self.statusBar().showMessage("Clip generation failed — see error details.", 10000)
+            self._show_clip_error_dialog()
+
+    def _show_clip_error_dialog(self):
+        from PyQt5.QtWidgets import QMessageBox
+        log_text = "".join(self._clip_log_buf).strip() or "(no output captured)"
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Clip Generation Failed")
+        msg.setIcon(QMessageBox.Critical)
+        msg.setText("Clip generation failed.")
+        msg.setDetailedText(log_text)
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec_()
 
     def _pulse(self):
         mono = "font-family:'Consolas','Courier New',monospace;font-size:11px;background:transparent;border:none;"
@@ -4039,6 +4290,11 @@ class MainWindow(QMainWindow):
         color = "#27AE60" if self._pulse_idx else "#6FCF97"
         self._sb_dot.setStyleSheet(mono + f"color:{color};")
         self._sb_stage.setText("running")
+
+    def _show_cluster_runs(self):
+        if self._crv is not None:
+            self._crv.refresh()
+        self._switch("Cluster Runs")
 
     def _switch(self, name):
         if name not in self._views:
@@ -4151,6 +4407,195 @@ class MainWindow(QMainWindow):
             "Welcome to VIEB",
             "Welcome to VIEB. To get started, go to Pipeline and press Run.",
         )
+
+    # ── Project management ────────────────────────────────────────────────────
+
+    def _init_project(self):
+        """Ensure an active project is selected before the window is built.
+
+        On first launch (no app_config.json), silently migrates the existing
+        ROOT/config.json to projects/<slug>/config.json and writes app_config.json.
+        On subsequent launches with multiple projects and no default, shows
+        ProjectSelectorDialog.
+        """
+        app_cfg = _load_app_config()
+
+        # ── First launch: migrate existing config ──────────────────────────
+        if not app_cfg.get("projects"):
+            project_dir = _migrate_to_project()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            # Derive a human-friendly name from what was in the config
+            try:
+                cfg_text = (project_dir / "config.json").read_text(encoding="utf-8")
+                name = json.loads(cfg_text).get("project_name", "Luna Fear Conditioning")
+            except Exception:
+                name = "Luna Fear Conditioning"
+            app_cfg = {
+                "projects": [
+                    {"name": name, "path": str(project_dir), "last_opened": now}
+                ],
+                "active_project": str(project_dir),
+                "default_project": "",
+            }
+            _save_app_config(app_cfg)
+            return
+
+        projects = app_cfg.get("projects", [])
+        default = app_cfg.get("default_project", "")
+        active = app_cfg.get("active_project", "")
+
+        # ── Default project set: load silently ────────────────────────────
+        if default and Path(default).exists():
+            if default != active:
+                app_cfg["active_project"] = default
+                _save_app_config(app_cfg)
+            return
+
+        # ── Single project: load silently ─────────────────────────────────
+        if len(projects) == 1:
+            p = projects[0]["path"]
+            if p != active:
+                app_cfg["active_project"] = p
+                _save_app_config(app_cfg)
+            return
+
+        # ── Active project already set and valid ──────────────────────────
+        if active and Path(active).exists():
+            return
+
+        # ── Multiple projects, none active: show selector ─────────────────
+        try:
+            from views.project_selector import ProjectSelectorDialog
+            dlg = ProjectSelectorDialog(app_cfg, None)
+            dlg.exec_()
+            # selected_path was written to app_config.json inside _select()
+        except Exception:
+            pass
+
+    def _refresh_project_label(self):
+        """Update the sidebar project name label from the active project's config."""
+        app_cfg = _load_app_config()
+        active = app_cfg.get("active_project", "")
+        name = "—"
+        if active:
+            cfg_path = Path(active) / "config.json"
+            if cfg_path.exists():
+                try:
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    name = cfg.get("project_name", Path(active).name)
+                except Exception:
+                    name = Path(active).name
+            else:
+                # Find the name from the projects list
+                for p in app_cfg.get("projects", []):
+                    if p.get("path") == active:
+                        name = p.get("name", name)
+                        break
+        # Truncate with ellipsis
+        if len(name) > 22:
+            name = name[:19] + "..."
+        self._proj_name_lbl.setText(name)
+
+        # Style the button based on project count
+        n = len(app_cfg.get("projects", []))
+        if n <= 1:
+            self._proj_btn.setToolTip("Add a new project")
+            self._proj_btn.setStyleSheet(
+                "QToolButton{border:none;background:transparent;"
+                "color:#C8C8C8;font-size:12px;border-radius:3px;}"
+                "QToolButton:hover{color:#9B9B9B;background:rgba(0,0,0,0.04);}"
+            )
+        else:
+            self._proj_btn.setToolTip("Switch project")
+            self._proj_btn.setStyleSheet(
+                "QToolButton{border:none;background:transparent;"
+                "color:#9B9B9B;font-size:12px;border-radius:3px;}"
+                "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
+            )
+
+    def _open_project_menu(self):
+        app_cfg = _load_app_config()
+        projects = app_cfg.get("projects", [])
+        active = app_cfg.get("active_project", "")
+
+        if len(projects) <= 1:
+            # Single project: open NewProjectDialog directly
+            try:
+                from views.project_selector import NewProjectDialog
+                dlg = NewProjectDialog(app_cfg, self)
+                if dlg.exec_() == QDialog.Accepted and dlg.created_path:
+                    self._do_switch(dlg.created_path)
+            except Exception:
+                pass
+            return
+
+        # Multiple projects: show dropdown menu
+        menu = QMenu(self)
+        for proj in projects:
+            path = proj.get("path", "")
+            pname = proj.get("name", "Unnamed")
+            action = menu.addAction(pname)
+            action.setCheckable(True)
+            action.setChecked(path == active)
+            action.triggered.connect(
+                lambda checked=False, p=path: self._switch_project(p)
+            )
+        menu.addSeparator()
+        menu.addAction("New Project...").triggered.connect(self._new_project_from_menu)
+        menu.addAction("Manage Projects...").triggered.connect(self._manage_projects)
+
+        btn_pos = self._proj_btn.mapToGlobal(self._proj_btn.rect().bottomLeft())
+        menu.exec_(btn_pos)
+
+    def _switch_project(self, path: str):
+        active = _load_app_config().get("active_project", "")
+        if path == active:
+            return
+        if self._pipeline_running or self._clip_running:
+            result = QMessageBox.question(
+                self, "Switch Project",
+                "A pipeline is currently running. Switch project anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if result != QMessageBox.Yes:
+                return
+        self._do_switch(path)
+
+    def _do_switch(self, path: str):
+        """Write the new active_project to app_config.json and restart."""
+        app_cfg = _load_app_config()
+        app_cfg["active_project"] = path
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for p in app_cfg.get("projects", []):
+            if p.get("path") == path:
+                p["last_opened"] = now
+        _save_app_config(app_cfg)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def _new_project_from_menu(self):
+        try:
+            from views.project_selector import NewProjectDialog
+            app_cfg = _load_app_config()
+            dlg = NewProjectDialog(app_cfg, self)
+            if dlg.exec_() == QDialog.Accepted and dlg.created_path:
+                self._do_switch(dlg.created_path)
+        except Exception:
+            pass
+
+    def _manage_projects(self):
+        try:
+            from views.project_selector import ProjectSelectorDialog
+            app_cfg = _load_app_config()
+            dlg = ProjectSelectorDialog(app_cfg, self)
+            if dlg.exec_() == QDialog.Accepted and dlg.selected_path:
+                current = _load_app_config().get("active_project", "")
+                if dlg.selected_path != current:
+                    self._do_switch(dlg.selected_path)
+                else:
+                    self._refresh_project_label()
+        except Exception:
+            pass
 
     def closeEvent(self, e):
         self.cfg["window_size"] = [self.width(), self.height()]

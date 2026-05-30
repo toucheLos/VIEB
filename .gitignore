@@ -1,12 +1,13 @@
-# macOS
+# OS
 .DS_Store
+Thumbs.db
 
 # Virtual environment
 .venv/
 venv/
 venv_wsl/
 
-# Python cache
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -26,16 +27,26 @@ raw_videos/
 # DLC model weights
 **/VIEB-*
 
-# PyTorch models
+# Models and large files
+*.pkl
 *.pt
+*.npy
+*.npy.gz
 
-# Generated results (rerun compare.py to regenerate)
-results/2*
-results/features
-results/shared
+# Results (generated data — not source code)
+results/
+clips/
+videos/
+
+# Project data
+projects/
+
+# App state
+app_config.json
+
+# Windows path artifact
+C:\Users\
 
 # Misc
 push_log.txt
 outputs.txt
-clips/
-videos/

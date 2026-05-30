@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=7.0"
+]
 tracking = [
     "deeplabcut[gui]==3.0.0rc13",
     "tables==3.10.1",
