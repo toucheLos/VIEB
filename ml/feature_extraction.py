@@ -51,6 +51,8 @@ class PoseFeatureExtractor:
         use_wavelets: bool = True,
         keypoint_roles: Optional[dict] = None,
         bodypart_names: Optional[List[str]] = None,
+        object_keypoint_indices: Optional[List[int]] = None,
+        object_keypoints: Optional[List[str]] = None,
     ):
         """
         Parameters
@@ -66,6 +68,10 @@ class PoseFeatureExtractor:
         bodypart_names : list of str, optional
             Ordered keypoint names from DLC config (defines index → name mapping).
             When provided, role indices are resolved from this list.
+        object_keypoint_indices : list of int, optional
+            Integer indices of keypoints that are object trackers, not body parts.
+        object_keypoints : list of str, optional
+            Names of keypoints that are object trackers (resolved via bodypart_names).
         """
         self.fps = fps
         self.smooth_window = smooth_window
@@ -77,12 +83,18 @@ class PoseFeatureExtractor:
         # Start with hardcoded defaults; resolve from config when bodypart_names provided
         self._role_idx: dict = dict(self._DEFAULT_ROLE_IDX)
         self._roles_resolved: bool = False
+        self._object_kp_indices: set = set(object_keypoint_indices or [])
+        self._n_bodyparts: Optional[int] = None
 
         if bodypart_names is not None:
             resolved = self._resolve_keypoint_indices(bodypart_names, keypoint_roles or {})
             if resolved:
                 self._role_idx = resolved
                 self._roles_resolved = True
+            self._object_kp_indices = self._resolve_object_indices(
+                bodypart_names, object_keypoints or []
+            )
+            self._n_bodyparts = len(bodypart_names)
 
     @classmethod
     def _resolve_keypoint_indices(
@@ -141,6 +153,50 @@ class PoseFeatureExtractor:
 
         return result
 
+    @classmethod
+    def _resolve_object_indices(
+        cls,
+        bodypart_names: List[str],
+        object_keypoints: List[str],
+    ) -> set:
+        """
+        Return the set of integer indices for object keypoints.
+
+        Parameters
+        ----------
+        bodypart_names : list of str
+            Ordered keypoint names from the DLC config.
+        object_keypoints : list of str
+            Names of keypoints that track objects (from config.json "object_keypoints").
+        """
+        if not bodypart_names or not object_keypoints:
+            return set()
+        name_to_idx = {name: i for i, name in enumerate(bodypart_names)}
+        name_lower_to_idx = {name.lower(): i for i, name in enumerate(bodypart_names)}
+        indices: set = set()
+        for kp in object_keypoints:
+            if kp in name_to_idx:
+                indices.add(name_to_idx[kp])
+            elif kp.lower() in name_lower_to_idx:
+                indices.add(name_lower_to_idx[kp.lower()])
+        return indices
+
+    @property
+    def _body_kp_mask(self) -> Optional[np.ndarray]:
+        """Boolean mask of shape (K,) where True = body keypoint (not an object).
+
+        Returns None when no object keypoints are defined (backward-compatible path).
+        """
+        if not self._object_kp_indices:
+            return None
+        if self._n_bodyparts is None:
+            return None
+        mask = np.ones(self._n_bodyparts, dtype=bool)
+        for idx in self._object_kp_indices:
+            if 0 <= idx < self._n_bodyparts:
+                mask[idx] = False
+        return mask
+
     def _get_role_idx(self, role: str) -> Optional[int]:
         """Return the keypoint index for a semantic role, or None if unavailable."""
         return self._role_idx.get(role, None)
@@ -176,6 +232,7 @@ class PoseFeatureExtractor:
             - "temporal_features": (T, M) - aggregated temporal statistics
         """
         T, K, D = pose.shape
+        self._last_n_keypoints = K
 
         # Handle NaN values (low confidence predictions)
         pose_clean = self._interpolate_nans(pose)
@@ -320,7 +377,8 @@ class PoseFeatureExtractor:
         Compute body centroid.
 
         Uses the "center/centroid" keypoint directly when roles were explicitly
-        resolved from a DLC config; otherwise falls back to the mean of all keypoints.
+        resolved from a DLC config; otherwise falls back to the mean of body
+        keypoints only (object keypoints excluded when mask is defined).
 
         Returns
         -------
@@ -331,6 +389,9 @@ class PoseFeatureExtractor:
             center_idx = self._get_role_idx("center/centroid")
             if center_idx is not None:
                 return pose[:, center_idx, :]
+        mask = self._body_kp_mask
+        if mask is not None and mask.shape[0] == pose.shape[1]:
+            return np.mean(pose[:, mask, :], axis=1)
         return np.mean(pose, axis=1)
 
     def _compute_body_orientation(self, pose: np.ndarray) -> np.ndarray:
@@ -353,11 +414,13 @@ class PoseFeatureExtractor:
                 body_vec = pose[:, nose_idx, :] - pose[:, tail_base_idx, :]
                 return np.arctan2(body_vec[:, 1], body_vec[:, 0])
 
-        # PCA fallback (original algorithm)
+        # PCA fallback — filter to body keypoints when object mask is available
+        mask = self._body_kp_mask
+        use_mask = mask is not None and mask.shape[0] == pose.shape[1]
         T = pose.shape[0]
         orientation = np.zeros(T)
         for t in range(T):
-            points = pose[t]
+            points = pose[t][mask] if use_mask else pose[t]
             centered = points - points.mean(axis=0)
             cov = np.cov(centered.T)
             eigenvalues, eigenvectors = np.linalg.eig(cov)
@@ -670,7 +733,7 @@ class PoseFeatureExtractor:
 
         return flattened
 
-    def get_feature_names(self, n_keypoints: int = 8) -> List[str]:
+    def get_feature_names(self, n_keypoints: int = None) -> List[str]:
         """
         Get human-readable names for all features in flattened array.
 
@@ -678,6 +741,8 @@ class PoseFeatureExtractor:
         -------
         names : list of str
         """
+        if n_keypoints is None:
+            n_keypoints = getattr(self, '_last_n_keypoints', 8)
         names = []
 
         # Speed per keypoint

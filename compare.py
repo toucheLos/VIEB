@@ -123,12 +123,15 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         with open(index_path) as f:
             index = json.load(f)
 
-    # Load keypoint role mapping from config.json
+    # Load keypoint role mapping and object keypoints from config.json
     keypoint_roles = {}
+    object_keypoints = []
     try:
         cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         with open(cfg_path, encoding="utf-8") as _f:
-            keypoint_roles = json.load(_f).get("keypoint_roles", {})
+            _cfg_data = json.load(_f)
+            keypoint_roles = _cfg_data.get("keypoint_roles", {})
+            object_keypoints = _cfg_data.get("object_keypoints", [])
     except Exception:
         pass
 
@@ -149,6 +152,7 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         use_wavelets=use_wavelets,
         keypoint_roles=keypoint_roles,
         bodypart_names=bodypart_names,
+        object_keypoints=object_keypoints,
     )
     new_count = 0
     skip_count = 0
@@ -179,10 +183,19 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
             "video_path": video_path,
             "csv_path": csv_path,
             "n_frames": int(pose.shape[0]),
+            "n_keypoints": int(pose.shape[1]),
             "n_features": int(features_flat.shape[1]),
             "features_path": out_path,
         }
         new_count += 1
+
+    first_entry = next((v for k, v in index.items() if k != '_meta'), {})
+    index["_meta"] = {
+        "n_keypoints": int(first_entry.get("n_keypoints", 8)),
+        "n_features": int(first_entry.get("n_features", 91)),
+        "use_wavelets": use_wavelets,
+        "vieb_version": "1.0",
+    }
 
     with open(index_path, "w") as f:
         json.dump(index, f, indent=2)
@@ -556,6 +569,36 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     if not index:
         sys.exit("Index is empty. Run --extract first.")
 
+    # ---- Validate feature dimension consistency ----
+    meta_info = index.get("_meta")
+    if meta_info:
+        expected_n_features = meta_info.get("n_features")
+        expected_n_keypoints = meta_info.get("n_keypoints")
+    else:
+        first_entry = next((v for k, v in index.items() if k != '_meta'), {})
+        expected_n_features = first_entry.get("n_features")
+        expected_n_keypoints = first_entry.get("n_keypoints")
+
+    mismatches = []
+    for stem, entry in index.items():
+        if stem == '_meta':
+            continue
+        nf = entry.get("n_features")
+        if nf is not None and expected_n_features is not None and nf != expected_n_features:
+            mismatches.append((stem, nf, entry.get("n_keypoints", "?")))
+
+    if mismatches:
+        exp_nk = expected_n_keypoints if expected_n_keypoints is not None else "?"
+        print(f"[ERROR] Feature dimension mismatch across videos:")
+        print(f"  Expected: {expected_n_features} features ({exp_nk} keypoints)")
+        for stem, nf, nk in mismatches:
+            print(f"  Mismatch: {stem} → {nf} features ({nk} keypoints)")
+        print("Re-run compare.py --extract to regenerate features with consistent settings.")
+        sys.exit(1)
+    else:
+        nk_str = f"{expected_n_keypoints} keypoints" if expected_n_keypoints is not None else "unknown keypoints"
+        print(f"[OK] Feature dimensions consistent: {expected_n_features} features, {nk_str}")
+
     os.makedirs(os.path.join(_res(), "shared"), exist_ok=True)
 
     # ---- Run versioning: auto-save previous run if it exists and wasn't saved ----
@@ -573,7 +616,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
             _auto_save_previous_run()
 
     # ---- Load all feature matrices ----
-    stems = sorted(index.keys())
+    stems = sorted(k for k in index.keys() if k != '_meta')
 
     # ---- Train/test split (video-level, not frame-level) ----
     if validate:
@@ -995,6 +1038,16 @@ def cmd_collapse(threshold: float = 0.5):
     with open(cluster_info_path, "w") as f:
         json.dump(cluster_info, f, indent=2)
 
+    # Update run_manifest.json so the Cluster Runs view reflects the post-collapse count
+    manifest_path = os.path.join(_res(), "shared", "run_manifest.json")
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        manifest["n_clusters"] = n_new
+        manifest["collapse_threshold"] = threshold
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+
     print(f"\nUpdated results/shared/cluster_info.json  ({n_clusters} → {n_new} states)")
     print("All _labels.npy files remapped in-place.")
     print("Run --report (and --summarize / characterize.py) to rebuild downstream outputs.")
@@ -1175,6 +1228,7 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     if not os.path.exists(_meta()):
         sys.exit("metadata.csv not found.")
     meta = pd.read_csv(_meta())
+    meta = _vc.normalize_metadata_columns(meta)
     meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
 
     df = df_states.merge(meta, on="stem", how="left")
@@ -1184,8 +1238,11 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
 
     # ---- Transition matrix outputs ----
+    _trans_meta_cols = ["stem"] + [
+        c for c in ["context", "day", "animal_id", "experiment"] if c in meta.columns
+    ]
     df_trans = pd.DataFrame(trans_rows).merge(
-        meta[["stem", "context", "day", "animal_id", "experiment"]].drop_duplicates("stem"),
+        meta[_trans_meta_cols].drop_duplicates("stem"),
         on="stem", how="left"
     )
     trans_cols = [c for c in df_trans.columns if c.startswith("trans_")]
@@ -1309,6 +1366,58 @@ def cmd_summarize():
         build_master_table()
     except ImportError:
         sys.exit("[ERROR] quantify.py not found in project directory.")
+
+
+def cmd_event_align(min_confidence: float = 0.0):
+    """Peri-event behavioral state alignment for discrete experiments."""
+    column_map = _vc.get_column_map()
+
+    from event_alignment import load_events, compute_peri_event_profiles, compute_event_contrast
+
+    events_df = load_events(_meta(), column_map)
+    if events_df is None:
+        print("No event column configured. "
+              "Set 'event' in column mapping to use event alignment.")
+        return
+
+    print(f"Event column: '{column_map.get('event', '')}'")
+    print(f"Event labels: {sorted(events_df['event_label'].unique())}")
+    label_counts = events_df.groupby("event_label").size()
+    for lbl, n in label_counts.items():
+        print(f"  {lbl}: {n} session(s)")
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    if not os.path.exists(index_path):
+        sys.exit("No feature index found. Run --extract first.")
+    with open(index_path) as f:
+        index = json.load(f)
+
+    print("\nComputing peri-event state profiles...")
+    profiles = compute_peri_event_profiles(
+        index, events_df, min_confidence=min_confidence
+    )
+
+    if not profiles:
+        print("No profiles computed. Check that _labels.npy files exist for event sessions.")
+        return
+
+    print("\nComputing event contrast vectors...")
+    contrast = compute_event_contrast(profiles)
+
+    print("\n=== Peri-Event Summary ===")
+    print(f"{'Event Label':20}  {'Dominant State':14}")
+    print("-" * 38)
+    for label, fracs in profiles.items():
+        dom = int(np.argmax(fracs))
+        print(f"  {label:18}  State {dom}")
+
+    if contrast:
+        print("\n=== Event Contrast ===")
+        print(f"{'Pair':32}  {'Magnitude':10}  {'Dom A':6}  {'Dom B':6}")
+        print("-" * 62)
+        for key, info in contrast.items():
+            print(f"  {key:30}  {info['contrast_magnitude']:.4f}    "
+                  f"  {info['dominant_state_A']}       {info['dominant_state_B']}")
 
 
 def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
@@ -1448,10 +1557,13 @@ def main():
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     parser.add_argument("--save-run", action="store_true",
                         help="Mark the cluster run as saved after --cluster completes")
+    parser.add_argument("--event-align", action="store_true",
+                        help="Peri-event behavioral state analysis (discrete experiments only)")
     args = parser.parse_args()
 
     if not any([args.extract, args.cluster, args.collapse, args.diagnose,
-                args.report, args.summarize, args.quantify, args.save_run]):
+                args.report, args.summarize, args.quantify, args.save_run,
+                args.event_align]):
         parser.print_help()
         sys.exit(1)
 
@@ -1489,6 +1601,8 @@ def main():
         cmd_summarize()
     if args.quantify:
         cmd_quantify(cohort=args.cohort, min_confidence=args.min_confidence)
+    if args.event_align:
+        cmd_event_align(min_confidence=args.min_confidence)
 
 
 if __name__ == "__main__":

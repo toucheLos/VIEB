@@ -120,6 +120,92 @@ def set_dlc_project_path(path: str) -> None:
     _save_config(cfg)
 
 
+def get_column_map() -> dict:
+    """Return column_map from active project config.json.
+
+    Falls back to identity mapping if column_map is absent or empty.
+    Values of '' or '— not mapped —' are treated as unmapped (no rename).
+    """
+    cfg = _load_config()
+    defaults = {
+        "animal_id":  "animal_id",
+        "day":        "day",
+        "context":    "context",
+        "experiment": "experiment",
+        "cohort":     "",
+        "event":      "",
+    }
+    stored = cfg.get("column_map", {})
+    result = dict(defaults)
+    for k, v in stored.items():
+        if v and v != "— not mapped —":
+            result[k] = v
+    return result
+
+
+def get_condition_labels() -> tuple[str, str]:
+    """Return (condition_A_label, condition_B_label) from config.
+
+    If condition_a_label / condition_b_label are empty, auto-detects from the
+    first two sorted unique context values in results/comparison/summary_table.csv.
+    Falls back to ("Condition A", "Condition B") when no data is available.
+    """
+    cfg = _load_config()
+    label_a = cfg.get("condition_a_label", "").strip()
+    label_b = cfg.get("condition_b_label", "").strip()
+    if label_a and label_b:
+        return label_a, label_b
+
+    # Auto-detect from summary_table.csv
+    results_dir = cfg.get("results_dir", "").strip()
+    if not results_dir:
+        results_dir = os.path.join(PROJECT_ROOT, "results")
+    summary_path = os.path.join(results_dir, "comparison", "summary_table.csv")
+    if os.path.exists(summary_path):
+        try:
+            import pandas as _pd
+            df = _pd.read_csv(summary_path, usecols=["context"], nrows=5000)
+            unique_vals = sorted(df["context"].dropna().astype(str).unique().tolist())
+            if len(unique_vals) >= 2:
+                return label_a or unique_vals[0], label_b or unique_vals[1]
+        except Exception:
+            pass
+
+    return label_a or "Condition A", label_b or "Condition B"
+
+
+def get_condition_a_label() -> str:
+    return get_condition_labels()[0]
+
+
+def get_condition_b_label() -> str:
+    return get_condition_labels()[1]
+
+
+def get_primary_metric_label() -> str:
+    """Return the primary scalar metric label.
+    Reads cfg["primary_metric_label"].
+    Falls back to "Fear Index" if not set."""
+    cfg = _load_config()
+    val = cfg.get("primary_metric_label", "").strip()
+    return val or "Fear Index"
+
+
+def normalize_metadata_columns(df) -> "pd.DataFrame":
+    """Rename user CSV columns to VIEB standard names using the project column_map.
+
+    Only renames columns where the mapped name differs from the concept name
+    and the mapped column exists in the DataFrame.  Leaves unmapped columns
+    (empty string or '— not mapped —') untouched.
+    """
+    import pandas as _pd
+    cm = get_column_map()
+    rename = {v: k for k, v in cm.items() if v and v != k and v in df.columns}
+    if rename:
+        return df.rename(columns=rename)
+    return df
+
+
 def get_raw_videos_dir() -> str:
     """Return the raw-videos directory, reading 'raw_videos_dir' from config.json.
     Falls back to PROJECT_ROOT/raw_videos when the key is absent or empty."""

@@ -33,12 +33,14 @@ if _MPL:
 COHORT_COLORS = ["#4E79A7", "#E07B39", "#59A14F", "#B07AA1"]
 
 _TAB_LABELS = [
+    "Column Mapping",
     "Comparison Report",
     "State Characterization",
     "Cohort Analysis",
     "Quantification",
     "Fear Index",
     "Jess Correlation",
+    "Event Alignment",
 ]
 
 
@@ -145,10 +147,26 @@ class AnalysisView(QWidget):
         self._t2_state_ids: list[int] = []
         # Each entry is True when that tab needs a redraw.
         # Starts True so the first visit always renders.
-        self._tab_dirty = [True] * 6
+        self._tab_dirty = [True] * 8
+        import vieb_config as _vc
+        self._cond_a = _vc.get_condition_a_label()
+        self._cond_b = _vc.get_condition_b_label()
+        self._metric_label = _vc.get_primary_metric_label()
         self._build()
 
     # ─────────────────────────────────────────────────────────── build ──
+
+    def _build_tab_names(self) -> list[str]:
+        return [
+            "Column Mapping",
+            "Comparison Report",
+            "State Characterization",
+            "Cohort Analysis",
+            "Quantification",
+            self._metric_label,
+            "Jess Correlation",
+            "Event Alignment",
+        ]
 
     def _build(self) -> None:
         root_lay = QHBoxLayout(self)
@@ -180,7 +198,7 @@ class AnalysisView(QWidget):
                 background: #E8E8E8;
             }
         """)
-        for label in _TAB_LABELS:
+        for label in self._build_tab_names():
             self._tab_list.addItem(label)
         self._tab_list.setCurrentRow(0)
         self._tab_list.currentRowChanged.connect(self._switch_tab)
@@ -189,12 +207,14 @@ class AnalysisView(QWidget):
         # ── Content stack ────────────────────────────────────────────────
         self._stack = QStackedWidget()
         builders = [
+            self._build_tab0,
             self._build_tab1,
             self._build_tab2,
             self._build_tab3,
             self._build_tab4,
             self._build_tab5,
             self._build_tab6,
+            self._build_tab7,
         ]
         for build in builders:
             page = build()
@@ -232,6 +252,26 @@ class AnalysisView(QWidget):
         lay.addWidget(terminal)
         return outer
 
+    # ─────────────────────────────────────────── Tab 0: Column Mapping ──
+
+    def _build_tab0(self) -> QWidget:
+        from views.metadata_mapper import MetadataMapperWidget
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(0)
+        self._mapper_widget = MetadataMapperWidget(self.cfg, parent=page)
+
+        def _on_saved(col_map):
+            self.cfg["column_map"] = col_map
+
+        self._mapper_widget.mapping_saved.connect(_on_saved)
+        lay.addWidget(self._mapper_widget)
+        return page
+
+    def _load_tab0(self) -> None:
+        pass  # widget is self-contained; nothing to reload from data
+
     # ──────────────────────────────────────── Tab 1: Comparison Report ──
 
     def _build_tab1(self) -> QWidget:
@@ -264,7 +304,7 @@ class AnalysisView(QWidget):
 
         if _MPL:
             cl.addWidget(_section_title(
-                "State Occupancy: Fear Context (A) vs Safe Context (B)"
+                f"State Occupancy: {self._cond_a} vs {self._cond_b}"
             ))
             self._t1_ctx_canvas = MplCanvas(figsize=(9, 3))
             self._t1_ctx_canvas.setMinimumHeight(260)
@@ -277,7 +317,7 @@ class AnalysisView(QWidget):
             self._t1_day_canvas.setMinimumHeight(260)
             cl.addWidget(self._t1_day_canvas)
 
-            cl.addWidget(_section_title("Context Discrimination per State"))
+            cl.addWidget(_section_title("Condition Discrimination per State"))
             self._t1_disc_canvas = MplCanvas(figsize=(9, 3))
             self._t1_disc_canvas.setMinimumHeight(260)
             cl.addWidget(self._t1_disc_canvas)
@@ -532,7 +572,7 @@ class AnalysisView(QWidget):
 
         self._t5_terminal = TerminalBox()
         hdr = self._make_header(
-            "Fear Index", "Run Fear Index",
+            self._metric_label, f"Run {self._metric_label}",
             lambda: self._run_command(
                 ["fear_index.py", "--cohort",
                  self.cfg.get("cohort_csv_path", "cohort_normalized.csv") or "cohort_normalized.csv"],
@@ -556,12 +596,12 @@ class AnalysisView(QWidget):
         cl.addWidget(self._t5_placeholder)
 
         if _MPL:
-            cl.addWidget(_section_title("Fear Index per Animal (cohort-normalized)"))
+            cl.addWidget(_section_title(f"{self._metric_label} per Animal (cohort-normalized)"))
             self._t5_animals_canvas = MplCanvas(figsize=(9, 5))
             self._t5_animals_canvas.setMinimumHeight(350)
             cl.addWidget(self._t5_animals_canvas)
 
-            cl.addWidget(_section_title("Mean Fear Index by Cohort"))
+            cl.addWidget(_section_title(f"Mean {self._metric_label} by Cohort"))
             self._t5_cohort_canvas = MplCanvas(figsize=(9, 3))
             self._t5_cohort_canvas.setMinimumHeight(260)
             cl.addWidget(self._t5_cohort_canvas)
@@ -678,8 +718,10 @@ class AnalysisView(QWidget):
 
     def _get_loaders(self):
         return [
+            self._load_tab0,
             self._load_tab1, self._load_tab2, self._load_tab3,
             self._load_tab4, self._load_tab5, self._load_tab6,
+            self._load_tab7,
         ]
 
     def _switch_tab(self, idx: int) -> None:
@@ -701,7 +743,7 @@ class AnalysisView(QWidget):
 
     def _mark_all_dirty(self) -> None:
         """Flag every tab for redraw on next visit."""
-        self._tab_dirty = [True] * 6
+        self._tab_dirty = [True] * 8
 
     # ────────────────────────────────────────────────── Data loading ──
 
@@ -749,12 +791,12 @@ class AnalysisView(QWidget):
                 ax.bar(x - w / 2,
                        [ga[c].mean() for c in state_cols], w,
                        yerr=[ga[c].sem() for c in state_cols],
-                       color="#E63946", alpha=0.85, label="Context A (Fear)",
+                       color="#E63946", alpha=0.85, label=self._cond_a,
                        capsize=3, zorder=3)
                 ax.bar(x + w / 2,
                        [gb[c].mean() for c in state_cols], w,
                        yerr=[gb[c].sem() for c in state_cols],
-                       color="#4361EE", alpha=0.85, label="Context B (Safe)",
+                       color="#4361EE", alpha=0.85, label=self._cond_b,
                        capsize=3, zorder=3)
                 ax.set_xticks(x)
                 ax.set_xticklabels([f"S{i}" for i in state_ids], fontsize=8)
@@ -1019,16 +1061,17 @@ class AnalysisView(QWidget):
         except Exception:
             pass
 
-    # Ordered preference list for the three phenotype summary panels.
-    # First column that exists and has non-null values wins each slot.
-    _PHENOTYPE_METRICS = [
-        ("discrimination_ratio_mean", "Discrimination Ratio"),
-        ("context_discrimination",    "Context Discrimination"),
-        ("fear_auc",                  "Fear AUC"),
-        ("fear_index",                "Fear Index"),
-        ("behavioral_diversity",      "Behavioral Diversity"),
-        ("transition_entropy_A",      "Transition Entropy (A)"),
-    ]
+    def _get_phenotype_metrics(self) -> list[tuple[str, str]]:
+        """Ordered preference list for the three phenotype summary panels.
+        First column that exists and has non-null values wins each slot."""
+        return [
+            ("discrimination_ratio_mean", "Discrimination Ratio"),
+            ("context_discrimination",    "Condition Discrimination"),
+            ("fear_auc",                  f"{self._cond_a} AUC"),
+            ("fear_index",                self._metric_label),
+            ("behavioral_diversity",      "Behavioral Diversity"),
+            ("transition_entropy_A",      "Transition Entropy (A)"),
+        ]
 
     # Columns that are identity / categorical — excluded from heatmap
     _HEATMAP_EXCLUDE = frozenset({
@@ -1107,7 +1150,7 @@ class AnalysisView(QWidget):
         # Pick up to 3 metrics in priority order
         metrics: list[tuple[str, str]] = []
         seen_labels: set[str] = set()
-        for col, label in self._PHENOTYPE_METRICS:
+        for col, label in self._get_phenotype_metrics():
             if col in master.columns and master[col].notna().any():
                 if label not in seen_labels:
                     metrics.append((col, label))
@@ -1322,7 +1365,7 @@ class AnalysisView(QWidget):
             ax1.set_yticks(range(len(df_s)))
             ax1.set_yticklabels(df_s["animal_id"].astype(str).tolist(), fontsize=7)
             ax1.axvline(0, color="#999", linewidth=1)
-            ax1.set_xlabel("Fear Index")
+            ax1.set_xlabel(self._metric_label)
         else:
             ax1.text(0.5, 0.5, "Need fear_index and animal_id columns",
                      ha="center", va="center", transform=ax1.transAxes, color="#999")
@@ -1348,7 +1391,7 @@ class AnalysisView(QWidget):
             ax2.set_xticks(range(len(groups_list2)))
             ax2.set_xticklabels([str(g) for g in groups_list2], fontsize=9)
             ax2.axhline(0, color="#999", linewidth=0.8)
-            ax2.set_ylabel("Mean Fear Index")
+            ax2.set_ylabel(f"Mean {self._metric_label}")
         ax2.spines["top"].set_visible(False)
         ax2.spines["right"].set_visible(False)
         ax2.yaxis.grid(True, color="#EEEEEE", zorder=0)
@@ -1493,6 +1536,180 @@ class AnalysisView(QWidget):
             ax.spines["right"].set_visible(False)
             canvas.fig.tight_layout()
             canvas.draw()
+
+    # ────────────────────────────────────── Tab 7: Event Alignment ──
+
+    def _build_tab7(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(8)
+
+        self._t7_terminal = TerminalBox()
+        hdr = self._make_header(
+            "Event Alignment", "Run Event Alignment",
+            lambda: self._run_command(["compare.py", "--event-align"], self._t7_terminal),
+            self._t7_terminal,
+        )
+        lay.addWidget(hdr)
+
+        # Panel shown when no event column is configured
+        self._t7_no_event_panel = QWidget()
+        nc_lay = QVBoxLayout(self._t7_no_event_panel)
+        nc_lay.addStretch()
+        nc_msg = QLabel(
+            "Configure an event column in Column Mapping "
+            "to enable event alignment analysis."
+        )
+        nc_msg.setAlignment(Qt.AlignCenter)
+        nc_msg.setWordWrap(True)
+        nc_msg.setStyleSheet("color:#888; font-style:italic; padding:20px;")
+        nc_lay.addWidget(nc_msg)
+        open_mapping_btn = QPushButton("Open Column Mapping")
+        open_mapping_btn.setFixedWidth(200)
+        open_mapping_btn.clicked.connect(lambda: self._tab_list.setCurrentRow(0))
+        nc_lay.addWidget(open_mapping_btn, alignment=Qt.AlignCenter)
+        nc_lay.addStretch()
+        lay.addWidget(self._t7_no_event_panel, stretch=1)
+
+        # Data panel (scroll area with chart + table)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setSpacing(16)
+
+        self._t7_placeholder = _placeholder(
+            "No event alignment data found.\n\n"
+            "Click 'Run Event Alignment' or run:\n"
+            "python compare.py --event-align"
+        )
+        cl.addWidget(self._t7_placeholder)
+
+        if _MPL:
+            cl.addWidget(_section_title("Behavioral State Occupancy by Trial Outcome"))
+            self._t7_chart_canvas = MplCanvas(figsize=(9, 3.5))
+            self._t7_chart_canvas.setMinimumHeight(280)
+            cl.addWidget(self._t7_chart_canvas)
+        else:
+            self._t7_chart_canvas = None
+            cl.addWidget(_placeholder("Install matplotlib to view charts."))
+
+        cl.addWidget(_section_title("Event Contrast Summary"))
+        self._t7_contrast_table = QTableWidget(0, 5)
+        self._t7_contrast_table.setHorizontalHeaderLabels(
+            ["Label A", "Label B", "Contrast Magnitude",
+             "Dominant State A", "Dominant State B"]
+        )
+        self._t7_contrast_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._t7_contrast_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._t7_contrast_table.setMaximumHeight(180)
+        cl.addWidget(self._t7_contrast_table)
+
+        cl.addStretch()
+        scroll.setWidget(content)
+        self._t7_data_panel = scroll
+        lay.addWidget(self._t7_data_panel, stretch=1)
+
+        return page
+
+    def _load_tab7(self) -> None:
+        event_col = self.cfg.get("column_map", {}).get("event", "")
+        has_event_col = bool(event_col)
+        self._t7_no_event_panel.setVisible(not has_event_col)
+        self._t7_data_panel.setVisible(has_event_col)
+
+        if not has_event_col:
+            return
+
+        profiles_p = RESULTS / "quantification" / "peri_event_profiles.csv"
+        has_data = profiles_p.exists()
+        self._t7_placeholder.setVisible(not has_data)
+        if self._t7_chart_canvas:
+            self._t7_chart_canvas.setVisible(has_data)
+
+        if not has_data or not _MPL:
+            return
+
+        try:
+            df = pd.read_csv(profiles_p)
+            self._render_event_chart(df)
+        except Exception:
+            pass
+
+        contrast_p = RESULTS / "quantification" / "event_contrast.csv"
+        if contrast_p.exists():
+            try:
+                contrast = pd.read_csv(contrast_p)
+                cols = ["label_A", "label_B", "contrast_magnitude",
+                        "dominant_state_A", "dominant_state_B"]
+                self._t7_contrast_table.setRowCount(len(contrast))
+                for ri, row in contrast.reset_index(drop=True).iterrows():
+                    for ci, col in enumerate(cols):
+                        v = row.get(col, "")
+                        self._t7_contrast_table.setItem(
+                            ri, ci,
+                            QTableWidgetItem(
+                                f"{v:.4f}" if isinstance(v, float) else str(v)
+                            )
+                        )
+            except Exception:
+                pass
+
+    def _render_event_chart(self, df: pd.DataFrame) -> None:
+        canvas = self._t7_chart_canvas
+        if not canvas:
+            return
+
+        canvas.fig.clf()
+        ax = canvas.fig.add_subplot(111)
+
+        state_cols = [
+            c for c in df.columns
+            if c.startswith("state_") and c.endswith("_frac")
+        ]
+        if not state_cols or df.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes, color="#999")
+            canvas.fig.tight_layout()
+            canvas.draw()
+            return
+
+        state_ids = [int(c.split("_")[1]) for c in state_cols]
+        n_events = len(df)
+        x = np.arange(len(state_ids))
+        w = 0.8 / max(1, n_events)
+        colors = _state_colors(max(n_events, 2))
+
+        for ei, (_, row) in enumerate(df.iterrows()):
+            fracs = [row[c] for c in state_cols]
+            offset = (ei - n_events / 2 + 0.5) * w
+            color = colors[min(ei, len(colors) - 1)]
+            ax.bar(x + offset, fracs, w, color=color, alpha=0.85,
+                   label=str(row["event_label"]))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"S{i}" for i in state_ids], fontsize=8)
+        ax.set_ylabel("Mean Occupancy Fraction")
+        ax.legend(fontsize=9)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.yaxis.grid(True, color="#EEEEEE", zorder=0)
+        canvas.fig.tight_layout()
+        canvas.draw()
+
+    # ───────────────────────────────────────── Label refresh ──
+
+    def refresh_labels(self) -> None:
+        """Re-read vocabulary labels from config and re-render the current tab."""
+        import vieb_config as _vc
+        self._cond_a = _vc.get_condition_a_label()
+        self._cond_b = _vc.get_condition_b_label()
+        self._metric_label = _vc.get_primary_metric_label()
+        self._load_current_tab()
 
     # ─────────────────────────────────────── Command runner ──
 

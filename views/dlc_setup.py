@@ -127,6 +127,7 @@ class DLCSetupView(QWidget):
         self.cfg = cfg
         self._worker: SubprocessWorker | None = None
         self._keypoint_combos: dict[str, QComboBox] = {}
+        self._keypoint_object_checks: dict[str, QCheckBox] = {}
         self._build()
         self._refresh_recent()
         self._refresh_project_status()
@@ -517,8 +518,9 @@ class DLCSetupView(QWidget):
         return "— unassigned —"
 
     def _populate_keypoint_panel(self, bodyparts: list):
-        """Build (or rebuild) the two-column keypoint → role grid and show the panel."""
+        """Build (or rebuild) the three-column keypoint → role / object grid and show the panel."""
         self._keypoint_combos = {}
+        self._keypoint_object_checks = {}
 
         container = QWidget()
         grid = QGridLayout(container)
@@ -527,14 +529,23 @@ class DLCSetupView(QWidget):
         grid.setVerticalSpacing(5)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(2, 0)
 
         # Header row
         hdr_kp = QLabel("Keypoint Name")
         hdr_kp.setStyleSheet("font-weight:bold;color:#333;")
         hdr_role = QLabel("Role")
         hdr_role.setStyleSheet("font-weight:bold;color:#333;")
+        hdr_obj = QLabel("Object")
+        hdr_obj.setStyleSheet("font-weight:bold;color:#333;")
+        hdr_obj.setToolTip(
+            "Check this if the keypoint tracks an object (treat, pellet, target) rather than\n"
+            "a body part. Object keypoints contribute to distance features but not to posture\n"
+            "calculations."
+        )
         grid.addWidget(hdr_kp, 0, 0)
         grid.addWidget(hdr_role, 0, 1)
+        grid.addWidget(hdr_obj, 0, 2)
 
         for row_idx, name in enumerate(bodyparts, start=1):
             lbl = QLabel(name)
@@ -545,9 +556,41 @@ class DLCSetupView(QWidget):
             combo.setCurrentIndex(
                 _ROLE_OPTIONS.index(matched) if matched in _ROLE_OPTIONS else 0
             )
+
+            chk = QCheckBox()
+            chk.setToolTip(
+                "Check if this keypoint tracks an object, not a body part.\n"
+                "Object keypoints contribute to distance features but not posture calculations."
+            )
+
+            # Wire checkbox to disable/enable the role combo
+            def _make_handler(c: QComboBox) -> object:
+                state = {"prev": "— unassigned —"}
+
+                def handler(checked: bool):
+                    if checked:
+                        state["prev"] = c.currentText() if c.isEnabled() else "— unassigned —"
+                        c.clear()
+                        c.addItem("— object point —")
+                        c.setEnabled(False)
+                    else:
+                        c.clear()
+                        for role in _ROLE_OPTIONS:
+                            c.addItem(role)
+                        prev = state["prev"]
+                        idx = _ROLE_OPTIONS.index(prev) if prev in _ROLE_OPTIONS else 0
+                        c.setCurrentIndex(idx)
+                        c.setEnabled(True)
+
+                return handler
+
+            chk.toggled.connect(_make_handler(combo))
+
             grid.addWidget(lbl, row_idx, 0)
             grid.addWidget(combo, row_idx, 1)
+            grid.addWidget(chk, row_idx, 2)
             self._keypoint_combos[name] = combo
+            self._keypoint_object_checks[name] = chk
 
         # Pad so the grid doesn't stretch weirdly when there are few keypoints
         grid.setRowStretch(len(bodyparts) + 1, 1)
@@ -556,7 +599,7 @@ class DLCSetupView(QWidget):
         self._keypoint_panel.show()
 
     def _save_keypoint_mapping(self):
-        """Write {keypoint_name: role} (skipping unassigned) to config.json."""
+        """Write keypoint_roles and object_keypoints to config.json."""
         if not self._keypoint_combos:
             QMessageBox.information(
                 self, "Nothing to Save",
@@ -566,13 +609,21 @@ class DLCSetupView(QWidget):
         mapping = {
             name: combo.currentText()
             for name, combo in self._keypoint_combos.items()
-            if combo.currentText() != "— unassigned —"
+            if combo.currentText() not in ("— unassigned —", "— object point —")
         }
+        object_kps = [
+            name for name, chk in self._keypoint_object_checks.items()
+            if chk.isChecked()
+        ]
         self.cfg["keypoint_roles"] = mapping
+        self.cfg["object_keypoints"] = object_kps
         _save_cfg(self.cfg)
+        parts = [f"{len(mapping)} keypoint role(s)"]
+        if object_kps:
+            parts.append(f"{len(object_kps)} object keypoint(s): {', '.join(object_kps)}")
         QMessageBox.information(
             self, "Keypoint Mapping Saved",
-            f"Saved {len(mapping)} keypoint role(s) to config.json."
+            f"Saved {' and '.join(parts)} to config.json."
         )
 
     def _try_preload_keypoints(self):
@@ -591,10 +642,15 @@ class DLCSetupView(QWidget):
             if bodyparts:
                 # Apply any previously saved role assignments as defaults
                 saved_roles: dict = self.cfg.get("keypoint_roles", {})
+                saved_objects: list = self.cfg.get("object_keypoints", [])
                 self._populate_keypoint_panel(bodyparts)
                 for name, combo in self._keypoint_combos.items():
                     if name in saved_roles and saved_roles[name] in _ROLE_OPTIONS:
                         combo.setCurrentIndex(_ROLE_OPTIONS.index(saved_roles[name]))
+                # Restore object flags (setting the checkbox triggers the handler)
+                for name, chk in self._keypoint_object_checks.items():
+                    if name in saved_objects:
+                        chk.setChecked(True)
         except Exception:
             pass  # Non-critical startup enhancement — never crash here
 

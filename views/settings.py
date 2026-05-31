@@ -5,9 +5,9 @@ from pathlib import Path
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from _utils import ROOT, RESULTS, _DEFAULT_CFG, _save_cfg, _load_cfg
@@ -112,6 +112,31 @@ class SettingsView(QWidget):
             "Default: raw_videos/ inside the VIEB project folder."
         )
 
+        # ── Metadata CSV ──────────────────────────────────────────────────
+        self._meta_csv = QLineEdit(self.cfg.get("metadata_csv_path", ""))
+        self._meta_csv.setPlaceholderText("Path to metadata.csv …")
+        meta_browse = QPushButton("Browse...")
+        meta_browse.setFixedWidth(80)
+        meta_browse.clicked.connect(self._browse_meta_csv)
+        _meta_row_widget = QWidget()
+        _meta_row_h = QHBoxLayout(_meta_row_widget)
+        _meta_row_h.setContentsMargins(0, 0, 0, 0)
+        _meta_row_h.setSpacing(4)
+        _meta_row_h.addWidget(self._meta_csv)
+        _meta_row_h.addWidget(meta_browse)
+        lbl_meta = QLabel("Metadata CSV")
+        lbl_meta.setToolTip("CSV file with one row per video: filename, animal_id, day, context, etc.")
+        form.addWidget(lbl_meta, r, 0)
+        form.addWidget(_meta_row_widget, r, 1)
+        r += 1
+
+        map_btn = QPushButton("Configure Column Mapping…")
+        map_btn.setToolTip("Map your CSV column names to VIEB concepts (animal_id, day, context …)")
+        map_btn.clicked.connect(self._open_mapper)
+        form.addWidget(QLabel(""), r, 0)
+        form.addWidget(map_btn, r, 1)
+        r += 1
+
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row(
             "Context groups (comma-separated)", self._ctx_groups,
@@ -131,6 +156,36 @@ class SettingsView(QWidget):
         )
         self._ctx_desc.setToolTip(_ctx_desc_tip)
         row("Context descriptions", self._ctx_desc, _ctx_desc_tip)
+
+        # ── Experiment Labels ──────────────────────────────────────────────
+        sep_lbl = QLabel("Experiment Labels")
+        sep_lbl.setFont(QFont("Arial", 10, QFont.Bold))
+        sep_lbl.setStyleSheet("color:#555; padding-top:10px; padding-bottom:2px;")
+        form.addWidget(sep_lbl, r, 0, 1, 2)
+        r += 1
+
+        self._cond_a_le = QLineEdit(self.cfg.get("condition_a_label", ""))
+        self._cond_a_le.setPlaceholderText("Auto-detected from metadata")
+        row(
+            "Condition A label", self._cond_a_le,
+            "Label for your primary condition (e.g. 'Fear Context', 'Perturbed', 'Drug'). "
+            "Used in all plots and reports. Leave blank to auto-detect.",
+        )
+
+        self._cond_b_le = QLineEdit(self.cfg.get("condition_b_label", ""))
+        self._cond_b_le.setPlaceholderText("Auto-detected from metadata")
+        row(
+            "Condition B label", self._cond_b_le,
+            "Label for your comparison condition (e.g. 'Safe Context', 'Normal', 'Vehicle').",
+        )
+
+        self._metric_label_le = QLineEdit(self.cfg.get("primary_metric_label", ""))
+        self._metric_label_le.setPlaceholderText("Fear Index")
+        row(
+            "Primary metric label", self._metric_label_le,
+            "Label for the primary per-animal scalar shown in Overview and Quantification "
+            "(e.g. 'Fear Index', 'Adaptation Score', 'Learning Index').",
+        )
 
         self._fps = QSpinBox()
         self._fps.setRange(1, 240)
@@ -174,6 +229,32 @@ class SettingsView(QWidget):
         if d:
             le.setText(d)
 
+    def _browse_meta_csv(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select Metadata CSV", self._meta_csv.text(), "CSV files (*.csv)"
+        )
+        if p:
+            self._meta_csv.setText(p)
+
+    def _open_mapper(self):
+        from views.metadata_mapper import MetadataMapperWidget
+        self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Metadata Column Mapping")
+        dlg.setMinimumSize(560, 520)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        mapper = MetadataMapperWidget(self.cfg, parent=dlg)
+
+        def _on_saved(col_map):
+            self.cfg["column_map"] = col_map
+            self.settings_changed.emit(self.cfg)
+            dlg.accept()
+
+        mapper.mapping_saved.connect(_on_saved)
+        lay.addWidget(mapper)
+        dlg.exec_()
+
     def _save(self):
         self.cfg["arena_bounds"] = {
             "x_min": self._xmin.value(),
@@ -183,6 +264,10 @@ class SettingsView(QWidget):
         }
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
+        self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        self.cfg["condition_a_label"] = self._cond_a_le.text().strip()
+        self.cfg["condition_b_label"] = self._cond_b_le.text().strip()
+        self.cfg["primary_metric_label"] = self._metric_label_le.text().strip()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
         # Parse "A=shock context,B=safe context" → {"A": "shock context", ...}
         ctx_desc_raw = self._ctx_desc.text().strip()

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -228,7 +229,7 @@ STAGES = [
     {
         "id": 7,
         "name": "State Collapsing (optional)",
-        "desc": "Merge similar states using centroid distance and kinematic criteria.",
+        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
         "cmd": "python compare.py --collapse --collapse-threshold 0.5",
     },
     {
@@ -255,6 +256,13 @@ STAGES = [
         "desc": "Generate behavior profiles and optionally export exemplar clips.",
         "cmd": "python characterize.py [--clips]",
     },
+    {
+        "id": 12,
+        "name": "Event Alignment",
+        "desc": "Peri-event behavioral state analysis (discrete experiments only).",
+        "cmd": "python compare.py --event-align",
+        "optional": True,
+    },
 ]
 
 _DEFAULT_CFG = {
@@ -278,6 +286,14 @@ _DEFAULT_CFG = {
     "cohort_csv_path": "",
     "current_run_saved": False,
     "current_run_id": "",
+    "column_map": {
+        "animal_id":  "animal_id",
+        "day":        "day",
+        "context":    "context",
+        "experiment": "experiment",
+        "cohort":     "",
+        "event":      "",
+    },
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -402,6 +418,7 @@ def _derive_stage_statuses(data: dict) -> dict:
         "9":  _s(data.get("animal_scalars") is not None),
         "10": _s(data.get("motifs") is not None),
         "11": _s(data.get("state_summary") is not None),
+        "12": _s((RESULTS / "quantification" / "peri_event_profiles.csv").exists()),
     }
 
 
@@ -466,14 +483,29 @@ def _state_colors(n: int):
     return mpl_cm.tab20(np.linspace(0, 1, max(1, n)))
 
 
+@contextlib.contextmanager
+def _quiet_stderr():
+    """Redirect C-level stderr to /dev/null to suppress ffmpeg noise from partial MP4 files."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved = os.dup(2)
+    os.dup2(devnull, 2)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
+
+
 def _thumb_from_video(path: Path | None, size=(180, 110)):
     if not _CV2:
         return None
     if path is None:
         return None
-    cap = cv2.VideoCapture(str(path))
-    ret, frame = cap.read()
-    cap.release()
+    with _quiet_stderr():
+        cap = cv2.VideoCapture(str(path))
+        ret, frame = cap.read()
+        cap.release()
     if not ret:
         return None
     frame = cv2.resize(frame, size)

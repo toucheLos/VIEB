@@ -57,6 +57,18 @@ _NEW_PROJECT_DEFAULTS: dict = {
     "dlc_project_path": "",
     "raw_videos_dir": "",
     "results_dir": "",
+    "column_map": {
+        "animal_id":  "animal_id",
+        "day":        "day",
+        "context":    "context",
+        "experiment": "experiment",
+        "cohort":     "",
+        "event":      "",
+    },
+    "object_keypoints": [],
+    "condition_a_label": "",
+    "condition_b_label": "",
+    "primary_metric_label": "",
 }
 
 
@@ -332,7 +344,13 @@ class NewProjectDialog(QDialog):
         cfg["results_dir"] = str(folder / "results")
         raw = self._raw.text().strip()
         cfg["raw_videos_dir"] = raw if raw else str(folder / "raw_videos")
-        cfg["metadata_csv_path"] = self._meta.text().strip()
+        meta_csv_path = self._meta.text().strip()
+        cfg["metadata_csv_path"] = meta_csv_path
+        if meta_csv_path and Path(meta_csv_path).exists():
+            from views.metadata_mapper import _autodetect_columns
+            detected = _autodetect_columns(meta_csv_path)
+            cfg["column_map"].update(detected)
+
         dlc_yaml = self._dlc.text().strip()
         if dlc_yaml:
             cfg["dlc_project_path"] = str(Path(dlc_yaml).parent)

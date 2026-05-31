@@ -147,7 +147,7 @@ except Exception:
 # WSL2 / Linux GPU detection - cached at first use
 # ---------------------------------------------------------------------------
 
-_WSL_CUML: bool | None = None
+_WSL_CUML: bool | str | None = None  # True=working, "installed"=cuml installed but CUDA init failed, False=not installed
 _linux_gpu_name: str | None = None  # populated by _probe_gpu_async on Linux
 
 
@@ -164,16 +164,19 @@ def _probe_nvidia_smi() -> str | None:
         return None
 
 
-def _probe_linux_cuml() -> bool:
-    """Return True if cuML (RAPIDS) is importable and a GPU op succeeds on Linux."""
+def _probe_linux_cuml():
+    """Return True if cuML is usable, 'installed' if installed but CUDA init fails, False if not installed."""
     try:
         import cuml  # noqa: F401
+    except ImportError:
+        return False
+    try:
         import cupy as cp
         cp.cuda.runtime.getDeviceCount()
         cp.array([1.0])
         return True
     except Exception:
-        return False
+        return "installed"
 
 
 def _wsl_path(win_path: str) -> str:
@@ -226,7 +229,7 @@ def wsl_cuml_available() -> bool:
     global _WSL_CUML
     if _WSL_CUML is None:
         _WSL_CUML = _probe_wsl_cuml()
-    return _WSL_CUML
+    return _WSL_CUML is True
 
 
 def wsl_cuml_reset_cache() -> None:
@@ -389,7 +392,7 @@ STAGES = [
     {
         "id": 7,
         "name": "State Collapsing (optional)",
-        "desc": "Merge similar states using centroid distance and kinematic criteria.",
+        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
         "cmd": "python compare.py --collapse --collapse-threshold 0.5",
     },
     {
@@ -448,6 +451,18 @@ _DEFAULT_CFG = {
     "hdbscan_jobs": 1,
     "current_run_saved": False,
     "current_run_id": "",
+    "column_map": {
+        "animal_id":  "animal_id",
+        "day":        "day",
+        "context":    "context",
+        "experiment": "experiment",
+        "cohort":     "",
+        "event":      "",
+    },
+    "object_keypoints": [],
+    "condition_a_label": "",
+    "condition_b_label": "",
+    "primary_metric_label": "",
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -1849,7 +1864,7 @@ class RunPipelineView(QWidget):
 
     def _probe_gpu_async(self):
         class _ProbeThread(QThread):
-            result = pyqtSignal(bool)
+            result = pyqtSignal(object)
             def run(self):
                 global _linux_gpu_name
                 if sys.platform == "win32":
@@ -1864,7 +1879,7 @@ class RunPipelineView(QWidget):
         self._wsl_thread.result.connect(self._on_gpu_probe)
         self._wsl_thread.start()
 
-    def _on_gpu_probe(self, ok: bool):
+    def _on_gpu_probe(self, ok):
         global _WSL_CUML
         _WSL_CUML = ok
         self.refresh_gpu_badge()
@@ -1892,14 +1907,23 @@ class RunPipelineView(QWidget):
                 self._gpu_setup_btn.setVisible(True)
                 self._gpu_setup_btn.setText("Set up GPU acceleration")
             elif _linux_gpu_name:
-                # GPU hardware found but cuML not installed
-                self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML not installed")
-                self._gpu_badge.setStyleSheet(
-                    "background:#fff3e0;border:1px solid #ffb74d;"
-                    "border-radius:4px;padding:4px 10px;color:#e65100;"
-                )
-                self._gpu_setup_btn.setVisible(True)
-                self._gpu_setup_btn.setText("Install cuML (GPU acceleration)")
+                if _WSL_CUML == "installed":
+                    # cuML is installed but CUDA driver can't initialize (e.g. nvidia-uvm I/O error)
+                    self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML installed, CUDA init failed (try rebooting)")
+                    self._gpu_badge.setStyleSheet(
+                        "background:#fff8e1;border:1px solid #ffe082;"
+                        "border-radius:4px;padding:4px 10px;color:#795548;"
+                    )
+                    self._gpu_setup_btn.setVisible(False)
+                else:
+                    # GPU hardware found but cuML not installed
+                    self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML not installed")
+                    self._gpu_badge.setStyleSheet(
+                        "background:#fff3e0;border:1px solid #ffb74d;"
+                        "border-radius:4px;padding:4px 10px;color:#e65100;"
+                    )
+                    self._gpu_setup_btn.setVisible(True)
+                    self._gpu_setup_btn.setText("Install cuML (GPU acceleration)")
             else:
                 self._gpu_badge.setText("No NVIDIA GPU detected — running on CPU")
                 self._gpu_badge.setStyleSheet(
@@ -4222,7 +4246,15 @@ class MainWindow(QMainWindow):
     def _settings_changed(self, cfg):
         self.cfg = cfg
         _save_cfg(self.cfg)
+        self._refresh_view_labels()
         self._load_data()
+
+    def _refresh_view_labels(self) -> None:
+        """Re-read vocabulary labels from config and push them to live views."""
+        if self._av is not None and hasattr(self._av, "refresh_labels"):
+            self._av.refresh_labels()
+        if hasattr(self._ov, "refresh_labels"):
+            self._ov.refresh_labels()
 
     def _on_cohort_path_changed(self, path: str):
         self.cfg["cohort_csv_path"] = path

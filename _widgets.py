@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QSlider, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -444,6 +444,11 @@ class StageRow(QFrame):
         acts.addWidget(self._run_btn)
         acts.addWidget(self._from_btn)
         acts.addStretch()
+        self._copy_log_btn = QPushButton("Copy Output")
+        self._copy_log_btn.setFixedHeight(26)
+        self._copy_log_btn.setToolTip("Copy this stage's output to clipboard")
+        self._copy_log_btn.clicked.connect(self._copy_log)
+        acts.addWidget(self._copy_log_btn)
         dl.addLayout(acts)
 
         self._details.hide()
@@ -500,6 +505,9 @@ class StageRow(QFrame):
         self._log.setPlainText("\n".join(self.logs))
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self._log.toPlainText())
 
     def set_enabled(self, enabled):
         self._run_btn.setEnabled(enabled)

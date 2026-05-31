@@ -21,7 +21,7 @@ Outputs (results/characterization/):
 Usage:
     python characterize.py              # all outputs except clips (~1 min)
     python characterize.py --clips      # also export video clips (~slow)
-    python characterize.py --n-clips 10 # change clips per category (default 15)
+    python characterize.py --n-clips 10 # limit clips per category (default: unlimited)
 """
 
 import argparse
@@ -119,7 +119,7 @@ def _load_prereqs():
             sys.exit(f"Missing {path}. Run compare.py --extract / --cluster / --report first.")
 
     with open(os.path.join(_res(), "features", "index.json")) as f:
-        index = json.load(f)
+        index = {k: v for k, v in json.load(f).items() if "features_path" in v}
     with open(os.path.join(_res(), "shared", "cluster_info.json")) as f:
         cluster_info = json.load(f)
     df_summary = pd.read_csv(os.path.join(_res(), "comparison", "summary_table.csv"))
@@ -127,6 +127,7 @@ def _load_prereqs():
     meta = pd.DataFrame()
     if os.path.exists(_meta()):
         meta = pd.read_csv(_meta())
+        meta = _vc.normalize_metadata_columns(meta)
         meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
 
     return index, cluster_info, df_summary, meta
@@ -410,7 +411,7 @@ def _plot_cluster_tsne(index, cluster_info, df_states, out_dir):
 
     print(f"  Running t-SNE on {len(feats_all):,} frames ({pca_all.shape[1]} dims) [{_tsne_backend}]...")
     if _tsne_backend.startswith("cuML"):
-        tsne = TSNE(n_components=2, perplexity=40, n_epochs=1000, random_state=42)
+        tsne = TSNE(n_components=2, perplexity=40, max_iter=1000, random_state=42)
     else:
         tsne = TSNE(n_components=2, perplexity=40, max_iter=1000, random_state=42, n_jobs=-1)
     emb = np.asarray(tsne.fit_transform(pca_all))
@@ -658,7 +659,7 @@ def _expand_clip(labels, anchor, target_state, clip_purity, max_frames):
     return left, right
 
 
-def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
+def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300):
     import cv2  # fail fast if not installed
 
     index, cluster_info, df_summary, meta = _load_prereqs()
@@ -671,8 +672,8 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
     bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     if os.path.exists(bouts_csv):
         bouts_df = pd.read_csv(bouts_csv)
-        vp_map = {s: _resolve_video_path(info["video_path"]) for s, info in index.items()}
-        fp_map = {s: info["features_path"] for s, info in index.items()}
+        vp_map = {s: _resolve_video_path(info["video_path"]) for s, info in index.items() if "video_path" in info}
+        fp_map = {s: info["features_path"] for s, info in index.items() if "features_path" in info}
         bouts_df["video_path"]    = bouts_df["stem"].map(vp_map)
         bouts_df["features_path"] = bouts_df["stem"].map(fp_map)
     else:
@@ -727,7 +728,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
 
         # ── Longest bouts ──────────────────────────────────────────────────
         n_ok = 0
-        for i, (_, b) in enumerate(kb.nlargest(n_clips, "duration_sec").iterrows()):
+        for i, (_, b) in enumerate(kb.nlargest(n_clips or len(kb), "duration_sec").iterrows()):
             stem = b["stem"]
             anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
             if stem in labels_cache:
@@ -737,10 +738,10 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
             clips_attempted += 1
             ok = _export_clip(b["video_path"], left, right - 1,
                               os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
-                              pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+                              pad_to_secs=5.0, max_secs=max_clip_frames / fps)
             clips_written += int(ok)
             n_ok += int(ok)
-        print(f"  longest: {n_ok}/{min(n_clips, len(kb))} clips written")
+        print(f"  longest: {n_ok}/{len(kb)} clips written")
 
         # ── Typical bouts (nearest to cluster centroid in PCA space) ───────
         if preprocessor is not None:
@@ -779,7 +780,7 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
                 kb["_dist"] = dists
 
                 n_ok = 0
-                for i, (_, b) in enumerate(kb.nsmallest(n_clips, "_dist").iterrows()):
+                for i, (_, b) in enumerate(kb.nsmallest(n_clips or len(kb), "_dist").iterrows()):
                     stem = b["stem"]
                     anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
                     if stem in labels_cache:
@@ -789,17 +790,17 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
                     clips_attempted += 1
                     ok = _export_clip(b["video_path"], left, right - 1,
                                       os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
-                                      pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+                                      pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                     clips_written += int(ok)
                     n_ok += int(ok)
-                print(f"  typical: {n_ok}/{min(n_clips, len(kb))} clips written")
+                print(f"  typical: {n_ok}/{len(kb)} clips written")
 
         # ── Context-specific bouts ─────────────────────────────────────────
         best_ctx = state_best_ctx.get(k)
         if best_ctx:
             ctx_bouts = kb[kb["context"] == best_ctx]
             n_ok = 0
-            for i, (_, b) in enumerate(ctx_bouts.nlargest(n_clips, "duration_sec").iterrows()):
+            for i, (_, b) in enumerate(ctx_bouts.nlargest(n_clips or len(ctx_bouts), "duration_sec").iterrows()):
                 stem = b["stem"]
                 anchor = (int(b["start_frame"]) + int(b["end_frame"])) // 2
                 if stem in labels_cache:
@@ -809,10 +810,10 @@ def cmd_clips(fps=30.0, n_clips=15, clip_purity=0.95, max_clip_frames=300):
                 clips_attempted += 1
                 ok = _export_clip(b["video_path"], left, right - 1,
                                   os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
-                                  pad_to_secs=0.0, max_secs=max_clip_frames / fps)
+                                  pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                 clips_written += int(ok)
                 n_ok += int(ok)
-            print(f"  context-{best_ctx}: {n_ok}/{min(n_clips, len(ctx_bouts))} clips written")
+            print(f"  context-{best_ctx}: {n_ok}/{len(ctx_bouts)} clips written")
 
     if skipped_states:
         print(
@@ -939,8 +940,8 @@ def main():
     )
     parser.add_argument("--clips",    action="store_true",
                         help="Export exemplar video clips per state (slow)")
-    parser.add_argument("--n-clips",  type=int, default=15,
-                        help="Clips per category per state (default 15)")
+    parser.add_argument("--n-clips",  type=int, default=None,
+                        help="Max clips per category per state (default: unlimited)")
     parser.add_argument("--fps",      type=float, default=30.0)
     parser.add_argument(
         "--clip-purity",

@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QFrame, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
+    QApplication, QFrame, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -119,6 +119,17 @@ class RunPipelineView(QWidget):
         v.addStretch()
         scroll.setWidget(holder)
         lay.addWidget(scroll)
+
+        log_header = QHBoxLayout()
+        log_header.addStretch()
+        self._copy_log_btn = QPushButton("Copy Output")
+        self._copy_log_btn.setFixedHeight(24)
+        self._copy_log_btn.setToolTip("Copy all pipeline output to clipboard")
+        self._copy_log_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._global_log.toPlainText())
+        )
+        log_header.addWidget(self._copy_log_btn)
+        lay.addLayout(log_header)
 
         self._global_log = QTextEdit()
         self._global_log.setReadOnly(True)

@@ -36,6 +36,10 @@ class OverviewView(QWidget):
         self._cohort_df = None
         self._dom_state = None
         self._distinctions_expanded = False
+        import vieb_config as _vc
+        self._cond_a = _vc.get_condition_a_label()
+        self._cond_b = _vc.get_condition_b_label()
+        self._metric_label = _vc.get_primary_metric_label()
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -224,10 +228,12 @@ class OverviewView(QWidget):
         ctrl_row.addWidget(self._cohort_status_lbl)
         lay.addLayout(ctrl_row)
 
-        # Middle: Fear Conditioning line chart
-        mid_title = QLabel("Fear Conditioning — Context Discrimination")
-        mid_title.setFont(QFont("Arial", 12, QFont.Bold))
-        lay.addWidget(mid_title)
+        # Middle: condition discrimination line chart
+        self._mid_title = QLabel(
+            f"{self._cond_a} vs {self._cond_b} — Behavioral Discrimination"
+        )
+        self._mid_title.setFont(QFont("Arial", 12, QFont.Bold))
+        lay.addWidget(self._mid_title)
         if _MPL:
             self._canvas_disc = MplCanvas(figsize=(10, 3))
             lay.addWidget(self._canvas_disc)
@@ -814,14 +820,25 @@ class OverviewView(QWidget):
         ax.axhline(0, color="#555", linewidth=0.8)
         ax.set_xlabel("State ID", fontsize=8)
         ax.set_ylabel("A − B fraction diff", fontsize=8)
-        ax.set_title("Fear-Enriched States", fontsize=9, fontweight="bold")
+        ax.set_title(f"{self._cond_a}-Enriched States", fontsize=9, fontweight="bold")
         if state_ids:
             ax.set_xticks(state_ids)
         ax.tick_params(labelsize=7)
-        ax.annotate("Positive = more in Context A (fear)", xy=(0.02, 0.96),
+        ax.annotate(f"Positive = more in {self._cond_a}", xy=(0.02, 0.96),
                     xycoords="axes fraction", fontsize=7, color="#666", va="top")
         canvas.fig.tight_layout()
         canvas.draw()
+
+    def refresh_labels(self) -> None:
+        """Re-read vocabulary labels from config and update displayed text."""
+        import vieb_config as _vc
+        self._cond_a = _vc.get_condition_a_label()
+        self._cond_b = _vc.get_condition_b_label()
+        self._metric_label = _vc.get_primary_metric_label()
+        self._mid_title.setText(
+            f"{self._cond_a} vs {self._cond_b} — Behavioral Discrimination"
+        )
+        self._render_fear_enriched()
 
     def _toggle_distinctions(self):
         self._distinctions_expanded = not self._distinctions_expanded
