@@ -252,12 +252,10 @@ class PipelineRunner(QThread):
                         # so the full pipeline can still complete.
                         self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
                     elif sid == 11:
-                        char_args = ["characterize.py", "--fps", str(fps)]
-                        if export_clips:
-                            char_args.append("--clips")
-                        ok = self._run_subprocess(char_args)
+                        clips_args = ["generate_clips.py", "--fps", str(fps)]
+                        ok = self._run_subprocess(clips_args)
                         if not ok:
-                            raise RuntimeError("Characterization failed.")
+                            raise RuntimeError("Clip generation failed.")
                     self.stage_done.emit(sid, True)
                 except (Exception, SystemExit) as _exc:
                     msg = (
@@ -319,7 +317,7 @@ class ClipGenerationWorker(QThread):
         ok = False
         try:
             sys.path.insert(0, str(ROOT))
-            from characterize import cmd_clips
+            from generate_clips import cmd_clips
 
             cmd_clips(fps=float(self.cfg.get("fps", 30)))
             ok = True

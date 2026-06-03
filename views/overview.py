@@ -28,6 +28,7 @@ class OverviewView(QWidget):
     navigate_settings = pyqtSignal()
     navigate_to_animal = pyqtSignal(str)
     cohort_path_changed = pyqtSignal(str)
+    navigate_help = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -139,6 +140,18 @@ class OverviewView(QWidget):
         title_lbl = QLabel("Overview")
         title_lbl.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(title_lbl)
+        _ov_help = QPushButton("?")
+        _ov_help.setFixedSize(20, 20)
+        _ov_help.setFlat(True)
+        _ov_help.setToolTip("Open Help: What is VIEB?")
+        _ov_help.setCursor(Qt.PointingHandCursor)
+        _ov_help.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _ov_help.clicked.connect(lambda: self.navigate_help.emit("what_is_vieb"))
+        top.addWidget(_ov_help)
         top.addStretch()
         self._export_btn = QPushButton("Export Results")
         self._export_btn.clicked.connect(self.export_requested.emit)

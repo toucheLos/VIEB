@@ -10,17 +10,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont, QImage, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QGroupBox,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSizePolicy, QSlider,
+    QProgressBar, QPushButton, QScrollArea, QShortcut, QSizePolicy, QSlider,
+    QSpinBox, QSplitter, QStackedWidget,
     QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, VALIDATION_DIR, _open_folder, _save_cfg, _CV2, _MPL
+from _utils import ROOT, RESULTS, CLIPS, VALIDATION_DIR, _open_folder, _save_cfg, _CV2, _MPL
 
 if _CV2:
     import cv2
@@ -30,7 +32,870 @@ if _MPL:
 
 from _widgets import VideoPlayer, KinematicsPanel
 
+import characterize
+
 BASE_DIR = Path(__file__).parent.parent.resolve()
+
+# ---------------------------------------------------------------------------
+# Clip Reviewer palette + helpers
+# ---------------------------------------------------------------------------
+
+_CAT_PALETTE = [
+    "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+    "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
+]
+
+
+def _lighten(hex_color: str, factor: float = 0.45) -> str:
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return "#{:02x}{:02x}{:02x}".format(
+        int(r + (255 - r) * factor),
+        int(g + (255 - g) * factor),
+        int(b + (255 - b) * factor),
+    )
+
+
+def _get_state_name(state_id: int) -> str:
+    """Return 'State N' or 'State N — Name' if config.json has state_names."""
+    try:
+        cfg_path = BASE_DIR / "config.json"
+        if cfg_path.exists():
+            import json
+            with open(cfg_path) as fh:
+                data = json.load(fh)
+            name = data.get("state_names", {}).get(str(state_id), "")
+            if name:
+                return f"State {state_id} — {name}"
+    except Exception:
+        pass
+    return f"State {state_id}"
+
+
+# ---------------------------------------------------------------------------
+# Background workers for classifier training / prediction
+# ---------------------------------------------------------------------------
+
+class _TrainWorker(QThread):
+    done = pyqtSignal(dict)
+
+    def __init__(self, annotations_path: str, features_index: dict,
+                 shared_dir: str, output_path: str):
+        super().__init__()
+        self._ann_path = annotations_path
+        self._fi = features_index
+        self._shared = shared_dir
+        self._out = output_path
+
+    def run(self):
+        try:
+            result = characterize.train_classifier(
+                self._ann_path, self._fi, self._shared, self._out
+            )
+        except Exception as exc:
+            result = {"trained": False, "reason": str(exc)}
+        self.done.emit(result)
+
+
+class _PredictWorker(QThread):
+    done = pyqtSignal(object)  # pd.DataFrame
+
+    def __init__(self, classifier_path: str, shared_dir: str,
+                 all_clips: dict, annotations_path: str, output_path: str):
+        super().__init__()
+        self._clf = classifier_path
+        self._shared = shared_dir
+        self._clips = all_clips
+        self._ann = annotations_path
+        self._out = output_path
+
+    def run(self):
+        try:
+            df = characterize.predict_clips(
+                self._clf, self._shared, self._clips, self._ann, self._out
+            )
+        except Exception:
+            df = pd.DataFrame(
+                columns=["clip_path", "state_id", "predicted_label", "confidence"]
+            )
+        self.done.emit(df)
+
+
+# ---------------------------------------------------------------------------
+# Clip Reviewer widget
+# ---------------------------------------------------------------------------
+
+class _ClipReviewerWidget(QWidget):
+    """Session-based clip annotation tool."""
+    navigate_help = pyqtSignal(str)
+
+    _ANN_PATH  = str(RESULTS / "annotations" / "annotations.csv")
+    _PRED_PATH = str(RESULTS / "annotations" / "predictions.csv")
+    _CLF_PATH  = str(RESULTS / "annotations" / "classifier.pkl")
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self._categories: list[dict] = []        # [{"name": str, "color": str}]
+        self._chip_widgets: dict[str, QWidget] = {}
+        self._annotations: dict[str, str] = {}   # {clip_path: label}
+        self._predictions: dict[str, tuple] = {} # {clip_path: (label, conf)}
+        self._clips_dict: dict[int, list] = {}   # {state_id: [clip_path]}
+        self._all_clips_flat: list[str] = []
+        self._session_clips: list[str] = []
+        self._session_idx: int = 0
+        self._session_active: bool = False
+        self._shortcuts: list = []               # keep QShortcuts alive
+        self._train_worker: _TrainWorker | None = None
+        self._predict_worker: _PredictWorker | None = None
+        self._build()
+        self._load_state()
+
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._stack = QStackedWidget()
+        layout.addWidget(self._stack)
+
+        start_w = QWidget()
+        self._build_start_panel(start_w)
+        self._stack.addWidget(start_w)   # index 0
+
+        review_w = QWidget()
+        self._build_review_panel(review_w)
+        self._stack.addWidget(review_w)  # index 1
+
+        self._stack.setCurrentIndex(0)
+
+    def _build_start_panel(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(40, 32, 40, 32)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignTop)
+
+        _cr_title_row = QHBoxLayout()
+        title = QLabel("Clip Reviewer")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        _cr_title_row.addWidget(title)
+        _cr_hbtn = QPushButton("?")
+        _cr_hbtn.setFixedSize(20, 20)
+        _cr_hbtn.setFlat(True)
+        _cr_hbtn.setToolTip("Open Help for Clip Reviewer")
+        _cr_hbtn.setCursor(Qt.PointingHandCursor)
+        _cr_hbtn.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _cr_hbtn.clicked.connect(lambda: self.navigate_help.emit("clip_reviewer"))
+        _cr_title_row.addWidget(_cr_hbtn)
+        _cr_title_row.addStretch()
+        layout.addLayout(_cr_title_row)
+        layout.addSpacing(4)
+
+        layout.addWidget(QLabel("Define your categories:"))
+
+        self._cat_input = QLineEdit()
+        self._cat_input.setPlaceholderText(
+            "Type a category name and press Enter or comma to add.  "
+            "Example: Success, Failure"
+        )
+        self._cat_input.returnPressed.connect(self._add_cat_from_input)
+        self._cat_input.textChanged.connect(self._on_cat_input_changed)
+        layout.addWidget(self._cat_input)
+
+        # Tag chips — HBoxLayout inside a scroll area
+        chips_scroll = QScrollArea()
+        chips_scroll.setWidgetResizable(True)
+        chips_scroll.setFixedHeight(52)
+        chips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chips_scroll.setStyleSheet("border:none;background:transparent;")
+
+        chips_container = QWidget()
+        self._chips_layout = QHBoxLayout(chips_container)
+        self._chips_layout.setContentsMargins(4, 4, 4, 4)
+        self._chips_layout.setSpacing(8)
+        self._chips_layout.addStretch()
+        chips_scroll.setWidget(chips_container)
+        layout.addWidget(chips_scroll)
+
+        # Shuffle seed
+        seed_row = QHBoxLayout()
+        seed_row.addWidget(QLabel("Shuffle seed (0 = random each session):"))
+        self._seed_spin = QSpinBox()
+        self._seed_spin.setRange(0, 99999)
+        self._seed_spin.setValue(int(self.cfg.get("reviewer_seed", 0)))
+        self._seed_spin.setMaximumWidth(80)
+        seed_row.addWidget(self._seed_spin)
+        seed_row.addStretch()
+        layout.addLayout(seed_row)
+
+        # Info label for no-clips case
+        self._no_clips_lbl = QLabel(
+            "No clips found. Run 'Generate Clips' from the Pipeline tab first."
+        )
+        self._no_clips_lbl.setStyleSheet(
+            "color:#856404;background:#fff3cd;padding:8px;border-radius:4px;"
+        )
+        self._no_clips_lbl.setWordWrap(True)
+        self._no_clips_lbl.setVisible(False)
+        layout.addWidget(self._no_clips_lbl)
+
+        self._start_btn = QPushButton("Start Session")
+        self._start_btn.setEnabled(False)
+        self._start_btn.setMinimumHeight(44)
+        self._start_btn.clicked.connect(self._start_session)
+        layout.addWidget(self._start_btn)
+        layout.addStretch()
+
+    def _build_review_panel(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter, stretch=1)
+
+        # ── Left: video player (65%) ──────────────────────────────────────
+        left = QWidget()
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(4, 4, 4, 4)
+        left_lay.setSpacing(4)
+
+        self._review_player = VideoPlayer()
+        self._review_player._loop_btn.setChecked(True)
+        left_lay.addWidget(self._review_player, stretch=1)
+
+        self._state_id_lbl = QLabel("")
+        self._state_id_lbl.setAlignment(Qt.AlignCenter)
+        self._state_id_lbl.setStyleSheet("color:#888;font-size:11px;")
+        left_lay.addWidget(self._state_id_lbl)
+
+        # "All clips reviewed" overlay (hidden by default)
+        self._done_overlay = QWidget()
+        done_lay = QVBoxLayout(self._done_overlay)
+        done_lay.setAlignment(Qt.AlignCenter)
+        done_msg = QLabel("All clips reviewed.\nEnd session or continue from beginning.")
+        done_msg.setAlignment(Qt.AlignCenter)
+        done_msg.setStyleSheet("font-size:14px;color:#333;")
+        done_lay.addWidget(done_msg)
+        self._restart_btn = QPushButton("Restart from beginning")
+        self._restart_btn.clicked.connect(self._restart_session)
+        done_lay.addWidget(self._restart_btn)
+        self._done_overlay.setVisible(False)
+        left_lay.addWidget(self._done_overlay)
+
+        splitter.addWidget(left)
+
+        # ── Right: controls (35%) ─────────────────────────────────────────
+        right = QWidget()
+        right.setMinimumWidth(240)
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(8, 8, 8, 8)
+        right_lay.setSpacing(6)
+
+        # Clip counter + progress bar
+        self._clip_counter_lbl = QLabel("Clip 0 of 0")
+        self._clip_counter_lbl.setFont(QFont("Arial", 11))
+        right_lay.addWidget(self._clip_counter_lbl)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p% annotated")
+        right_lay.addWidget(self._progress_bar)
+
+        # Distribution display
+        dist_title = QLabel("Distribution:")
+        dist_title.setFont(QFont("Arial", 10, QFont.Bold))
+        right_lay.addWidget(dist_title)
+
+        self._dist_widget = QWidget()
+        self._dist_layout = QVBoxLayout(self._dist_widget)
+        self._dist_layout.setContentsMargins(0, 0, 0, 0)
+        self._dist_layout.setSpacing(3)
+        right_lay.addWidget(self._dist_widget)
+
+        right_lay.addSpacing(4)
+
+        # Category buttons (rebuilt on session start)
+        self._cat_btns_widget = QWidget()
+        self._cat_btns_layout = QVBoxLayout(self._cat_btns_widget)
+        self._cat_btns_layout.setContentsMargins(0, 0, 0, 0)
+        self._cat_btns_layout.setSpacing(4)
+        right_lay.addWidget(self._cat_btns_widget)
+
+        right_lay.addSpacing(4)
+
+        # Navigation buttons
+        nav_row = QHBoxLayout()
+        self._skip_btn = QPushButton("Skip")
+        self._skip_btn.setStyleSheet("background:#777;color:white;")
+        self._skip_btn.clicked.connect(self._skip)
+        nav_row.addWidget(self._skip_btn)
+        self._back_btn = QPushButton("Back")
+        self._back_btn.clicked.connect(self._back)
+        nav_row.addWidget(self._back_btn)
+        right_lay.addLayout(nav_row)
+
+        self._end_session_btn = QPushButton("End Session")
+        self._end_session_btn.clicked.connect(self._end_session)
+        right_lay.addWidget(self._end_session_btn)
+
+        # Train Classifier
+        right_lay.addSpacing(8)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color:#ccc;")
+        right_lay.addWidget(sep)
+
+        self._train_btn = QPushButton("Train Classifier")
+        self._train_btn.setToolTip("Need at least 5 clips per category to train")
+        self._train_btn.setVisible(False)
+        self._train_btn.clicked.connect(self._train_classifier)
+        right_lay.addWidget(self._train_btn)
+
+        self._retrain_btn = QPushButton("Re-train Classifier")
+        self._retrain_btn.setToolTip("Retrain classifier with updated annotations")
+        self._retrain_btn.setVisible(False)
+        self._retrain_btn.clicked.connect(self._train_classifier)
+        right_lay.addWidget(self._retrain_btn)
+
+        right_lay.addStretch()
+
+        splitter.addWidget(right)
+        splitter.setSizes([650, 350])
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+
+    def _load_state(self):
+        """Load existing annotations, predictions, categories from config."""
+        self._annotations = characterize.load_annotations(self._ANN_PATH)
+
+        # Load predictions
+        try:
+            if os.path.exists(self._PRED_PATH):
+                df = pd.read_csv(self._PRED_PATH)
+                for _, row in df.iterrows():
+                    self._predictions[str(row["clip_path"])] = (
+                        str(row["predicted_label"]),
+                        float(row.get("confidence", 0.0)),
+                    )
+        except Exception:
+            pass
+
+        # Restore categories from config
+        for name in self.cfg.get("reviewer_categories", []):
+            self._add_category(name)
+
+        # Load clips from disk
+        self._refresh_clips()
+
+    def _refresh_clips(self):
+        self._clips_dict = characterize.load_clips(str(CLIPS))
+        self._all_clips_flat = [c for clips in self._clips_dict.values() for c in clips]
+        has_clips = len(self._all_clips_flat) > 0
+        self._no_clips_lbl.setVisible(not has_clips)
+        self._update_start_btn()
+
+    # ------------------------------------------------------------------
+    # Category management
+    # ------------------------------------------------------------------
+
+    def _on_cat_input_changed(self, text: str):
+        if text.endswith(","):
+            name = text[:-1].strip()
+            if name:
+                self._add_category(name)
+            self._cat_input.clear()
+
+    def _add_cat_from_input(self):
+        name = self._cat_input.text().strip().rstrip(",")
+        if name:
+            self._add_category(name)
+        self._cat_input.clear()
+
+    def _add_category(self, name: str):
+        name = name.strip()
+        if not name:
+            return
+        if any(c["name"] == name for c in self._categories):
+            return
+        if len(self._categories) >= len(_CAT_PALETTE):
+            return
+
+        idx = len(self._categories)
+        color = _CAT_PALETTE[idx % len(_CAT_PALETTE)]
+        self._categories.append({"name": name, "color": color})
+
+        # Build chip widget
+        chip = QWidget()
+        chip_lay = QHBoxLayout(chip)
+        chip_lay.setContentsMargins(10, 4, 6, 4)
+        chip_lay.setSpacing(4)
+        chip.setStyleSheet(
+            f"background:{color};border-radius:12px;"
+        )
+
+        lbl = QLabel(name)
+        lbl.setStyleSheet("color:white;font-weight:bold;background:transparent;border:none;")
+        chip_lay.addWidget(lbl)
+
+        x_btn = QPushButton("×")
+        x_btn.setFixedSize(18, 18)
+        x_btn.setStyleSheet(
+            "background:transparent;color:white;border:none;"
+            "font-size:14px;font-weight:bold;padding:0;"
+        )
+        x_btn.clicked.connect(lambda _, n=name: self._remove_category(n))
+        chip_lay.addWidget(x_btn)
+
+        # Insert before the trailing stretch
+        insert_pos = max(0, self._chips_layout.count() - 1)
+        self._chips_layout.insertWidget(insert_pos, chip)
+        self._chip_widgets[name] = chip
+
+        self._update_start_btn()
+
+    def _remove_category(self, name: str):
+        if name in self._chip_widgets:
+            w = self._chip_widgets.pop(name)
+            self._chips_layout.removeWidget(w)
+            w.setParent(None)
+            w.deleteLater()
+        self._categories = [c for c in self._categories if c["name"] != name]
+        self._update_start_btn()
+
+    def _update_start_btn(self):
+        ok = len(self._categories) >= 2 and len(self._all_clips_flat) > 0
+        self._start_btn.setEnabled(ok)
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
+    def _start_session(self):
+        seed = self._seed_spin.value()
+
+        # Save categories to config
+        self.cfg["reviewer_categories"] = [c["name"] for c in self._categories]
+        self.cfg["reviewer_seed"] = seed
+        _save_cfg(self.cfg)
+
+        # Warn if classifier categories have changed
+        self._check_classifier_compat()
+
+        # Reload clips in case new ones were generated
+        self._refresh_clips()
+        if not self._all_clips_flat:
+            return
+
+        # Shuffle then sort: unannotated first, annotated at end
+        shuffled = characterize.shuffle_clips(
+            self._clips_dict, seed if seed > 0 else None
+        )
+        unannotated = [c for c in shuffled if c not in self._annotations]
+        annotated   = [c for c in shuffled if c in self._annotations]
+        self._session_clips = unannotated + annotated
+        self._session_idx = 0
+        self._session_active = True
+
+        # Rebuild category buttons + shortcuts
+        self._rebuild_cat_buttons()
+
+        self._stack.setCurrentIndex(1)
+        self._show_current_clip()
+        self._update_distribution()
+        self._update_train_btn()
+
+    def _end_session(self):
+        self._session_active = False
+        self._clear_shortcuts()
+        self._stack.setCurrentIndex(0)
+
+    def _restart_session(self):
+        self._session_idx = 0
+        self._done_overlay.setVisible(False)
+        self._review_player.setVisible(True)
+        self._state_id_lbl.setVisible(True)
+        self._show_current_clip()
+
+    def _check_classifier_compat(self):
+        if not os.path.exists(self._CLF_PATH):
+            return
+        try:
+            import joblib
+            saved = joblib.load(self._CLF_PATH)
+            saved_classes = set(saved.get("classes", []))
+            current_cats = {c["name"] for c in self._categories}
+            if saved_classes and saved_classes != current_cats:
+                QMessageBox.warning(
+                    self,
+                    "Categories Changed",
+                    "Categories changed since last training. Re-train classifier.",
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Review actions
+    # ------------------------------------------------------------------
+
+    def _rebuild_cat_buttons(self):
+        # Clear existing buttons
+        while self._cat_btns_layout.count():
+            item = self._cat_btns_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._clear_shortcuts()
+
+        for i, cat in enumerate(self._categories):
+            btn = QPushButton(f"{i + 1}.  {cat['name']}")
+            btn.setMinimumHeight(40)
+            btn.setStyleSheet(
+                f"background:{cat['color']};color:white;"
+                "font-weight:bold;border-radius:4px;"
+            )
+            btn.clicked.connect(lambda _, name=cat["name"]: self._annotate(name))
+            self._cat_btns_layout.addWidget(btn)
+
+            # Keyboard shortcut 1–9
+            if i < 9:
+                sc = QShortcut(QKeySequence(str(i + 1)), self)
+                sc.activated.connect(lambda name=cat["name"]: self._annotate(name))
+                self._shortcuts.append(sc)
+
+    def _clear_shortcuts(self):
+        for sc in self._shortcuts:
+            sc.setEnabled(False)
+            sc.deleteLater()
+        self._shortcuts.clear()
+
+    def _show_current_clip(self):
+        if self._session_idx >= len(self._session_clips):
+            # All clips reviewed
+            self._review_player.setVisible(False)
+            self._state_id_lbl.setVisible(False)
+            self._done_overlay.setVisible(True)
+            self._clip_counter_lbl.setText(
+                f"Clip {len(self._session_clips)} of {len(self._session_clips)}"
+            )
+            return
+
+        self._done_overlay.setVisible(False)
+        self._review_player.setVisible(True)
+        self._state_id_lbl.setVisible(True)
+
+        clip = self._session_clips[self._session_idx]
+        n = len(self._session_clips)
+        self._clip_counter_lbl.setText(f"Clip {self._session_idx + 1} of {n}")
+
+        # State ID label
+        try:
+            sid = int(Path(clip).parent.name.split("_")[1])
+            self._state_id_lbl.setText(_get_state_name(sid))
+        except Exception:
+            self._state_id_lbl.setText("")
+
+        if os.path.exists(clip):
+            self._review_player.load(clip)
+            self._review_player.play()
+        else:
+            self._review_player._display.setText(f"File not found:\n{clip}")
+
+    def _annotate(self, label: str):
+        if self._session_idx >= len(self._session_clips):
+            return
+        clip = self._session_clips[self._session_idx]
+        self._annotations[clip] = label
+        characterize.save_annotations({clip: label}, self._ANN_PATH)
+        self._advance()
+        self._update_distribution()
+        self._update_train_btn()
+
+    def _skip(self):
+        self._advance()
+
+    def _back(self):
+        if self._session_idx > 0:
+            self._session_idx -= 1
+            self._show_current_clip()
+
+    def _advance(self):
+        self._session_idx += 1
+        self._show_current_clip()
+
+    # ------------------------------------------------------------------
+    # Distribution display
+    # ------------------------------------------------------------------
+
+    def _update_distribution(self):
+        # Clear existing rows
+        while self._dist_layout.count():
+            item = self._dist_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                _clear_layout(item.layout())
+
+        dist = characterize.get_clip_distribution(
+            self._annotations,
+            self._all_clips_flat,
+            predictions=self._predictions if self._predictions else None,
+        )
+        total = max(dist["total"], 1)
+
+        # Update progress bar
+        pct_annotated = int(dist["annotated"] / total * 100)
+        self._progress_bar.setValue(pct_annotated)
+
+        cat_map = {c["name"]: c["color"] for c in self._categories}
+
+        def _add_bar(label: str, count: int, color: str, italic: bool = False):
+            row = QHBoxLayout()
+            bar = QProgressBar()
+            bar.setRange(0, total)
+            bar.setValue(count)
+            bar.setFormat("")
+            bar.setFixedHeight(12)
+            bar.setStyleSheet(
+                f"QProgressBar {{border:1px solid #ccc;border-radius:3px;background:#eee;}}"
+                f"QProgressBar::chunk {{background:{color};border-radius:2px;}}"
+            )
+            row.addWidget(bar, stretch=1)
+            pct = count / total * 100
+            text = f"  {label}  {pct:.0f}%  ({count})"
+            lbl = QLabel(text)
+            lbl.setMinimumWidth(180)
+            if italic:
+                lbl.setStyleSheet("color:#888;font-style:italic;font-size:11px;")
+            else:
+                lbl.setStyleSheet("font-size:11px;")
+            row.addWidget(lbl)
+
+            row_w = QWidget()
+            row_w.setLayout(row)
+            self._dist_layout.addWidget(row_w)
+
+        for cat in self._categories:
+            n = dist["by_label"].get(cat["name"], 0)
+            _add_bar(cat["name"], n, cat_map.get(cat["name"], "#888"))
+
+            # Predicted row
+            predicted = dist.get("by_label_predicted", {})
+            n_pred = predicted.get(cat["name"], 0)
+            if n_pred > 0:
+                _add_bar(
+                    f"{cat['name']} (pred.)",
+                    n_pred,
+                    _lighten(cat_map.get(cat["name"], "#888"), 0.45),
+                    italic=True,
+                )
+
+        # Unannotated
+        _add_bar("Unannotated", dist["unannotated"], "#cccccc")
+
+    # ------------------------------------------------------------------
+    # Train Classifier
+    # ------------------------------------------------------------------
+
+    def _update_train_btn(self):
+        from collections import Counter
+        label_counts = Counter(self._annotations.values())
+        cats_with_ann = [c for c in self._categories if label_counts.get(c["name"], 0) > 0]
+
+        if len(cats_with_ann) < 2:
+            self._train_btn.setVisible(False)
+            self._retrain_btn.setVisible(False)
+            return
+
+        self._train_btn.setVisible(True)
+
+        min_count = min(label_counts.get(c["name"], 0) for c in self._categories)
+        if min_count < 5:
+            self._train_btn.setEnabled(False)
+            self._train_btn.setToolTip("Need at least 5 clips per category")
+        else:
+            self._train_btn.setEnabled(True)
+            self._train_btn.setToolTip("")
+
+        self._retrain_btn.setVisible(os.path.exists(self._CLF_PATH))
+
+    def _train_classifier(self):
+        if self._train_worker and self._train_worker.isRunning():
+            return
+
+        # Progress dialog
+        from PyQt5.QtWidgets import QProgressDialog
+        prog = QProgressDialog("Training classifier…", None, 0, 0, self)
+        prog.setWindowTitle("Training")
+        prog.setModal(True)
+        prog.setMinimumDuration(0)
+        prog.show()
+
+        shared_dir = str(RESULTS / "shared")
+        fi_path = str(RESULTS / "features" / "index.json")
+        features_index: dict = {}
+        try:
+            import json as _j
+            with open(fi_path) as fh:
+                features_index = _j.load(fh)
+        except Exception:
+            pass
+
+        self._train_worker = _TrainWorker(
+            self._ANN_PATH, features_index, shared_dir, self._CLF_PATH
+        )
+
+        def _on_done(report: dict):
+            prog.close()
+            self._on_train_done(report)
+
+        self._train_worker.done.connect(_on_done)
+        self._train_worker.start()
+
+    def _on_train_done(self, report: dict):
+        if not report.get("trained"):
+            QMessageBox.warning(
+                self, "Training Failed",
+                report.get("reason", "Could not train classifier."),
+            )
+            return
+
+        apply = self._show_train_results(report)
+        self._update_train_btn()
+
+        if apply:
+            self._run_predict()
+
+    def _show_train_results(self, report: dict) -> bool:
+        """Show accuracy + confusion matrix. Return True if user wants to apply predictions."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Classifier Results")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+
+        # Accuracy
+        acc = report.get("accuracy")
+        if acc is not None:
+            color = "green" if acc >= 0.80 else "orange"
+            acc_lbl = QLabel(f"Cross-validation accuracy: {acc:.1%}")
+            acc_lbl.setStyleSheet(
+                f"color:{color};font-size:18px;font-weight:bold;"
+            )
+        else:
+            acc_lbl = QLabel("Accuracy: N/A (fewer than 10 samples for CV)")
+            acc_lbl.setStyleSheet("font-size:14px;color:#555;")
+        acc_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(acc_lbl)
+
+        # Confusion matrix
+        classes = report.get("classes", [])
+        cm_data = report.get("confusion_matrix", [])
+        if classes and cm_data:
+            cm_group = QGroupBox("Confusion Matrix (training data)")
+            grid = QGridLayout(cm_group)
+            for j, cls in enumerate(classes):
+                lbl = QLabel(cls)
+                lbl.setFont(QFont("Arial", 9, QFont.Bold))
+                lbl.setAlignment(Qt.AlignCenter)
+                grid.addWidget(lbl, 0, j + 1)
+            for i, cls in enumerate(classes):
+                lbl = QLabel(cls)
+                lbl.setFont(QFont("Arial", 9, QFont.Bold))
+                lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                grid.addWidget(lbl, i + 1, 0)
+                for j, val in enumerate(cm_data[i]):
+                    cell = QLabel(str(val))
+                    cell.setAlignment(Qt.AlignCenter)
+                    cell.setStyleSheet(
+                        "padding:6px 12px;background:#f0f0f0;"
+                        "border:1px solid #ddd;"
+                    )
+                    grid.addWidget(cell, i + 1, j + 1)
+            layout.addWidget(cm_group)
+
+        layout.addSpacing(8)
+        q_lbl = QLabel("Apply predictions to unannotated clips?")
+        q_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(q_lbl)
+
+        btn_row = QHBoxLayout()
+        yes_btn = QPushButton("Yes, apply predictions")
+        no_btn  = QPushButton("No thanks")
+        btn_row.addWidget(yes_btn)
+        btn_row.addWidget(no_btn)
+        layout.addLayout(btn_row)
+
+        result = {"apply": False}
+        yes_btn.clicked.connect(lambda: (result.__setitem__("apply", True), dlg.accept()))
+        no_btn.clicked.connect(dlg.reject)
+        dlg.exec_()
+        return result["apply"]
+
+    def _run_predict(self):
+        if self._predict_worker and self._predict_worker.isRunning():
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        prog = QProgressDialog("Applying predictions…", None, 0, 0, self)
+        prog.setWindowTitle("Predicting")
+        prog.setModal(True)
+        prog.setMinimumDuration(0)
+        prog.show()
+
+        shared_dir = str(RESULTS / "shared")
+        self._predict_worker = _PredictWorker(
+            self._CLF_PATH, shared_dir, self._clips_dict,
+            self._ANN_PATH, self._PRED_PATH,
+        )
+
+        def _on_done(df):
+            prog.close()
+            self._on_predict_done(df)
+
+        self._predict_worker.done.connect(_on_done)
+        self._predict_worker.start()
+
+    def _on_predict_done(self, df: "pd.DataFrame"):
+        # Reload predictions
+        self._predictions.clear()
+        if not df.empty:
+            for _, row in df.iterrows():
+                self._predictions[str(row["clip_path"])] = (
+                    str(row["predicted_label"]),
+                    float(row.get("confidence", 0.0)),
+                )
+
+        self._update_distribution()
+
+        n = len(df)
+        QMessageBox.information(
+            self,
+            "Predictions Saved",
+            f"Predictions saved to results/annotations/predictions.csv.\n"
+            f"{n} clips predicted.\n\n"
+            "These are model predictions, not human labels.",
+        )
+
+
+def _clear_layout(layout):
+    """Recursively remove all widgets and sub-layouts from a layout."""
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().deleteLater()
+        elif item.layout():
+            _clear_layout(item.layout())
 
 
 class _ValidationPlayer(VideoPlayer):
@@ -56,6 +921,7 @@ class _ValidationPlayer(VideoPlayer):
 
 class ValidationView(QWidget):
     navigate_to_pipeline = pyqtSignal()
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
@@ -93,6 +959,11 @@ class ValidationView(QWidget):
         self._tabs = QTabWidget()
         outer.addWidget(self._tabs, stretch=1)
 
+        # Clip Reviewer tab (first — new)
+        self._clip_reviewer = _ClipReviewerWidget(self.cfg)
+        self._clip_reviewer.navigate_help.connect(self.navigate_help.emit)
+        self._tabs.insertTab(0, self._clip_reviewer, "Clip Reviewer")
+
         self._watch_widget = QWidget()
         self._tabs.addTab(self._watch_widget, "Video Watching")
         self._build_watching()
@@ -101,13 +972,19 @@ class ValidationView(QWidget):
         self._tabs.addTab(self._adv_widget, "Frame Sampling (Advanced)")
         self._build_sampling()
 
+        self._tabs.setCurrentIndex(0)
+
     def _build_watching(self):
         layout = QHBoxLayout(self._watch_widget)
         layout.setSpacing(12)
 
-        # ---- Left panel (fixed 300px) ----
+        # ---- Left panel (fixed 300px, scrollable) ----
+        left_scroll = QScrollArea()
+        left_scroll.setFixedWidth(312)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.NoFrame)
         left = QWidget()
-        left.setFixedWidth(300)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(4, 4, 4, 4)
         ll.setSpacing(8)
@@ -190,7 +1067,8 @@ class ValidationView(QWidget):
         ll.addWidget(self._export_btn)
 
         ll.addStretch()
-        layout.addWidget(left)
+        left_scroll.setWidget(left)
+        layout.addWidget(left_scroll)
 
         # ---- Right panel (fills remaining width): 70% video, 30% kinematics ----
         right = QWidget()
@@ -265,9 +1143,11 @@ class ValidationView(QWidget):
         self._adv_frame.setStyleSheet("background:#111;color:#999;")
         cl.addWidget(self._adv_frame)
         self._adv_frame_info = QLabel("State: - | kinematics: -")
+        self._adv_frame_info.setWordWrap(True)
         cl.addWidget(self._adv_frame_info)
-        shortcuts = QLabel("Shortcuts: F=freeze, W=walk, G=groom, R=rear, O=other, S=skip")
+        shortcuts = QLabel("Shortcuts: F=freeze  W=walk  G=groom  R=rear  O=other  S=skip")
         shortcuts.setStyleSheet("color:#666;")
+        shortcuts.setWordWrap(True)
         cl.addWidget(shortcuts)
         split.addWidget(center, stretch=2)
 

@@ -617,7 +617,7 @@ class LinuxGpuSetupDialog(QDialog):
         self._status.setText("")
         self._log.clear()
         self._append("Running install…\n")
-        self._worker = SubprocessWorker([sys.executable, "-m", "pip", "install",
+        self._worker = SubprocessWorker(["-m", "pip", "install",
                                          "--extra-index-url", "https://pypi.nvidia.com",
                                          "cuml-cu12"])
         self._worker.log.connect(self._append)
@@ -643,10 +643,10 @@ class LinuxGpuSetupDialog(QDialog):
         self._append("Verifying cuML + GPU…\n")
         verify_script = (
             "import cuml; import cupy as cp; "
-            "cp.cuda.runtime.getDeviceCount(); cp.array([1.0]); "
+            "a = cp.array([1.0, 2.0, 3.0]); assert float(a.sum()) == 6.0; "
             "print('cuML GPU verified OK')"
         )
-        self._worker = SubprocessWorker([sys.executable, "-c", verify_script])
+        self._worker = SubprocessWorker(["-c", verify_script])
         self._worker.log.connect(self._append)
         self._worker.done.connect(self._on_verify_done)
         self._worker.start()

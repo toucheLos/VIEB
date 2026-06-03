@@ -53,12 +53,13 @@ python feature_reduction_test.py         # Feature subset experiment → results
 python quantify.py --build               # Build master_table.csv only
 python quantify.py --contrast            # Per-animal contrast vectors → results/quantification/contrast_vectors.csv
 python quantify.py --contrast --cohort cohort_normalized.csv  # + cohort-level contrast stats
-python characterize.py                   # Behavioral state profiles + t-SNE → results/characterization/
-python characterize.py --clips           # Also export exemplar video clips → clips/state_<id>/
-python characterize.py --n-clips 10      # Change clips per category (default 15)
+python generate_clips.py                 # Export exemplar video clips → clips/state_<id>/
+python generate_clips.py --n-clips 10   # Limit clips per category per state (default 15)
+python generate_clips.py --clip-purity 0.95  # Min label purity for clip expansion (default 0.95)
+python generate_clips.py --output clips/ # Override output directory
 ```
 
-### Cohort-level analysis (run after compare.py and characterize.py)
+### Cohort-level analysis (run after compare.py)
 ```bash
 python cohort_analysis.py --cohort cohort_normalized.csv --output results/cohort/
 python cohort_analysis.py --cohort cohort.xlsx --groupby genotype_treatment
@@ -98,6 +99,49 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 
 Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`, `clusterer.pkl`, `cluster_info.json`. Per-video labels in `results/shared/<stem>_labels.npy` (int32, -1 = noise). Per-video soft probabilities in `results/shared/<stem>_probs.npy` (float32, 0–1; 0 for noise frames).
 
+### characterize.py — Clip Reviewer data layer
+
+`characterize.py` is **not a pipeline script** — it is a pure Python module providing the backend API for the Clip Reviewer GUI. It has no CLI entry point. Do not try to run it directly.
+
+Public API:
+
+| Function | Signature | Returns |
+|----------|-----------|---------|
+| `load_clips` | `(clips_dir)` | `{state_id: [clip_path, ...]}` |
+| `load_annotations` | `(annotations_path)` | `{clip_path: label_string}` |
+| `save_annotations` | `(annotations, annotations_path)` | writes/updates annotations.csv (never overwrites) |
+| `get_clip_distribution` | `(annotations, all_clips, predictions=None)` | distribution dict (see below) |
+| `shuffle_clips` | `(all_clips, seed=None)` | shuffled flat list |
+| `train_classifier` | `(annotations_path, features_index, shared_dir, output_path)` | training report dict |
+| `predict_clips` | `(classifier_path, shared_dir, all_clips, annotations_path, output_path)` | predictions DataFrame |
+
+`get_clip_distribution` returns:
+```python
+{
+  "total": int,
+  "annotated": int,
+  "unannotated": int,
+  "by_label": {"Success": 12, "Failure": 8},
+  "by_label_pct": {"Success": 0.20, "Failure": 0.16, "unannotated": 0.64},
+  "by_label_predicted": {...}  # only when predictions= is passed
+}
+```
+
+`train_classifier` uses cluster_centers from `cluster_info.json` (transformed through `umap_reducer.pkl`) as the per-state feature vector. Returns `{"trained": False, "reason": "..."}` when fewer than 2 categories or fewer than 5 clips per category.
+
+`predict_clips` never modifies `annotations.csv` — predictions go to `predictions.csv` only.
+
+### generate_clips.py — Clip generation pipeline stage
+
+`generate_clips.py` is a standalone CLI script (pipeline stage 11). It is the extracted clip-generation logic, copied verbatim from the old `characterize.py --clips` functionality.
+
+For each state 0..N-1:
+- Longest bouts of consecutive frames labeled as that state → `longest_NN.mp4`
+- Bouts nearest to the cluster centroid → `typical_NN.mp4`
+- Bouts from the most context-enriched context → `context_{X}_NN.mp4`
+
+Requires `results/characterization/bouts.csv` (or builds it on the fly) and `results/characterization/context_report.csv` (optional, for context-specific clips).
+
 ### Important API notes
 
 - `BehaviorPreprocessor` has `fit()`, `transform()`, and `fit_transform()` — use `transform()` on new data without refitting. In `compare.py` it is used with `use_pca=False` (standardization only); UMAP handles reduction separately.
@@ -108,7 +152,7 @@ Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`
 - `analysis.py`'s `export_results()` must convert numpy types to Python before `json.dump()`.
 - `PoseFeatureExtractor` now accepts `use_wavelets=True` (default). Feature vector is 91D with wavelets, 51D without. All downstream code that loads `_features.npy` must use the same setting used during `--extract`.
 - `_labels.npy` files contain `int32` with `-1` meaning noise (HDBSCAN). All downstream code must skip `-1` frames (e.g., `labels[labels >= 0]`). State fractions in `summary_table.csv` do NOT sum to 1 when noise is present — that is correct.
-- `cluster_info.json` now includes `"method": "umap+hdbscan"`, `"min_cluster_size"`, `"mean_confidence"`, and `"low_confidence_frac"`. `cluster_centers` are in standardized (51D or 91D) feature space for `characterize.py` compatibility.
+- `cluster_info.json` now includes `"method": "umap+hdbscan"`, `"min_cluster_size"`, `"mean_confidence"`, and `"low_confidence_frac"`. `cluster_centers` are in standardized (51D or 91D) feature space.
 - `_probs.npy` files (float32) contain HDBSCAN soft assignment probabilities (0–1) parallel to `_labels.npy`. Noise frames have prob=0. Use `valid = (labels >= 0) & (probs >= threshold)` for confidence-filtered fractions.
 - `--cluster --validate` does an 80/20 video-level train/test split (seed=42), fits on train only, predicts test via `approximate_predict`, and saves `results/shared/validation_report.json` with the generalization score.
 - `compare.py --report --min-confidence N` and `--quantify --min-confidence N` exclude frames with soft probability < N from all state fraction calculations.
@@ -118,6 +162,10 @@ Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`
 - `cohort_analysis.py` computes per-animal means (not per-session) as the unit of analysis before any cohort-level statistics. All cohort grouping is driven by `cohort_loader.load_cohort_excel()`. Dominant state is excluded from all state-level comparisons. FDR correction uses BH method via statsmodels if available, manual fallback otherwise.
 - `quantify.compute_contrast_vector()` excludes the dominant state dynamically, detects Context A/B case-insensitively, stores vectors as JSON strings in CSV. Parse with `json.loads(row["contrast_vector_json"])`. `contrast_magnitude` is NaN (not 0) when an animal has no sessions in a context. `contrast_magnitude` is automatically added to `master_table.csv` by `compare.py --quantify` and is therefore included in Jess correlations without any special casing.
 - `plot_cohort.py --contrast` requires `contrast_vectors.csv` and `cohort_contrast_vectors.csv` to already exist (run `quantify.py --contrast` first). Pass `--jess FILE` for the scatter plot.
+- `characterize.save_annotations()` never overwrites — it appends or updates rows by `clip_path` key. Always safe to call multiple times.
+- Annotations (human labels) live in `results/annotations/annotations.csv`. Predictions (model labels) live in `results/annotations/predictions.csv`. These are **never mixed** — `annotations.csv` contains only human labels.
+- `characterize.train_classifier()` requires `results/shared/cluster_info.json` and optionally `results/shared/umap_reducer.pkl`. If the UMAP reducer is missing it falls back to standardized cluster centers.
+- `classifier.pkl` in `results/annotations/` stores `{"clf": RandomForestClassifier, "state_features": dict, "classes": list}`. Check `saved["classes"]` to detect category drift between sessions.
 
 ### GUI architecture (`user_interface.py`)
 
@@ -127,7 +175,7 @@ The main GUI is `user_interface.py` (standalone, run directly). The sidebar orde
 2. Pipeline — staged pipeline runner
 3. Browse States — state explorer with clips
 4. **Analysis** — consolidated analysis hub (`views/analysis.py`)
-5. Validation — manual frame labeling
+5. **Validation** — frame labeling + Clip Reviewer (`views/validation.py`)
 6. Settings — config editor
 
 `views/analysis.py` contains `AnalysisView` with a vertical tab bar (six tabs):
@@ -135,15 +183,51 @@ The main GUI is `user_interface.py` (standalone, run directly). The sidebar orde
 | Tab | Command | Data source |
 |-----|---------|-------------|
 | Comparison Report | `compare.py --report` | `results/comparison/summary_table.csv` |
-| State Characterization | `characterize.py` | `results/characterization/state_summary.csv` + clips/ |
+| State Characterization | *(no longer from characterize.py)* | `results/characterization/state_summary.csv` + clips/ |
 | Cohort Analysis | `cohort_analysis.py --groupby X` | `results/cohort/` |
 | Quantification | `compare.py --quantify` | `results/quantification/master_table.csv` |
 | Fear Index | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
 | Jess Correlation | `compare.py --jess` | `results/quantification/jess_correlations.csv` |
 
-Each tab has a `TerminalBox` (dark, 80px) that streams live stdout from a `SubprocessWorker`. Data is loaded lazily on tab switch. State labels saved to `results/validation/state_labels.csv`.
+`views/validation.py` — `ValidationView` has three tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| **Clip Reviewer** | Session-based clip annotation with user-defined categories, distribution tracking, and supervised classifier (first tab, default) |
+| Video Watching | Random clip sampling + freeze/walk/groom/rear/other labeling per state |
+| Frame Sampling (Advanced) | Frame-level labeling for paper figures (requires characterization outputs) |
+
+**Clip Reviewer session flow:**
+1. Define categories (tag chips, Enter/comma to add, × to remove; up to 10)
+2. Set shuffle seed (0 = random each session)
+3. Click "Start Session" — requires ≥2 categories and clips to exist
+4. Review clips one by one: colored category buttons (keyboard 1–9), Skip, Back, End Session
+5. Distribution bars update after every annotation
+6. "Train Classifier" appears when ≥2 categories have annotations; enabled when each has ≥5
+7. After training, optionally apply predictions to unannotated clips (shown in lighter bar colors)
+8. Annotations persist across sessions; previous session progress is resumed automatically
+
+Config keys for Clip Reviewer (in `config.json`):
+- `reviewer_categories`: list of category name strings (restored on app load)
+- `reviewer_seed`: int (0 = random)
 
 `AnalysisView` emits `worker_running(bool)` connected to `MainWindow._set_running()` so the status-bar pulse indicator reflects running analysis commands.
+
+### Pipeline stages (in `_utils.py` and `user_interface.py` STAGES list)
+
+| ID | Name | Script |
+|----|------|--------|
+| 1 | Pose Estimation (DLC) | `setup_dlc_training.py --analyze` |
+| 2 | Feature Extraction | `compare.py --extract` |
+| 3–6 | Preprocessing → HMM Smoothing | `compare.py --cluster` |
+| 7 | State Collapsing (optional) | `compare.py --collapse` |
+| 8 | Report Generation | `compare.py --report` |
+| 9 | Per-Animal Scalars | `compare.py --summarize` |
+| 10 | Motif Discovery | `compare.py --motifs` |
+| 11 | **Generate Clips** | `generate_clips.py` |
+| 12 | Event Alignment (optional) | `compare.py --event-align` |
+
+Stage 11 completion is detected by checking whether the `clips/` directory exists and is non-empty.
 
 ### DLC project structure
 
@@ -188,19 +272,19 @@ results/
     state_by_animal.png
     animal_trajectories.png   # per-animal state occupancy across days
     animal_scalars.csv        # freeze AUC + discrimination ratio per animal
-  characterization/      # From characterize.py
-    state_summary.csv         # kinematic profiles + heuristic labels per state
-    context_report.csv        # A/B/C enrichment, effect sizes, bootstrap CIs
-    hidden_behaviors.csv      # rare states enriched in a context + anomaly bouts
-    bouts.csv                 # all bouts with metadata (smoothed labels, 0.5s window)
-    labels_per_frame.csv      # per-frame state + context for every video
-    context_fractions.png     # bar plot of state occupancy by context
-    cluster_tsne.png          # t-SNE scatter of sampled frames colored by cluster
-clips/                   # From characterize.py --clips
+  characterization/      # Legacy outputs (no longer regenerated by characterize.py)
+    bouts.csv                 # all bouts — still used by generate_clips.py as input
+    context_report.csv        # still used by generate_clips.py for context-specific clips
+clips/                   # From generate_clips.py (pipeline stage 11)
   state_<id>/
     longest_NN.mp4            # longest bouts per state
     typical_NN.mp4            # bouts closest to cluster centroid
     context_<X>_NN.mp4        # bouts from most-enriched context
+annotations/             # From Clip Reviewer (views/validation.py)
+  annotations.csv             # human labels: clip_path, state_id, assigned_label, timestamp
+  predictions.csv             # model predictions: clip_path, state_id, predicted_label, confidence
+  classifier.pkl              # trained RandomForest: {"clf", "state_features", "classes"}
+  training_report.json        # accuracy, confusion_matrix, feature_importances, classes
 videos/                  # Manually curated or exported video files
 cohort/                  # From cohort_analysis.py
   cohort_state_profiles.csv     # per-cohort mean ± SE per non-dominant state
@@ -224,4 +308,3 @@ quantification/          # From quantify.py / compare.py --quantify
   contrast_magnitude.png        # cohort bar chart + individual dots
   contrast_scatter.png          # contrast_magnitude vs Jess protein (if jess data available)
 ```
-

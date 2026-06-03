@@ -17,6 +17,8 @@ from _utils import (
 )
 from _workers import PipelineRunner, SubprocessWorker
 from _widgets import StageRow
+
+_STAGE_BY_ID = {s["id"]: s for s in STAGES}
 from _dialogs import WslSetupDialog, DiagnoseDialog
 
 if _MPL:
@@ -46,6 +48,7 @@ class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
     navigate_dlc = pyqtSignal()
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
@@ -77,20 +80,15 @@ class RunPipelineView(QWidget):
         top.addWidget(self._run_full)
         lay.addLayout(top)
 
-        # GPU status badge (updated after WSL probe completes)
-        gpu_row = QHBoxLayout()
+        # GPU badge — created here, inserted into the scroll after Stage 0's row
         self._gpu_badge = QLabel("⏳ Checking GPU…")
         self._gpu_badge.setStyleSheet(
             "background:#f5f5f5;border:1px solid #ddd;border-radius:4px;"
             "padding:4px 10px;color:#555;font-size:12px;"
         )
-        gpu_row.addWidget(self._gpu_badge)
-        gpu_row.addStretch()
         self._gpu_setup_btn = QPushButton("Set up GPU acceleration")
         self._gpu_setup_btn.setFixedHeight(26)
-        self._gpu_setup_btn.clicked.connect(self._open_wsl_setup)
-        gpu_row.addWidget(self._gpu_setup_btn)
-        lay.addLayout(gpu_row)
+        self._gpu_setup_btn.clicked.connect(self._open_env_setup)
 
         self._status = QLabel("")
         self._status.setStyleSheet("color:#666;")
@@ -102,7 +100,14 @@ class RunPipelineView(QWidget):
         v = QVBoxLayout(holder)
         for stage in STAGES:
             row = StageRow(stage, self.cfg)
-            if stage["id"] == 1:
+            if stage["id"] == 0:
+                row.run_stage.connect(lambda _: self._open_env_setup())
+                row._run_btn.setText("Open Setup ▶")
+                row._from_btn.hide()
+                # Auto-complete if venv already exists
+                if self._venv_exists():
+                    row.set_status("done")
+            elif stage["id"] == 1:
                 row.run_stage.connect(lambda _: self.navigate_dlc.emit())
                 row._run_btn.setText("Open DLC Setup ▶")
                 row._from_btn.hide()
@@ -111,11 +116,21 @@ class RunPipelineView(QWidget):
                 row.run_from_here.connect(self._run_from_here)
             row.mark_completed.connect(self._mark_completed)
             row.changed.connect(self._param_changed)
+            row.navigate_help.connect(self.navigate_help.emit)
             if stage["id"] == 5:
                 row.run_diagnose.connect(self._run_diagnose)
                 row.run_subcluster.connect(self._run_subcluster)
             self._rows[stage["id"]] = row
             v.addWidget(row)
+            # GPU status badge lives under Stage 0, not in the top-level header
+            if stage["id"] == 0:
+                gpu_widget = QWidget()
+                gpu_layout = QHBoxLayout(gpu_widget)
+                gpu_layout.setContentsMargins(28, 0, 4, 4)
+                gpu_layout.addWidget(self._gpu_badge)
+                gpu_layout.addStretch()
+                gpu_layout.addWidget(self._gpu_setup_btn)
+                v.addWidget(gpu_widget)
         v.addStretch()
         scroll.setWidget(holder)
         lay.addWidget(scroll)
@@ -183,14 +198,32 @@ class RunPipelineView(QWidget):
         else:
             self._gpu_badge.setText("⏳ Checking GPU…")
 
-    def _open_wsl_setup(self):
-        if sys.platform != "win32":
-            return
-        dlg = WslSetupDialog(self)
-        dlg.exec_()
-        # Re-probe after dialog closes in case user just finished setup
-        wsl_cuml_reset_cache()
-        self._probe_gpu_async()
+    @staticmethod
+    def _venv_exists() -> bool:
+        venv = ROOT / "venv"
+        if sys.platform == "win32":
+            return (venv / "Scripts" / "python.exe").exists()
+        return (venv / "bin" / "python").exists()
+
+    def _open_env_setup(self):
+        """Stage 0 action: open GPU setup on Windows; show terminal instructions elsewhere."""
+        if sys.platform == "win32":
+            dlg = WslSetupDialog(self)
+            dlg.exec_()
+            wsl_cuml_reset_cache()
+            self._probe_gpu_async()
+        else:
+            QMessageBox.information(
+                self, "Environment Setup",
+                "Run the following command in a terminal to set up the environment:\n\n"
+                "    python setup.py\n\n"
+                "The script will create the venv and optionally install GPU extras.\n"
+                "Once complete, restart the application.",
+            )
+        # Refresh Stage 0 completion indicator
+        row = self._rows.get(0)
+        if row and self._venv_exists():
+            row.set_status("done")
 
     def _param_changed(self, key, value):
         self.cfg[key] = value
@@ -200,7 +233,7 @@ class RunPipelineView(QWidget):
         self.cfg.setdefault("stage_status", {})[key] = "done" if completed else "pending"
         if completed:
             self.cfg.setdefault("stage_last_run", {})[key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cfg["last_completed_stage"] = STAGES[sid - 1]["name"]
+            self.cfg["last_completed_stage"] = _STAGE_BY_ID[sid]["name"]
             self._rows[sid].set_status("done")
         else:
             self._rows[sid].set_status("pending")
@@ -247,8 +280,9 @@ class RunPipelineView(QWidget):
 
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)
-        for row in self._rows.values():
-            row.set_enabled(enabled)
+        for sid, row in self._rows.items():
+            if sid != 0:  # Stage 0 is not a pipeline step; keep its button usable
+                row.set_enabled(enabled)
 
     def _start_worker(self, stage_ids):
         if self._worker and self._worker.isRunning():
@@ -265,14 +299,14 @@ class RunPipelineView(QWidget):
 
     def _on_stage_started(self, sid):
         self._rows[sid].set_status("running")
-        self._status.setText(f"Running stage {sid}: {STAGES[sid - 1]['name']}")
+        self._status.setText(f"Running stage {sid}: {_STAGE_BY_ID[sid]['name']}")
 
     def _on_stage_done(self, sid, ok):
         key = _state_key(sid)
         self.cfg.setdefault("stage_status", {})[key] = "done" if ok else "error"
         if ok:
             self.cfg.setdefault("stage_last_run", {})[key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cfg["last_completed_stage"] = STAGES[sid - 1]["name"]
+            self.cfg["last_completed_stage"] = _STAGE_BY_ID[sid]["name"]
         self._rows[sid].set_status("done" if ok else "error")
         self._rows[sid].set_last_run(self.cfg["stage_last_run"].get(key))
         _save_cfg(self.cfg)
@@ -376,7 +410,8 @@ class RunPipelineView(QWidget):
         t.start()
 
     def _build_sequence(self, start_sid=1, from_here=False):
-        all_ids = [s["id"] for s in STAGES if s["id"] >= start_sid] if from_here else [start_sid]
+        # Stage 0 (environment setup) is never run through the pipeline runner
+        all_ids = [s["id"] for s in STAGES if s["id"] >= max(start_sid, 1)] if from_here else [start_sid]
         if not from_here and start_sid in (4, 5, 6):
             all_ids = list(range(3, start_sid + 1))
         if not from_here and start_sid == 3:

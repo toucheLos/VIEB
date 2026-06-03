@@ -44,8 +44,11 @@ def _detect_gpu() -> bool:
         import cuml  # noqa: F401
         import cupy as cp
         cp.cuda.runtime.getDeviceCount()
-        # Trigger a minimal GPU op to verify the driver is actually compatible
-        cp.array([1.0])
+        # Trigger elementwise kernel compilation — same path cuML UMAP.fit() uses.
+        # cp.array() alone doesn't compile kernels; cp.copyto / cp.full do.
+        import numpy as _np
+        _a = cp.zeros(4, dtype=_np.float32)
+        cp.copyto(_a, cp.full(4, 1.0, dtype=_np.float32))
         return True
     except Exception:
         return False
@@ -691,9 +694,23 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         if not use_gpu:
             umap_kwargs.update(low_memory=True, verbose=False)
         reducer = UMAPClass(**umap_kwargs)
-        reducer.fit(fit_data)
+        try:
+            reducer.fit(fit_data)
+            pooled_umap = reducer.transform(pooled_scaled)
+        except Exception as _gpu_err:
+            if use_gpu:
+                print(f"  GPU UMAP failed ({_gpu_err}); falling back to CPU…")
+                import umap as _umap_lib, hdbscan as _hdbscan_lib
+                use_gpu = False
+                UMAPClass = _umap_lib.UMAP
+                HDBSCANClass = _hdbscan_lib.HDBSCAN
+                umap_kwargs.update(low_memory=True, verbose=False)
+                reducer = UMAPClass(**umap_kwargs)
+                reducer.fit(fit_data)
+                pooled_umap = reducer.transform(pooled_scaled)
+            else:
+                raise
         # Transform all frames (train + test) through the fitted UMAP
-        pooled_umap = reducer.transform(pooled_scaled)
         train_n_frames = int(sum(boundaries[s][1] - boundaries[s][0] for s in train_stems))
         test_n_frames  = int(sum(boundaries[s][1] - boundaries[s][0] for s in test_stems))
         print(f"  Train frames: {train_n_frames:,}  Test frames: {test_n_frames:,}")
@@ -712,8 +729,22 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         if not use_gpu:
             umap_kwargs.update(low_memory=True, verbose=True)
         reducer = UMAPClass(**umap_kwargs)
-        reducer.fit(fit_data)
-        pooled_umap = reducer.transform(pooled_scaled)
+        try:
+            reducer.fit(fit_data)
+            pooled_umap = reducer.transform(pooled_scaled)
+        except Exception as _gpu_err:
+            if use_gpu:
+                print(f"  GPU UMAP failed ({_gpu_err}); falling back to CPU…")
+                import umap as _umap_lib, hdbscan as _hdbscan_lib
+                use_gpu = False
+                UMAPClass = _umap_lib.UMAP
+                HDBSCANClass = _hdbscan_lib.HDBSCAN
+                umap_kwargs.update(low_memory=True, verbose=True)
+                reducer = UMAPClass(**umap_kwargs)
+                reducer.fit(fit_data)
+                pooled_umap = reducer.transform(pooled_scaled)
+            else:
+                raise
 
     if hasattr(pooled_umap, "to_numpy"):
         pooled_umap = pooled_umap.to_numpy()

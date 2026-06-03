@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -15,15 +15,32 @@ from _utils import ROOT, RESULTS, _DEFAULT_CFG, _save_cfg, _load_cfg
 
 class SettingsView(QWidget):
     settings_changed = pyqtSignal(dict)
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
+
+        top_row = QHBoxLayout()
         t = QLabel("Settings")
         t.setFont(QFont("Arial", 18, QFont.Bold))
-        lay.addWidget(t)
+        top_row.addWidget(t)
+        _hbtn = QPushButton("?")
+        _hbtn.setFixedSize(20, 20)
+        _hbtn.setFlat(True)
+        _hbtn.setToolTip("Open Help for Settings")
+        _hbtn.setCursor(Qt.PointingHandCursor)
+        _hbtn.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _hbtn.clicked.connect(lambda: self.navigate_help.emit("settings"))
+        top_row.addWidget(_hbtn)
+        top_row.addStretch()
+        lay.addLayout(top_row)
         form = QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)

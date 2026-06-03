@@ -46,7 +46,7 @@ def _load_pooled_features(max_frames: int | None = None, seed: int = 42):
     if not index:
         sys.exit("Feature index is empty — run compare.py --extract first.")
 
-    stems = sorted(index.keys())
+    stems = sorted(k for k in index.keys() if k != "_meta")
     parts = []
     for stem in stems:
         p = index[stem]["features_path"].replace("\\", "/")
@@ -143,8 +143,25 @@ def _get_umap_embedding(scaled, max_fit_frames: int = 200_000, seed: int = 42,
         print(f"  Fitting UMAP [{backend}] (n_neighbors={n_neighbors}, "
               f"n_components={n_components}) on {n_fit:,}-frame sample…")
         reducer = UMAPClass(**umap_kwargs)
-        reducer.fit(fit_data)
-        emb = reducer.transform(scaled)
+        try:
+            reducer.fit(fit_data)
+            emb = reducer.transform(scaled)
+        except Exception as gpu_err:
+            if backend.startswith("GPU"):
+                print(f"  GPU UMAP failed ({gpu_err}); falling back to CPU…")
+                import multiprocessing
+                try:
+                    import umap as umap_lib
+                except ImportError:
+                    sys.exit("umap-learn not installed.  Run: pip install umap-learn")
+                n_cpu = multiprocessing.cpu_count()
+                umap_kwargs_cpu = dict(n_components=n_components, n_neighbors=n_neighbors,
+                                       min_dist=0.0, n_jobs=n_cpu, low_memory=True)
+                reducer = umap_lib.UMAP(**umap_kwargs_cpu)
+                reducer.fit(fit_data)
+                emb = reducer.transform(scaled)
+            else:
+                raise
 
     if hasattr(emb, "to_numpy"):
         emb = emb.to_numpy()

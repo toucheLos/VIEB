@@ -143,6 +143,8 @@ except Exception:
     _ClusterRunsView = None
     _HAS_CLUSTER_RUNS_VIEW = False
 
+from views.help import HelpView
+
 # ---------------------------------------------------------------------------
 # WSL2 / Linux GPU detection - cached at first use
 # ---------------------------------------------------------------------------
@@ -354,6 +356,12 @@ def _state_means(summary: pd.DataFrame, n: int, hide_leading: bool = False) -> t
 
 STAGES = [
     {
+        "id": 0,
+        "name": "Environment Setup",
+        "desc": "Create the Python virtual environment and configure GPU acceleration (optional).",
+        "cmd": "python setup.py",
+    },
+    {
         "id": 1,
         "name": "Pose Estimation (DLC)",
         "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
@@ -367,27 +375,9 @@ STAGES = [
     },
     {
         "id": 3,
-        "name": "Preprocessing",
-        "desc": "Standardize pooled features across all videos.",
-        "cmd": "python compare.py --cluster",
-    },
-    {
-        "id": 4,
-        "name": "UMAP Reduction",
-        "desc": "Reduce feature dimensionality into a compact latent space.",
-        "cmd": "python compare.py --cluster",
-    },
-    {
-        "id": 5,
-        "name": "HDBSCAN Clustering",
-        "desc": "Discover behavioral states and identify noise frames.",
-        "cmd": "python compare.py --cluster --min-cluster-size N",
-    },
-    {
-        "id": 6,
-        "name": "HMM Smoothing",
-        "desc": "Smooth state assignments temporally while preserving noise labels.",
-        "cmd": "python compare.py --cluster",
+        "name": "Preprocessing · UMAP · Clustering · Smoothing",
+        "desc": "Standardize features, reduce with UMAP, cluster with HDBSCAN, then smooth labels with HMM.",
+        "cmd": "python compare.py --cluster --min-cluster-size N --umap-dims N [--hdbscan-min-samples N] [--validate]",
     },
     {
         "id": 7,
@@ -415,11 +405,13 @@ STAGES = [
     },
     {
         "id": 11,
-        "name": "Characterization + Clip Export",
-        "desc": "Generate behavior profiles and optionally export exemplar clips.",
-        "cmd": "python characterize.py [--clips]",
+        "name": "Generate Clips",
+        "desc": "Export exemplar video clips for each behavioral state.",
+        "cmd": "python generate_clips.py",
     },
 ]
+
+_STAGE_BY_ID = {s["id"]: s for s in STAGES}
 
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
@@ -463,6 +455,8 @@ _DEFAULT_CFG = {
     "condition_a_label": "",
     "condition_b_label": "",
     "primary_metric_label": "",
+    "reviewer_categories": [],
+    "reviewer_seed": 0,
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -474,6 +468,7 @@ _NAV_VIEWS = [
     "Analysis",
     "Validation",
     "Settings",
+    "Help",
 ]
 
 _NAV_ICONS = {
@@ -484,6 +479,7 @@ _NAV_ICONS = {
     "Analysis":       "◈",
     "Validation":     "✓",
     "Settings":       "≡",
+    "Help":           "?",
 }
 
 
@@ -733,8 +729,20 @@ class PipelineRunner(QThread):
         super().__init__()
         self.stage_ids = stage_ids
         self.cfg = cfg
+        self._proc: subprocess.Popen | None = None
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def _run_subprocess(self, args):
+        if self._stop_flag:
+            return False
         p = subprocess.Popen(
             [sys.executable, *args],
             cwd=str(ROOT),
@@ -744,13 +752,20 @@ class PipelineRunner(QThread):
             encoding="utf-8",
             errors="replace",
         )
+        self._proc = p
         assert p.stdout is not None
         for line in p.stdout:
+            if self._stop_flag:
+                p.terminate()
+                break
             self.log.emit(line)
         rc = p.wait()
-        return rc == 0
+        self._proc = None
+        return rc == 0 and not self._stop_flag
 
     def _run_cluster_wsl(self, fps: float, mcs: int) -> bool:
+        if self._stop_flag:
+            return False
         wsl_py = _wsl_python()
         wsl_cwd = _wsl_path(str(ROOT))
         cmd = (
@@ -768,14 +783,19 @@ class PipelineRunner(QThread):
             encoding="utf-8",
             errors="replace",
         )
+        self._proc = p
         assert p.stdout is not None
         for line in p.stdout:
+            if self._stop_flag:
+                p.terminate()
+                break
             self.log.emit(line)
-        return p.wait() == 0
+        rc = p.wait()
+        self._proc = None
+        return rc == 0 and not self._stop_flag
 
     def run(self):
         ok_all = True
-        cluster_bundle_ran = False
         try:
             fps = float(self.cfg.get("fps", 30))
             mcs = int(self.cfg.get("min_cluster_size", 50))
@@ -789,18 +809,17 @@ class PipelineRunner(QThread):
             min_confidence = float(self.cfg.get("min_confidence", 0.7))
 
             for sid in self.stage_ids:
+                if self._stop_flag:
+                    self.log.emit("[stopped] Pipeline stopped by user.\n")
+                    break
                 if sid == 7 and not enable_collapse:
                     self.stage_done.emit(7, True)
                     continue
 
-                if sid in (3, 4, 5, 6):
-                    if cluster_bundle_ran:
-                        continue
-                    cluster_bundle_ran = True
-                    for b in (3, 4, 5, 6):
-                        self.stage_started.emit(b)
+                if sid == 3:
+                    self.stage_started.emit(3)
                     try:
-                        if wsl_cuml_available():
+                        if wsl_cuml_available() and sys.platform == "win32":
                             ok = self._run_cluster_wsl(fps, mcs)
                         else:
                             cluster_args = [
@@ -815,14 +834,12 @@ class PipelineRunner(QThread):
                                 cluster_args.append("--validate")
                             ok = self._run_subprocess(cluster_args)
                         if ok:
-                            for b in (3, 4, 5, 6):
-                                self.stage_done.emit(b, True)
+                            self.stage_done.emit(3, True)
                         else:
                             raise RuntimeError("Clustering subprocess returned non-zero exit code.")
                     except Exception:
                         self.log.emit(traceback.format_exc())
-                        for b in (3, 4, 5, 6):
-                            self.stage_done.emit(b, False)
+                        self.stage_done.emit(3, False)
                         ok_all = False
                         break
                     continue
@@ -1406,6 +1423,7 @@ class OverviewView(QWidget):
     export_requested = pyqtSignal()
     load_previous_requested = pyqtSignal()
     cohort_path_changed = pyqtSignal(str)
+    navigate_help = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -1430,6 +1448,18 @@ class OverviewView(QWidget):
         title = QLabel("Overview")
         title.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(title)
+        _ov_hbtn = QPushButton("?")
+        _ov_hbtn.setFixedSize(20, 20)
+        _ov_hbtn.setFlat(True)
+        _ov_hbtn.setToolTip("Open Help: What is VIEB?")
+        _ov_hbtn.setCursor(Qt.PointingHandCursor)
+        _ov_hbtn.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _ov_hbtn.clicked.connect(lambda: self.navigate_help.emit("what_is_vieb"))
+        top.addWidget(_ov_hbtn)
         top.addStretch()
         self._export_btn = QPushButton("Export Results")
         self._export_btn.clicked.connect(self.export_requested.emit)
@@ -1577,6 +1607,69 @@ class OverviewView(QWidget):
         return " | ".join(bits)
 
 
+class _TerminalWidget(QTextEdit):
+    """Read-only dark terminal with Copy/Clear buttons overlaid at the bottom-right."""
+
+    _BTN_STYLE = (
+        "QPushButton{background:rgba(45,45,45,210);color:#aaa;border:1px solid #555;"
+        "border-radius:3px;font-size:10px;padding:1px 7px;}"
+        "QPushButton:hover{background:rgba(80,80,80,230);color:#eee;}"
+    )
+
+    def __init__(self, extra_clear=None, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self._extra_clear = extra_clear
+
+        self._overlay = QWidget(self)
+        self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        lay = QHBoxLayout(self._overlay)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFixedHeight(20)
+        copy_btn.setStyleSheet(self._BTN_STYLE)
+        copy_btn.setCursor(Qt.ArrowCursor)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.toPlainText()))
+        lay.addWidget(copy_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(20)
+        clear_btn.setStyleSheet(self._BTN_STYLE)
+        clear_btn.setCursor(Qt.ArrowCursor)
+        clear_btn.clicked.connect(self._do_clear)
+        lay.addWidget(clear_btn)
+
+        self._overlay.adjustSize()
+        self._overlay.raise_()
+
+    def _do_clear(self):
+        self.clear()
+        if self._extra_clear:
+            self._extra_clear()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._overlay.adjustSize()
+        self._overlay.move(
+            self.width() - self._overlay.width() - 2,
+            self.height() - self._overlay.height() - 2,
+        )
+
+
+_STAGE_HELP_MAP: dict[int, str] = {
+    1:  "stage_1_dlc",
+    2:  "stage_2_features",
+    3:  "stage_3_clustering",
+    7:  "stage_4_collapse",
+    8:  "stage_5_comparison",
+    9:  "stage_7_quantification",
+    10: "stage_5_comparison",
+    11: "stage_6_clips",
+}
+
+
 class StageRow(QFrame):
     run_stage = pyqtSignal(int)
     run_from_here = pyqtSignal(int)
@@ -1584,6 +1677,7 @@ class StageRow(QFrame):
     changed = pyqtSignal(str, object)
     run_diagnose = pyqtSignal()
     run_subcluster = pyqtSignal(int)
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -1605,6 +1699,20 @@ class StageRow(QFrame):
         name.setFont(QFont("Arial", 11, QFont.Bold))
         top.addWidget(name)
         top.addStretch()
+        _help_anchor = _STAGE_HELP_MAP.get(self.stage["id"])
+        if _help_anchor:
+            _hb = QToolButton()
+            _hb.setText("?")
+            _hb.setFixedSize(20, 20)
+            _hb.setToolTip("Open Help for this stage")
+            _hb.setCursor(Qt.PointingHandCursor)
+            _hb.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _hb.clicked.connect(lambda _, a=_help_anchor: self.navigate_help.emit(a))
+            top.addWidget(_hb)
         self._ts = QLabel("Last run: -")
         self._eta = QLabel("ETA: -")
         top.addWidget(self._ts)
@@ -1623,14 +1731,11 @@ class StageRow(QFrame):
 
         d = QLabel(self.stage["desc"])
         d.setStyleSheet("color:#555;")
+        d.setWordWrap(True)
         lay.addWidget(d)
-        if self.stage["id"] in (3, 4, 5, 6):
-            note = QLabel("Runs stages 3-6 together.")
-            note.setStyleSheet("color:#0b57d0;")
-            lay.addWidget(note)
         self._quality_lbl = None
         self._dom_state_id = -1
-        if self.stage["id"] == 5:
+        if self.stage["id"] == 3:
             self._quality_lbl = QLabel("")
             self._quality_lbl.setStyleSheet("color:#666;")
             lay.addWidget(self._quality_lbl)
@@ -1655,7 +1760,7 @@ class StageRow(QFrame):
             self._fps_spin.setValue(float(self.cfg.get("fps", 30.0)))
             self._fps_spin.valueChanged.connect(lambda v: self.changed.emit("fps", v))
             params.addWidget(self._fps_spin)
-        if self.stage["id"] == 5:
+        if self.stage["id"] == 3:
             params.addWidget(QLabel("min_cluster_size"))
             self._mcs = QSpinBox()
             self._mcs.setRange(10, 10000)
@@ -1712,10 +1817,9 @@ class StageRow(QFrame):
         params.addStretch()
         dl.addLayout(params)
 
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
+        self._log = _TerminalWidget(extra_clear=self._clear_log)
         self._log.setMinimumHeight(120)
-        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;")
+        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;font-size:11px;")
         dl.addWidget(self._log)
 
         acts = QHBoxLayout()
@@ -1725,13 +1829,37 @@ class StageRow(QFrame):
         self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
         acts.addWidget(self._run_btn)
         acts.addWidget(self._from_btn)
-        if self.stage["id"] == 5:
+        if self.stage["id"] == 3:
             diag_btn = QPushButton("Diagnose")
             diag_btn.clicked.connect(self.run_diagnose.emit)
+            _diag_hb = QToolButton()
+            _diag_hb.setText("?")
+            _diag_hb.setFixedSize(20, 20)
+            _diag_hb.setToolTip("Open Help: Diagnose Clustering Parameters")
+            _diag_hb.setCursor(Qt.PointingHandCursor)
+            _diag_hb.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _diag_hb.clicked.connect(lambda: self.navigate_help.emit("diagnose"))
             split_btn = QPushButton("Split Dominant State")
             split_btn.clicked.connect(lambda: self.run_subcluster.emit(self._dom_state_id))
+            _split_hb = QToolButton()
+            _split_hb.setText("?")
+            _split_hb.setFixedSize(20, 20)
+            _split_hb.setToolTip("Open Help: Split Dominant State")
+            _split_hb.setCursor(Qt.PointingHandCursor)
+            _split_hb.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _split_hb.clicked.connect(lambda: self.navigate_help.emit("split_dominant"))
             acts.addWidget(diag_btn)
+            acts.addWidget(_diag_hb)
             acts.addWidget(split_btn)
+            acts.addWidget(_split_hb)
         acts.addStretch()
         dl.addLayout(acts)
 
@@ -1778,6 +1906,10 @@ class StageRow(QFrame):
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _clear_log(self):
+        self.logs.clear()
+        self._log.clear()
+
     def set_enabled(self, enabled):
         self._run_btn.setEnabled(enabled)
         self._from_btn.setEnabled(enabled)
@@ -1788,6 +1920,7 @@ class RunPipelineView(QWidget):
     worker_running = pyqtSignal(bool)
     navigate_dlc = pyqtSignal()
     cluster_finished = pyqtSignal()
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
@@ -1809,14 +1942,29 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
+        self._expand_all_btn = QPushButton("Expand All")
+        self._expand_all_btn.setFixedHeight(28)
+        self._expand_all_btn.clicked.connect(lambda: self._set_all_expanded(True))
+        top.addWidget(self._expand_all_btn)
+        self._collapse_all_btn = QPushButton("Collapse All")
+        self._collapse_all_btn.setFixedHeight(28)
+        self._collapse_all_btn.clicked.connect(lambda: self._set_all_expanded(False))
+        top.addWidget(self._collapse_all_btn)
         self._dlc_btn = QPushButton("DLC Setup")
         self._dlc_btn.clicked.connect(self.navigate_dlc.emit)
         top.addWidget(self._dlc_btn)
         self._run_full = QPushButton("Run Full Pipeline")
         self._run_full.clicked.connect(self.run_full_pipeline)
         top.addWidget(self._run_full)
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setStyleSheet("background:#c62828;color:white;font-weight:bold;")
+        self._stop_btn.setFixedHeight(28)
+        self._stop_btn.clicked.connect(self._stop_pipeline)
+        self._stop_btn.setVisible(False)
+        top.addWidget(self._stop_btn)
         lay.addLayout(top)
 
+        # GPU badge — shown in header while Stage 0 row is hidden
         gpu_row = QHBoxLayout()
         self._gpu_badge = QLabel("Checking GPU...")
         self._gpu_badge.setStyleSheet("background:#f5f5f5;border:1px solid #ddd;border-radius:4px;padding:4px 10px;color:#555;")
@@ -1837,8 +1985,16 @@ class RunPipelineView(QWidget):
         holder = QWidget()
         v = QVBoxLayout(holder)
         for stage in STAGES:
+            if stage["id"] == 0:  # hidden — re-enable when Environment Setup is ready
+                continue
             row = StageRow(stage, self.cfg)
-            if stage["id"] == 1:
+            if stage["id"] == 0:
+                row.run_stage.connect(lambda _: self._open_wsl_setup())
+                row._run_btn.setText("Open Setup ▶")
+                row._from_btn.hide()
+                if self._venv_exists():
+                    row.set_status("done")
+            elif stage["id"] == 1:
                 row.run_stage.connect(lambda _: self.navigate_dlc.emit())
                 row._run_btn.setText("Open DLC Setup")
                 row._from_btn.hide()
@@ -1847,7 +2003,8 @@ class RunPipelineView(QWidget):
                 row.run_from_here.connect(self._run_from_here)
             row.mark_completed.connect(self._mark_completed)
             row.changed.connect(self._param_changed)
-            if stage["id"] == 5:
+            row.navigate_help.connect(self.navigate_help.emit)
+            if stage["id"] == 3:
                 row.run_diagnose.connect(self._run_diagnose)
                 row.run_subcluster.connect(self._run_subcluster)
             self._rows[stage["id"]] = row
@@ -1856,10 +2013,13 @@ class RunPipelineView(QWidget):
         scroll.setWidget(holder)
         lay.addWidget(scroll)
 
-        self._global_log = QTextEdit()
-        self._global_log.setReadOnly(True)
-        self._global_log.setMaximumHeight(180)
-        self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;")
+        log_label = QLabel("Pipeline Output")
+        log_label.setStyleSheet("font-weight:bold;color:#444;")
+        lay.addWidget(log_label)
+        self._global_log = _TerminalWidget()
+        self._global_log.setMinimumHeight(120)
+        self._global_log.setMaximumHeight(300)
+        self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;")
         lay.addWidget(self._global_log)
 
     def _probe_gpu_async(self):
@@ -1934,6 +2094,13 @@ class RunPipelineView(QWidget):
         else:
             self._gpu_badge.setText("Checking GPU...")
 
+    @staticmethod
+    def _venv_exists() -> bool:
+        venv = ROOT / "venv"
+        if sys.platform == "win32":
+            return (venv / "Scripts" / "python.exe").exists()
+        return (venv / "bin" / "python").exists()
+
     def _open_wsl_setup(self):
         if sys.platform == "win32":
             dlg = WslSetupDialog(self)
@@ -1954,7 +2121,7 @@ class RunPipelineView(QWidget):
         self.cfg.setdefault("stage_status", {})[key] = "done" if completed else "pending"
         if completed:
             self.cfg.setdefault("stage_last_run", {})[key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cfg["last_completed_stage"] = STAGES[sid - 1]["name"]
+            self.cfg["last_completed_stage"] = _STAGE_BY_ID[sid]["name"]
             self._rows[sid].set_status("done")
         else:
             self._rows[sid].set_status("pending")
@@ -1971,7 +2138,7 @@ class RunPipelineView(QWidget):
                 mins = max(5, int(n_videos * 0.4))
             elif sid == 2:
                 mins = max(2, int(n_frames / 120000))
-            elif sid in (3, 4, 5, 6):
+            elif sid == 3:
                 mins = max(5, int(n_frames / 90000))
             elif sid == 7:
                 mins = 2
@@ -1999,8 +2166,21 @@ class RunPipelineView(QWidget):
         for sid in self._active_stages:
             self._rows[sid].append_log(line)
 
+    def _set_all_expanded(self, expand: bool):
+        for row in self._rows.values():
+            row._expand.setChecked(expand)
+            row._toggle()
+
+    def _stop_pipeline(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+            self._status.setText("Stopping…")
+            self._stop_btn.setEnabled(False)
+
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)
+        self._stop_btn.setVisible(not enabled)
+        self._stop_btn.setEnabled(not enabled)
         for row in self._rows.values():
             row.set_enabled(enabled)
 
@@ -2026,22 +2206,26 @@ class RunPipelineView(QWidget):
         self.cfg.setdefault("stage_status", {})[key] = "done" if ok else "error"
         if ok:
             self.cfg.setdefault("stage_last_run", {})[key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cfg["last_completed_stage"] = STAGES[sid - 1]["name"]
+            self.cfg["last_completed_stage"] = _STAGE_BY_ID[sid]["name"]
         self._rows[sid].set_status("done" if ok else "error")
         self._rows[sid].set_last_run(self.cfg["stage_last_run"].get(key))
         _save_cfg(self.cfg)
-        if sid == 6 and ok:
+        if sid == 3 and ok:
             self.cluster_finished.emit()
 
     def _on_all_done(self, ok):
+        stopped = self._worker is not None and getattr(self._worker, "_stop_flag", False)
         self._set_buttons(True)
         self.worker_running.emit(False)
-        self._status.setText("Pipeline completed." if ok else "Pipeline failed.")
+        if stopped:
+            self._status.setText("Pipeline stopped.")
+        else:
+            self._status.setText("Pipeline completed." if ok else "Pipeline failed.")
         if ok:
             self.pipeline_done.emit()
 
     def update_cluster_quality(self, data: dict):
-        row = self._rows.get(5)
+        row = self._rows.get(3)
         ci = data.get("cluster_info")
         summary = data.get("summary")
         if row is None or ci is None or summary is None:
@@ -2110,12 +2294,6 @@ class RunPipelineView(QWidget):
 
     def _build_sequence(self, start_sid=1, from_here=False):
         all_ids = [s["id"] for s in STAGES if s["id"] >= start_sid] if from_here else [start_sid]
-        if not from_here and start_sid in (4, 5, 6):
-            all_ids = list(range(3, start_sid + 1))
-        if not from_here and start_sid == 3:
-            all_ids = [3]
-        if from_here and start_sid in (4, 5, 6):
-            all_ids = [3] + [s for s in range(7, 12)]
 
         if not self.cfg.get("enable_state_collapse", False):
             all_ids = [i for i in all_ids if i != 7]
@@ -2197,6 +2375,7 @@ class DLCSetupView(QWidget):
         path_row.addWidget(browse)
         pl.addLayout(path_row)
         self._project_status = QLabel("")
+        self._project_status.setWordWrap(True)
         pl.addWidget(self._project_status)
         lay.addWidget(project)
 
@@ -2211,21 +2390,23 @@ class DLCSetupView(QWidget):
 
         actions = QGroupBox("DLC Actions")
         al = QVBoxLayout(actions)
-        row = QHBoxLayout()
-        for label, slot in [
+        btn_grid = QGridLayout()
+        btn_grid.setSpacing(6)
+        for i, (label, slot) in enumerate([
             ("Extract Frames", lambda: self._run_dlc_subprocess(["-c", "import setup_dlc_training as s; s.extract_frames()"])),
             ("Open Labeling GUI", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--label"])),
             ("Train", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--train"])),
             ("Evaluate", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--evaluate"])),
             ("Run Pose Estimation", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--analyze"])),
-        ]:
+        ]):
             b = QPushButton(label)
+            b.setMinimumHeight(32)
             b.clicked.connect(slot)
-            row.addWidget(b)
-        al.addLayout(row)
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
+            btn_grid.addWidget(b, i // 3, i % 3)
+        al.addLayout(btn_grid)
+        self._log = _TerminalWidget()
         self._log.setMaximumHeight(220)
+        self._log.setMinimumHeight(80)
         self._log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;")
         al.addWidget(self._log)
         lay.addWidget(actions)
@@ -2772,6 +2953,7 @@ class BrowseStatesView(QWidget):
 
 class ValidationView(QWidget):
     navigate_to_pipeline = pyqtSignal()
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
@@ -2796,9 +2978,24 @@ class ValidationView(QWidget):
     def _build(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
+        _val_top = QHBoxLayout()
         title = QLabel("Validation")
         title.setFont(QFont("Arial", 18, QFont.Bold))
-        outer.addWidget(title)
+        _val_top.addWidget(title)
+        _val_hbtn = QPushButton("?")
+        _val_hbtn.setFixedSize(20, 20)
+        _val_hbtn.setFlat(True)
+        _val_hbtn.setToolTip("Open Help for Clip Reviewer")
+        _val_hbtn.setCursor(Qt.PointingHandCursor)
+        _val_hbtn.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _val_hbtn.clicked.connect(lambda: self.navigate_help.emit("clip_reviewer"))
+        _val_top.addWidget(_val_hbtn)
+        _val_top.addStretch()
+        outer.addLayout(_val_top)
 
         split = QHBoxLayout()
         outer.addLayout(split, stretch=1)
@@ -3689,15 +3886,31 @@ class QuantificationView(QWidget):
 
 class SettingsView(QWidget):
     settings_changed = pyqtSignal(dict)
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
+        _set_top = QHBoxLayout()
         t = QLabel("Settings")
         t.setFont(QFont("Arial", 18, QFont.Bold))
-        lay.addWidget(t)
+        _set_top.addWidget(t)
+        _set_hbtn = QPushButton("?")
+        _set_hbtn.setFixedSize(20, 20)
+        _set_hbtn.setFlat(True)
+        _set_hbtn.setToolTip("Open Help for Settings")
+        _set_hbtn.setCursor(Qt.PointingHandCursor)
+        _set_hbtn.setStyleSheet(
+            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+        )
+        _set_hbtn.clicked.connect(lambda: self.navigate_help.emit("settings"))
+        _set_top.addWidget(_set_hbtn)
+        _set_top.addStretch()
+        lay.addLayout(_set_top)
         form = QGridLayout()
         r = 0
 
@@ -4058,7 +4271,7 @@ class MainWindow(QMainWindow):
             "font-size:16px;font-weight:600;letter-spacing:2px;color:#1A1A1A;"
             "background:transparent;border:none;"
         )
-        ver = QLabel("v0.9")
+        ver = QLabel("v1.0")
         ver.setStyleSheet(
             "font-family:'Consolas','IBM Plex Mono',monospace;"
             "font-size:10px;color:#9B9B9B;background:transparent;border:none;"
@@ -4153,6 +4366,7 @@ class MainWindow(QMainWindow):
         self._ov.export_requested.connect(self._show_export_dialog)
         self._ov.load_previous_requested.connect(self._load_session)
         self._ov.cohort_path_changed.connect(self._on_cohort_path_changed)
+        self._ov.navigate_help.connect(self._navigate_to_help)
         add("Overview", self._ov)
 
         self._dlc = DLCSetupView(self.cfg)
@@ -4165,6 +4379,7 @@ class MainWindow(QMainWindow):
         self._pv.worker_running.connect(self._set_running)
         self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
         self._pv.cluster_finished.connect(self._show_cluster_runs)
+        self._pv.navigate_help.connect(self._navigate_to_help)
         add("Pipeline", self._pv)
 
         if _HAS_CLUSTER_RUNS_VIEW:
@@ -4187,6 +4402,7 @@ class MainWindow(QMainWindow):
 
         self._vv = ValidationView(self.cfg)
         self._vv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
+        self._vv.navigate_help.connect(self._navigate_to_help)
         add("Validation", self._vv)
 
         self._qv = QuantificationView(self.cfg)
@@ -4194,7 +4410,11 @@ class MainWindow(QMainWindow):
 
         self._setv = SettingsView(self.cfg)
         self._setv.settings_changed.connect(self._settings_changed)
+        self._setv.navigate_help.connect(self._navigate_to_help)
         add("Settings", self._setv)
+
+        self._hv = HelpView()
+        add("Help", self._hv)
 
         self._build_status_bar()
         self._switch(self.cfg.get("last_view", "Overview"))
@@ -4335,6 +4555,10 @@ class MainWindow(QMainWindow):
             b.setChecked(n == name)
         self._stack.setCurrentWidget(self._views[name])
         self.cfg["last_view"] = name
+
+    def _navigate_to_help(self, section_id: str):
+        self._switch("Help")
+        self._hv.scroll_to_section(section_id)
 
     # ── File watcher — auto-refresh when pipeline writes new results ──────────
 

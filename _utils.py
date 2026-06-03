@@ -191,6 +191,12 @@ def _wsl_elevate_install(extra_args: str = "") -> None:
 
 STAGES = [
     {
+        "id": 0,
+        "name": "Environment Setup",
+        "desc": "Create the Python virtual environment and configure GPU acceleration (optional).",
+        "cmd": "python setup.py",
+    },
+    {
         "id": 1,
         "name": "Pose Estimation (DLC)",
         "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
@@ -252,9 +258,9 @@ STAGES = [
     },
     {
         "id": 11,
-        "name": "Characterization + Clip Export",
-        "desc": "Generate behavior profiles and optionally export exemplar clips.",
-        "cmd": "python characterize.py [--clips]",
+        "name": "Generate Clips",
+        "desc": "Export exemplar video clips for each behavioral state.",
+        "cmd": "python generate_clips.py",
     },
     {
         "id": 12,
@@ -294,6 +300,8 @@ _DEFAULT_CFG = {
         "cohort":     "",
         "event":      "",
     },
+    "reviewer_categories": [],
+    "reviewer_seed": 0,
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -417,7 +425,7 @@ def _derive_stage_statuses(data: dict) -> dict:
         "8":  _s(data.get("summary") is not None),
         "9":  _s(data.get("animal_scalars") is not None),
         "10": _s(data.get("motifs") is not None),
-        "11": _s(data.get("state_summary") is not None),
+        "11": _s(CLIPS.exists() and any(CLIPS.iterdir())),
         "12": _s((RESULTS / "quantification" / "peri_event_profiles.csv").exists()),
     }
 

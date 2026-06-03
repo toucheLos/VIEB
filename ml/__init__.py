@@ -12,7 +12,6 @@ Main components:
 from .feature_extraction import PoseFeatureExtractor
 from .preprocessing import BehaviorPreprocessor
 from .clustering import BehaviorClusterer
-from .anomaly_detection import AnomalyDetector
 from .analysis import BehaviorAnalyzer
 
 __all__ = [

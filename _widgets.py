@@ -319,6 +319,22 @@ class _Card(QFrame):
         self._value.setText(str(value))
 
 
+_STAGE_HELP: dict[int, str] = {
+    1:  "stage_1_dlc",
+    2:  "stage_2_features",
+    3:  "stage_3_clustering",
+    4:  "stage_3_clustering",
+    5:  "stage_3_clustering",
+    6:  "stage_3_clustering",
+    7:  "stage_4_collapse",
+    8:  "stage_5_comparison",
+    9:  "stage_5_comparison",
+    10: "stage_5_comparison",
+    11: "stage_6_clips",
+    12: "stage_5_comparison",
+}
+
+
 class StageRow(QFrame):
     run_stage = pyqtSignal(int)
     run_from_here = pyqtSignal(int)
@@ -326,6 +342,7 @@ class StageRow(QFrame):
     changed = pyqtSignal(str, object)
     run_diagnose = pyqtSignal()
     run_subcluster = pyqtSignal(int)   # payload: dominant state id
+    navigate_help = pyqtSignal(str)
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -348,6 +365,20 @@ class StageRow(QFrame):
         name.setFont(QFont("Arial", 11, QFont.Bold))
         top.addWidget(name)
         top.addStretch()
+        _help_anchor = _STAGE_HELP.get(self.stage["id"])
+        if _help_anchor:
+            _hb = QToolButton()
+            _hb.setText("?")
+            _hb.setFixedSize(20, 20)
+            _hb.setToolTip("Open Help for this stage")
+            _hb.setCursor(Qt.PointingHandCursor)
+            _hb.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _hb.clicked.connect(lambda _, a=_help_anchor: self.navigate_help.emit(a))
+            top.addWidget(_hb)
         self._ts = QLabel("Last run: -")
         self._eta = QLabel("ETA: -")
         top.addWidget(self._ts)
@@ -425,8 +456,32 @@ class StageRow(QFrame):
                 lambda: self.run_subcluster.emit(self._dom_state_id)
             )
             self._fix_btn.hide()
+            _diag_help = QToolButton()
+            _diag_help.setText("?")
+            _diag_help.setFixedSize(20, 20)
+            _diag_help.setToolTip("Open Help: Diagnose Clustering Parameters")
+            _diag_help.setCursor(Qt.PointingHandCursor)
+            _diag_help.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _diag_help.clicked.connect(lambda: self.navigate_help.emit("diagnose"))
+            _fix_help = QToolButton()
+            _fix_help.setText("?")
+            _fix_help.setFixedSize(20, 20)
+            _fix_help.setToolTip("Open Help: Split Dominant State")
+            _fix_help.setCursor(Qt.PointingHandCursor)
+            _fix_help.setStyleSheet(
+                "QToolButton{border:1px solid #aaa;border-radius:10px;color:#555;"
+                "background:#f5f5f5;font-size:10px;font-weight:bold;}"
+                "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
+            )
+            _fix_help.clicked.connect(lambda: self.navigate_help.emit("split_dominant"))
             params.addWidget(self._diagnose_btn)
+            params.addWidget(_diag_help)
             params.addWidget(self._fix_btn)
+            params.addWidget(_fix_help)
         params.addStretch()
         dl.addLayout(params)
 
