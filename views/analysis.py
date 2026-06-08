@@ -906,7 +906,7 @@ class AnalysisView(QWidget):
         for _, row in ss.iterrows():
             sid = int(row.get(id_col, -1))
             label = str(row.get("heuristic_label", f"State {sid}"))
-            speed = row.get("mean_speed", None)
+            speed = row.get("mean_centroid_speed", None)
             enrich = ctx_enrich.get(sid, "")
             speed_str = (
                 f"  spd={speed:.3f}" if speed is not None and not pd.isna(speed) else ""
@@ -948,10 +948,10 @@ class AnalysisView(QWidget):
             ax = canvas.fig.add_subplot(111)
             metrics = {}
             for display, col in [
-                ("Mean Speed", "mean_speed"),
-                ("Angular Vel.", "mean_angular_velocity"),
-                ("Bout Duration", "mean_bout_duration"),
-                ("Rearing Score", "rearing_score"),
+                ("Mean Speed", "mean_centroid_speed"),
+                ("Angular Vel.", "mean_angular_vel"),
+                ("Bout Duration", "mean_bout_dur_sec"),
+                ("Elongation", "mean_elongation"),
             ]:
                 v = r.get(col, None)
                 if v is not None and not pd.isna(v):

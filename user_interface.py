@@ -945,7 +945,7 @@ class ClipGenerationWorker(QThread):
         ok = False
         try:
             sys.path.insert(0, str(ROOT))
-            from characterize import cmd_clips
+            from generate_clips import cmd_clips
 
             cmd_clips(fps=float(self.cfg.get("fps", 30)))
             ok = True
