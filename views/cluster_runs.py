@@ -8,7 +8,7 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -53,6 +53,7 @@ class _RunCard(QFrame):
     save_requested = pyqtSignal()
     delete_requested = pyqtSignal()
     activate_requested = pyqtSignal()
+    rename_requested = pyqtSignal()
 
     def __init__(self, manifest: dict, is_current: bool = False, parent=None):
         super().__init__(parent)
@@ -108,6 +109,11 @@ class _RunCard(QFrame):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
+        _btn_style = (
+            "QPushButton{border:1px solid #bbb;border-radius:4px;padding:0 12px;background:#f5f5f5;}"
+            "QPushButton:hover{background:#e0e0e0;}"
+        )
+
         if self.is_current:
             save_btn = QPushButton("Save")
             save_btn.setFixedHeight(26)
@@ -119,6 +125,12 @@ class _RunCard(QFrame):
             save_btn.setEnabled(not saved)
             save_btn.clicked.connect(self.save_requested.emit)
             btn_row.addWidget(save_btn)
+
+            rename_btn = QPushButton("Rename")
+            rename_btn.setFixedHeight(26)
+            rename_btn.setStyleSheet(_btn_style)
+            rename_btn.clicked.connect(self.rename_requested.emit)
+            btn_row.addWidget(rename_btn)
 
             del_btn = QPushButton("Delete")
             del_btn.setFixedHeight(26)
@@ -137,6 +149,12 @@ class _RunCard(QFrame):
             )
             act_btn.clicked.connect(self.activate_requested.emit)
             btn_row.addWidget(act_btn)
+
+            rename_btn = QPushButton("Rename")
+            rename_btn.setFixedHeight(26)
+            rename_btn.setStyleSheet(_btn_style)
+            rename_btn.clicked.connect(self.rename_requested.emit)
+            btn_row.addWidget(rename_btn)
 
             del_btn = QPushButton("Delete")
             del_btn.setFixedHeight(26)
@@ -157,6 +175,8 @@ class _RunCard(QFrame):
 
 class ClusterRunsView(QWidget):
     """View for browsing, saving, and restoring versioned cluster runs."""
+
+    run_activated = pyqtSignal()
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -244,6 +264,7 @@ class ClusterRunsView(QWidget):
         card = _RunCard(manifest, is_current=True)
         card.save_requested.connect(self._save_current_run)
         card.delete_requested.connect(self._delete_current_run)
+        card.rename_requested.connect(self._rename_current_run)
         lay.addWidget(card)
 
     # ------------------------------------------------------------------
@@ -279,6 +300,7 @@ class ClusterRunsView(QWidget):
             card = _RunCard(manifest, is_current=False)
             card.activate_requested.connect(lambda _rn=run_name: self._activate_run(_rn))
             card.delete_requested.connect(lambda _rn=run_name: self._delete_saved_run(_rn))
+            card.rename_requested.connect(lambda _rn=run_name: self._rename_saved_run(_rn))
             vl.insertWidget(vl.count() - 1, card)
 
     # ------------------------------------------------------------------
@@ -372,6 +394,92 @@ class ClusterRunsView(QWidget):
         self.cfg["current_run_id"] = run_id
         self.cfg["current_run_saved"] = True
         _save_cfg(self.cfg)
+
+        self.refresh()
+        self.run_activated.emit()
+
+    def _rename_current_run(self):
+        manifest_path = _shared_dir() / "run_manifest.json"
+        if not manifest_path.exists():
+            return
+        manifest = _load_manifest(manifest_path)
+        if manifest is None:
+            return
+
+        old_id = manifest.get("run_id", "")
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Run", "New name:", text=old_id
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if new_name == old_id:
+            return
+
+        runs_dir = _runs_dir()
+        if (runs_dir / new_name).exists():
+            QMessageBox.warning(self, "Name Taken", f"A saved run named '{new_name}' already exists.")
+            return
+
+        manifest["run_id"] = new_name
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        # If there's a saved copy under the old name, rename that directory too
+        old_dir = runs_dir / old_id
+        if old_dir.is_dir():
+            new_dir = runs_dir / new_name
+            old_dir.rename(new_dir)
+            saved_manifest_path = new_dir / "run_manifest.json"
+            saved_manifest = _load_manifest(saved_manifest_path)
+            if saved_manifest is not None:
+                saved_manifest["run_id"] = new_name
+                saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+
+        if self.cfg.get("current_run_id") == old_id:
+            self.cfg["current_run_id"] = new_name
+            _save_cfg(self.cfg)
+
+        self.refresh()
+
+    def _rename_saved_run(self, run_name: str):
+        runs_dir = _runs_dir()
+        run_dir = runs_dir / run_name
+        if not run_dir.is_dir():
+            QMessageBox.warning(self, "Not Found", f"Run directory not found: {run_name}")
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Run", "New name:", text=run_name
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if new_name == run_name:
+            return
+
+        if (runs_dir / new_name).exists():
+            QMessageBox.warning(self, "Name Taken", f"A run named '{new_name}' already exists.")
+            return
+
+        new_dir = runs_dir / new_name
+        run_dir.rename(new_dir)
+
+        saved_manifest_path = new_dir / "run_manifest.json"
+        saved_manifest = _load_manifest(saved_manifest_path)
+        if saved_manifest is not None:
+            saved_manifest["run_id"] = new_name
+            saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+
+        # Update current run manifest and cfg if this was the active run
+        current_manifest_path = _shared_dir() / "run_manifest.json"
+        current_manifest = _load_manifest(current_manifest_path)
+        if current_manifest and current_manifest.get("run_id") == run_name:
+            current_manifest["run_id"] = new_name
+            current_manifest_path.write_text(json.dumps(current_manifest, indent=2), encoding="utf-8")
+
+        if self.cfg.get("current_run_id") == run_name:
+            self.cfg["current_run_id"] = new_name
+            _save_cfg(self.cfg)
 
         self.refresh()
 

@@ -357,6 +357,27 @@ class AnalysisView(QWidget):
         self._t2_search.setPlaceholderText("Search states…")
         self._t2_search.textChanged.connect(self._on_t2_search)
         ll.addWidget(self._t2_search)
+
+        sort_row = QHBoxLayout()
+        sort_row.setSpacing(4)
+        sort_lbl = QLabel("Sort:")
+        sort_lbl.setStyleSheet("font-size:11px; color:#666;")
+        sort_row.addWidget(sort_lbl)
+        self._t2_sort_combo = QComboBox()
+        self._t2_sort_combo.addItems(["State ID", "Speed", "Elongation", "Bout Duration", "Angular Velocity"])
+        self._t2_sort_combo.setStyleSheet("font-size:11px;")
+        self._t2_sort_combo.currentIndexChanged.connect(self._on_t2_sort_changed)
+        sort_row.addWidget(self._t2_sort_combo, stretch=1)
+        self._t2_sort_asc = QToolButton()
+        self._t2_sort_asc.setText("↑")
+        self._t2_sort_asc.setCheckable(True)
+        self._t2_sort_asc.setChecked(True)
+        self._t2_sort_asc.setToolTip("Toggle ascending / descending")
+        self._t2_sort_asc.setFixedWidth(26)
+        self._t2_sort_asc.toggled.connect(self._on_t2_sort_changed)
+        sort_row.addWidget(self._t2_sort_asc)
+        ll.addLayout(sort_row)
+
         self._t2_state_list = QListWidget()
         self._t2_state_list.currentRowChanged.connect(self._on_t2_state_selected)
         ll.addWidget(self._t2_state_list, stretch=1)
@@ -610,10 +631,10 @@ class AnalysisView(QWidget):
             self._t5_cohort_canvas = None
             cl.addWidget(_placeholder("Install matplotlib to view charts."))
 
-        cl.addWidget(_section_title("Cohort Comparison Statistics"))
-        self._t5_stats_table = QTableWidget(0, 7)
+        cl.addWidget(_section_title("Cohort Summary"))
+        self._t5_stats_table = QTableWidget(0, 5)
         self._t5_stats_table.setHorizontalHeaderLabels(
-            ["Cohort A", "Cohort B", "Mean A", "Mean B", "Effect r", "p FDR", "Sig"]
+            ["Cohort", "N Animals", "Mean Fear Index", "CI Low", "CI High"]
         )
         self._t5_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._t5_stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -748,12 +769,12 @@ class AnalysisView(QWidget):
     # ────────────────────────────────────────────────── Data loading ──
 
     def update_data(self, data: dict) -> None:
-        # Only mark dirty (and re-render current tab) when data actually changes.
         if data is not self._data:
             self._data = data
-            self._mark_all_dirty()
-            # Render the currently visible tab immediately; others wait.
-            self._load_current_tab()
+            loaders = self._get_loaders()
+            for i, loader in enumerate(loaders):
+                loader()
+                self._tab_dirty[i] = False
 
     # ─────────────────────── Tab 1 loader ──
 
@@ -903,7 +924,39 @@ class AnalysisView(QWidget):
                 if enrich and enrich != "nan":
                     ctx_enrich[sid] = enrich
 
-        for _, row in ss.iterrows():
+        self._t2_id_col = id_col
+        self._t2_ctx_enrich = ctx_enrich
+        self._populate_t2_list()
+
+    _T2_SORT_COLS = [
+        None,                    # State ID
+        "mean_centroid_speed",   # Speed
+        "mean_elongation",       # Elongation
+        "mean_bout_dur_sec",     # Bout Duration
+        "mean_angular_vel",      # Angular Velocity
+    ]
+
+    def _populate_t2_list(self) -> None:
+        ss = self._data.get("state_summary")
+        if ss is None or ss.empty:
+            return
+        id_col = getattr(self, "_t2_id_col", None)
+        if id_col is None:
+            return
+        ctx_enrich = getattr(self, "_t2_ctx_enrich", {})
+
+        sort_idx = self._t2_sort_combo.currentIndex()
+        sort_col = self._T2_SORT_COLS[sort_idx]
+        ascending = self._t2_sort_asc.isChecked()
+
+        if sort_col and sort_col in ss.columns:
+            df = ss.sort_values(sort_col, ascending=ascending, na_position="last")
+        else:
+            df = ss.sort_values(id_col, ascending=ascending)
+
+        self._t2_state_list.clear()
+        self._t2_state_ids = []
+        for _, row in df.iterrows():
             sid = int(row.get(id_col, -1))
             label = str(row.get("heuristic_label", f"State {sid}"))
             speed = row.get("mean_centroid_speed", None)
@@ -914,6 +967,10 @@ class AnalysisView(QWidget):
             badge = f"  [{enrich}]" if enrich else ""
             self._t2_state_list.addItem(f"S{sid}: {label}{speed_str}{badge}")
             self._t2_state_ids.append(sid)
+
+    def _on_t2_sort_changed(self, _=None) -> None:
+        self._t2_sort_asc.setText("↑" if self._t2_sort_asc.isChecked() else "↓")
+        self._populate_t2_list()
 
     def _on_t2_search(self, text: str) -> None:
         for i in range(self._t2_state_list.count()):
@@ -1044,7 +1101,11 @@ class AnalysisView(QWidget):
     def _cohort_cmd(self) -> list[str]:
         gb = self._t3_groupby.currentText()
         cohort_p = self.cfg.get("cohort_csv_path", "") or "cohort_normalized.csv"
-        return ["cohort_analysis.py", "--groupby", gb, "--cohort", cohort_p]
+        cmd = ["cohort_analysis.py", "--groupby", gb, "--cohort", cohort_p]
+        out_dir = self.cfg.get("cohort_output_dir", "").strip()
+        if out_dir:
+            cmd += ["--output", out_dir]
+        return cmd
 
     def _change_cohort_file(self) -> None:
         p, _ = QFileDialog.getOpenFileName(
@@ -1102,7 +1163,8 @@ class AnalysisView(QWidget):
             return
 
         # — Plot 1: cohort state profiles PNG (from cohort_analysis.py) —
-        cohort_dir = RESULTS / "cohort"
+        _out = self.cfg.get("cohort_output_dir", "").strip()
+        cohort_dir = Path(_out) if _out else RESULTS / "cohort"
         profiles_png = cohort_dir / "cohort_state_profiles.png"
         if profiles_png.exists() and self._t3_profiles_canvas:
             try:
@@ -1374,47 +1436,72 @@ class AnalysisView(QWidget):
         canvas1.fig.tight_layout()
         canvas1.draw()
 
-        # Plot 2: bar + points per cohort
+        # Plot 2: Mean Fear Index by Cohort (from cohort_fear_profiles.csv)
+        profiles_p = RESULTS / "quantification" / "cohort_fear_profiles.csv"
+        profiles_df = None
+        if profiles_p.exists():
+            try:
+                profiles_df = pd.read_csv(profiles_p)
+            except Exception:
+                pass
+
         canvas2 = self._t5_cohort_canvas
         canvas2.show()
         canvas2.fig.clf()
         ax2 = canvas2.fig.add_subplot(111)
-        if cohort_col and "fear_index" in df.columns:
-            groups_list2 = sorted(df[cohort_col].unique())
-            for gi, grp in enumerate(groups_list2):
-                sub = df[df[cohort_col] == grp]["fear_index"].dropna()
-                color = COHORT_COLORS[gi % len(COHORT_COLORS)]
-                ax2.bar(gi, sub.mean(), color=color, alpha=0.85,
-                        yerr=sub.sem(), capsize=4)
-                for v in sub:
-                    ax2.scatter(gi, v, color="#555", s=18, zorder=5, alpha=0.6)
-            ax2.set_xticks(range(len(groups_list2)))
-            ax2.set_xticklabels([str(g) for g in groups_list2], fontsize=9)
-            ax2.axhline(0, color="#999", linewidth=0.8)
-            ax2.set_ylabel(f"Mean {self._metric_label}")
+        if profiles_df is not None and not profiles_df.empty:
+            cohort_col2 = next(
+                (c for c in ("cohort_label", "cohort", "group", "treatment")
+                 if c in profiles_df.columns), None
+            )
+            if cohort_col2 and "mean_fear_index" in profiles_df.columns:
+                groups = profiles_df[cohort_col2].tolist()
+                means = profiles_df["mean_fear_index"].tolist()
+                ci_lo = profiles_df.get("fear_index_ci_lo", pd.Series([None] * len(groups))).tolist()
+                ci_hi = profiles_df.get("fear_index_ci_hi", pd.Series([None] * len(groups))).tolist()
+                for gi, (grp, mean) in enumerate(zip(groups, means)):
+                    color = COHORT_COLORS[gi % len(COHORT_COLORS)]
+                    yerr_lo = (mean - ci_lo[gi]) if ci_lo[gi] is not None and not pd.isna(ci_lo[gi]) else 0
+                    yerr_hi = (ci_hi[gi] - mean) if ci_hi[gi] is not None and not pd.isna(ci_hi[gi]) else 0
+                    ax2.bar(gi, mean, color=color, alpha=0.85,
+                            yerr=[[yerr_lo], [yerr_hi]], capsize=4, error_kw={"elinewidth": 1.5})
+                    # overlay individual animal points from fear_index.csv if cohort col present
+                    if cohort_col and cohort_col in df.columns and str(grp) in df[cohort_col].astype(str).values:
+                        sub = df[df[cohort_col].astype(str) == str(grp)]["fear_index"].dropna()
+                        for v in sub:
+                            ax2.scatter(gi, v, color="#555", s=18, zorder=5, alpha=0.6)
+                ax2.set_xticks(range(len(groups)))
+                ax2.set_xticklabels([str(g) for g in groups], fontsize=9)
+                ax2.axhline(0, color="#999", linewidth=0.8)
+                ax2.set_ylabel(f"Mean {self._metric_label}")
+            else:
+                ax2.text(0.5, 0.5, "Missing cohort_label or mean_fear_index columns",
+                         ha="center", va="center", transform=ax2.transAxes, color="#999")
+        else:
+            ax2.text(0.5, 0.5, "Run fear_index.py to generate cohort profiles",
+                     ha="center", va="center", transform=ax2.transAxes, color="#999")
         ax2.spines["top"].set_visible(False)
         ax2.spines["right"].set_visible(False)
         ax2.yaxis.grid(True, color="#EEEEEE", zorder=0)
         canvas2.fig.tight_layout()
         canvas2.draw()
 
-        # Stats table
-        stats_p = RESULTS / "quantification" / "cohort_fear_stats.csv"
-        if stats_p.exists():
-            try:
-                stats = pd.read_csv(stats_p)
-                cols = ["cohort_A", "cohort_B", "mean_A", "mean_B",
-                        "effect_r", "p_fdr", "significant"]
-                self._t5_stats_table.setRowCount(len(stats))
-                for ri, row in stats.reset_index(drop=True).iterrows():
-                    for ci, col in enumerate(cols):
-                        v = row.get(col, "")
-                        self._t5_stats_table.setItem(
-                            ri, ci,
-                            QTableWidgetItem(f"{v:.4f}" if isinstance(v, float) else str(v))
-                        )
-            except Exception:
-                pass
+        # Cohort summary table (from cohort_fear_profiles.csv)
+        if profiles_df is not None and not profiles_df.empty:
+            cohort_col2 = next(
+                (c for c in ("cohort_label", "cohort", "group", "treatment")
+                 if c in profiles_df.columns), None
+            )
+            cols = [cohort_col2 or profiles_df.columns[0],
+                    "n_animals", "mean_fear_index", "fear_index_ci_lo", "fear_index_ci_hi"]
+            display_rows = profiles_df[[c for c in cols if c in profiles_df.columns]]
+            self._t5_stats_table.setRowCount(len(display_rows))
+            for ri, row in display_rows.reset_index(drop=True).iterrows():
+                for ci, val in enumerate(row):
+                    self._t5_stats_table.setItem(
+                        ri, ci,
+                        QTableWidgetItem(f"{val:.4f}" if isinstance(val, float) else str(val))
+                    )
 
     # ─────────────────────── Tab 6 loader + helpers ──
 
@@ -1722,6 +1809,10 @@ class AnalysisView(QWidget):
         self._worker.done.connect(self._on_run_done)
         self.worker_running.emit(True)
         self._worker.start()
+
+    def stop_worker(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
 
     def _on_run_done(self, ok: bool) -> None:
         self.worker_running.emit(False)

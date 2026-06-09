@@ -4394,6 +4394,7 @@ class MainWindow(QMainWindow):
 
         if _HAS_CLUSTER_RUNS_VIEW:
             self._crv = _ClusterRunsView(self.cfg)
+            self._crv.run_activated.connect(self._manual_reload)
             add("Cluster Runs", self._crv)
         else:
             self._crv = None
