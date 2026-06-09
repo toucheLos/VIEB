@@ -433,6 +433,7 @@ _DEFAULT_CFG = {
     "context_groups": "A,B,C",
     "context_descriptions": {},
     "cohort_csv_path": "",
+    "cohort_output_dir": "",
     "metadata_csv_path": "",
     "hdbscan_min_samples": 0,
     "umap_dims": 10,
@@ -908,6 +909,11 @@ class SubprocessWorker(QThread):
     def __init__(self, args: list[str]):
         super().__init__()
         self.args = args
+        self._proc = None
+
+    def stop(self):
+        if self._proc:
+            self._proc.terminate()
 
     def run(self):
         try:
@@ -920,6 +926,7 @@ class SubprocessWorker(QThread):
                 encoding="utf-8",
                 errors="replace",
             )
+            self._proc = p
             assert p.stdout is not None
             for line in p.stdout:
                 self.log.emit(line)
@@ -2199,7 +2206,7 @@ class RunPipelineView(QWidget):
 
     def _on_stage_started(self, sid):
         self._rows[sid].set_status("running")
-        self._status.setText(f"Running stage {sid}: {STAGES[sid - 1]['name']}")
+        self._status.setText(f"Running stage {sid}: {_STAGE_BY_ID[sid]['name']}")
 
     def _on_stage_done(self, sid, ok):
         key = _state_key(sid)
@@ -3957,6 +3964,8 @@ class SettingsView(QWidget):
         form.addLayout(meta_h, r, 1)
         r += 1
 
+        self._cohort_out = dir_row("Cohort output directory", "cohort_output_dir")
+
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row("Context groups (comma-separated)", self._ctx_groups)
         self._fps = QSpinBox()
@@ -4013,6 +4022,7 @@ class SettingsView(QWidget):
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["metadata_csv_path"] = self._meta_le.text()
+        self.cfg["cohort_output_dir"] = self._cohort_out.text()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
         self.cfg["fps"] = self._fps.value()
         self.cfg["umap_dims"] = self._umap_dims.value()
@@ -4449,10 +4459,23 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._make_sb_sep())
         sb.addWidget(self._sb_noise)
 
+        self._sb_stop = QPushButton("■")
+        self._sb_stop.setFixedSize(18, 18)
+        self._sb_stop.setToolTip("Stop running process")
+        self._sb_stop.setStyleSheet(
+            "QPushButton{border:none;background:transparent;color:#c62828;"
+            "font-size:10px;padding:0;}"
+            "QPushButton:hover{color:#e53935;}"
+        )
+        self._sb_stop.setCursor(Qt.PointingHandCursor)
+        self._sb_stop.setVisible(False)
+        self._sb_stop.clicked.connect(self._stop_all)
+
         # Right section
         sb.addPermanentWidget(self._sb_stage)
         sb.addPermanentWidget(self._make_sb_sep())
         sb.addPermanentWidget(self._sb_dot)
+        sb.addPermanentWidget(self._sb_stop)
 
     def _make_sb_sep(self) -> QLabel:
         sep = QLabel("·")
@@ -4487,11 +4510,22 @@ class MainWindow(QMainWindow):
 
     def _sync_running(self):
         self._running = self._pipeline_running or self._clip_running
+        self._sb_stop.setVisible(self._running)
+        self._sb_stop.setEnabled(self._running)
         if self._running:
             self._pulse_timer.start(300)
         else:
             self._pulse_timer.stop()
             self._sb_dot.setStyleSheet("color:#999;")
+
+    def _stop_all(self):
+        if hasattr(self._pv, '_stop_pipeline'):
+            self._pv._stop_pipeline()
+        if hasattr(self._av, 'stop_worker'):
+            self._av.stop_worker()
+        if self._clip_worker and self._clip_worker.isRunning():
+            self._clip_worker.terminate()
+        self._sb_stop.setEnabled(False)
 
     def _start_background_clip_generation(self, _sid: int):
         if self._clip_worker and self._clip_worker.isRunning():

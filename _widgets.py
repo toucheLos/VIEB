@@ -487,8 +487,8 @@ class StageRow(QFrame):
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMinimumHeight(120)
-        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;")
+        self._log.setFixedHeight(46)
+        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;font-size:11px;")
         dl.addWidget(self._log)
 
         acts = QHBoxLayout()

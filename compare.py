@@ -1076,8 +1076,21 @@ def cmd_collapse(threshold: float = 0.5):
             manifest = json.load(f)
         manifest["n_clusters"] = n_new
         manifest["collapse_threshold"] = threshold
+        manifest["saved"] = False
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
+
+    # Mark the run as unsaved: the saved snapshot (if any) no longer matches shared/
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg_data = json.load(f)
+            cfg_data["current_run_saved"] = False
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg_data, f, indent=2)
+        except Exception:
+            pass
 
     print(f"\nUpdated results/shared/cluster_info.json  ({n_clusters} → {n_new} states)")
     print("All _labels.npy files remapped in-place.")
