@@ -1281,6 +1281,77 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     df.to_csv(os.path.join(_res(), "comparison", "summary_table.csv"), index=False)
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
 
+    # ---- Characterization: bouts.csv + state_summary.csv ----
+    char_dir = os.path.join(_res(), "characterization")
+    os.makedirs(char_dir, exist_ok=True)
+    all_bouts = []
+    meta_cols = [c for c in ["context", "animal_id", "day", "experiment"] if c in df.columns]
+    for stem, row_df in df.groupby("stem"):
+        labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
+        if not os.path.exists(labels_path):
+            continue
+        lbl = np.load(labels_path)
+        meta_r = {c: row_df[c].iloc[0] for c in meta_cols}
+        i = 0
+        while i < len(lbl):
+            if lbl[i] < 0:
+                i += 1
+                continue
+            s = int(lbl[i])
+            j = i
+            while j < len(lbl) and lbl[j] == s:
+                j += 1
+            all_bouts.append({
+                "stem": stem, "state": s,
+                "start_frame": i, "end_frame": j - 1,
+                "start_sec": i / fps, "end_sec": (j - 1) / fps,
+                "duration_sec": (j - i) / fps,
+                **meta_r,
+            })
+            i = j
+    bouts_df = pd.DataFrame(all_bouts) if all_bouts else pd.DataFrame(
+        columns=["stem", "state", "start_frame", "end_frame",
+                 "start_sec", "end_sec", "duration_sec"] + meta_cols
+    )
+    bouts_df.to_csv(os.path.join(char_dir, "bouts.csv"), index=False)
+    print(f"Bouts saved: results/characterization/bouts.csv  ({len(bouts_df)} bouts)")
+
+    # Preserve existing heuristic_labels if cluster size unchanged
+    existing_labels = {}
+    ss_path = os.path.join(char_dir, "state_summary.csv")
+    if os.path.exists(ss_path):
+        try:
+            old_ss = pd.read_csv(ss_path)
+            _id = next((c for c in ("state", "state_id", "cluster_id") if c in old_ss.columns), None)
+            if _id and len(old_ss) == n_clusters and "heuristic_label" in old_ss.columns:
+                existing_labels = dict(zip(old_ss[_id].astype(int), old_ss["heuristic_label"]))
+        except Exception:
+            pass
+
+    # Per-state context fractions from summary_table
+    ctx_fracs: dict[int, dict[str, float]] = {}
+    if "context" in df.columns:
+        for ctx, grp in df.groupby("context"):
+            for k in range(n_clusters):
+                col = f"state_{k}_frac"
+                if col in grp.columns:
+                    ctx_fracs.setdefault(k, {})[str(ctx)] = float(grp[col].mean())
+
+    ss_rows = []
+    for k in range(n_clusters):
+        grp_b = bouts_df[bouts_df["state"] == k] if not bouts_df.empty else pd.DataFrame()
+        row_s = {
+            "state": k,
+            "heuristic_label": existing_labels.get(k, f"State {k}"),
+            "mean_bout_dur_sec": float(grp_b["duration_sec"].mean()) if not grp_b.empty else float("nan"),
+            "median_bout_dur_sec": float(grp_b["duration_sec"].median()) if not grp_b.empty else float("nan"),
+            "n_bouts": len(grp_b),
+        }
+        row_s.update({f"context_{ctx}_frac": v for ctx, v in ctx_fracs.get(k, {}).items()})
+        ss_rows.append(row_s)
+    pd.DataFrame(ss_rows).to_csv(ss_path, index=False)
+    print(f"State summary saved: results/characterization/state_summary.csv  ({n_clusters} states)")
+
     # ---- Transition matrix outputs ----
     _trans_meta_cols = ["stem"] + [
         c for c in ["context", "day", "animal_id", "experiment"] if c in meta.columns

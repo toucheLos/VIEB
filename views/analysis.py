@@ -901,6 +901,8 @@ class AnalysisView(QWidget):
 
         self._t2_state_list.clear()
         self._t2_state_ids = []
+        self._t2_load_clip_btn.setEnabled(False)
+        self._t2_clip_status.setText("")
         self._t2_detail_placeholder.show()
         if self._t2_kin_canvas:
             self._t2_kin_canvas.hide()
@@ -1081,7 +1083,7 @@ class AnalysisView(QWidget):
         clip_dir = CLIPS / f"state_{sid}"
         if not clip_dir.exists():
             self._t2_clip_status.setText(
-                f"No clips — run: python characterize.py --clips"
+                f"No clips found for state {sid} — run: python generate_clips.py"
             )
             return
         clips = list(clip_dir.glob("*.mp4"))
