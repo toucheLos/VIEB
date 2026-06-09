@@ -1,5 +1,0 @@
-type,state,context,overall_frac,context_frac,enrichment_ratio,n_exemplar_bouts,note
-context_enriched_state,1,B,0.0054,0.0145,2.68,23,state_1 is 2.7x more common in context B
-context_enriched_state,3,B,0.0035,0.0071,2.02,28,state_3 is 2.0x more common in context B
-context_enriched_state,8,B,0.0029,0.0081,2.74,13,state_8 is 2.7x more common in context B
-high_reconstruction_error,-1,"{'C': 327, 'B': 230, 'A': 31}",0.01,,,588,"Top 1% frames by distance to cluster center. Context breakdown: {'C': 327, 'B': 230, 'A': 31}"
