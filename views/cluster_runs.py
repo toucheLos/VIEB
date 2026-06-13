@@ -158,6 +158,8 @@ class _RunCard(QFrame):
 class ClusterRunsView(QWidget):
     """View for browsing, saving, and restoring versioned cluster runs."""
 
+    cluster_changed = pyqtSignal()
+
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = cfg
@@ -374,6 +376,7 @@ class ClusterRunsView(QWidget):
         _save_cfg(self.cfg)
 
         self.refresh()
+        self.cluster_changed.emit()
 
     def _delete_saved_run(self, run_name: str):
         reply = QMessageBox.question(

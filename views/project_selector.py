@@ -24,6 +24,8 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -214,7 +216,6 @@ class NewProjectDialog(QDialog):
         super().__init__(parent)
         self.app_cfg = app_cfg
         self.created_path: str = ""
-        self._folder_manually_set = False
         self.setWindowTitle("New Project")
         self.setMinimumWidth(540)
         self._build()
@@ -255,13 +256,10 @@ class NewProjectDialog(QDialog):
         self._name.textChanged.connect(self._on_name_changed)
         form.addRow("Project name *:", self._name)
 
-        self._folder = QLineEdit()
-        self._folder.setPlaceholderText(str(ROOT / "projects" / "my_project"))
-        self._folder.textEdited.connect(self._on_folder_edited)
-        folder_btn = QPushButton("Browse...")
-        folder_btn.setFixedWidth(80)
-        folder_btn.clicked.connect(self._browse_folder)
-        form.addRow("Project folder *:", self._make_row(self._folder, folder_btn))
+        self._folder_preview = QLabel("")
+        self._folder_preview.setStyleSheet("color:#888; font-size:11px;")
+        self._folder_preview.setWordWrap(True)
+        form.addRow("", self._folder_preview)
 
         self._raw = QLineEdit()
         self._raw.setPlaceholderText("Optional — set later in Settings")
@@ -280,10 +278,9 @@ class NewProjectDialog(QDialog):
         )
         self._meta_label = "Metadata CSV:"
         form.addRow(self._meta_label, self._make_row(self._meta, meta_btn))
-
-        self._gen_meta_cb = QCheckBox("Generate metadata template from H5 keys after creating project")
-        self._gen_meta_label = ""
-        form.addRow(self._gen_meta_label, self._gen_meta_cb)
+        self._meta.setPlaceholderText(
+            "Optional — auto-generated from videos/H5 if left blank"
+        )
 
         self._dlc = QLineEdit()
         self._dlc.setPlaceholderText("Optional — set later in DLC Setup")
@@ -340,6 +337,15 @@ class NewProjectDialog(QDialog):
         self._h5_summary_label = ""
         form.addRow(self._h5_summary_label, self._h5_summary)
 
+        self._h5_preview_table = QTableWidget(0, 1)
+        self._h5_preview_table.setHorizontalHeaderLabels(["Detected column/dataset"])
+        self._h5_preview_table.horizontalHeader().setStretchLastSection(True)
+        self._h5_preview_table.verticalHeader().setVisible(False)
+        self._h5_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._h5_preview_table.setMaximumHeight(140)
+        self._h5_preview_label = ""
+        form.addRow(self._h5_preview_label, self._h5_preview_table)
+
         lay.addLayout(form)
         self._form = form
 
@@ -363,23 +369,11 @@ class NewProjectDialog(QDialog):
         return w
 
     def _on_name_changed(self, name: str):
-        if self._folder_manually_set:
-            return
         if name.strip():
-            self._folder.setText(str(ROOT / "projects" / _slugify(name)))
+            slug = _slugify(name)
+            self._folder_preview.setText(f"Will be created at: projects/{slug}")
         else:
-            self._folder.clear()
-
-    def _on_folder_edited(self):
-        # Mark that the user has overridden the auto-generated path
-        self._folder_manually_set = bool(self._folder.text().strip())
-
-    def _browse_folder(self):
-        start = self._folder.text() or str(ROOT / "projects")
-        d = QFileDialog.getExistingDirectory(self, "Select Project Folder", start)
-        if d:
-            self._folder.setText(d)
-            self._folder_manually_set = True
+            self._folder_preview.setText("")
 
     def _browse_dir(self, le: QLineEdit):
         d = QFileDialog.getExistingDirectory(self, "Select Directory",
@@ -409,7 +403,6 @@ class NewProjectDialog(QDialog):
         # toggle visibility on the row container, not the inner QLineEdit
         self._set_row_visible(self._raw.parentWidget(), is_csv or is_dlc)
         self._set_row_visible(self._meta.parentWidget(), True)
-        self._set_row_visible(self._gen_meta_cb, is_h5)
         self._set_row_visible(self._dlc.parentWidget(), is_dlc)
 
         for w in (
@@ -419,6 +412,7 @@ class NewProjectDialog(QDialog):
             self._h5_source_col_combo,
             self._h5_detect_btn,
             self._h5_summary,
+            self._h5_preview_table,
         ):
             self._set_row_visible(w, is_h5)
 
@@ -454,6 +448,10 @@ class NewProjectDialog(QDialog):
         if n_frames is not None:
             summary += f", {n_frames} frames"
         self._h5_summary.setText(summary)
+
+        self._h5_preview_table.setRowCount(len(columns))
+        for row, col_name in enumerate(columns):
+            self._h5_preview_table.setItem(row, 0, QTableWidgetItem(str(col_name)))
 
     def _create(self):
         name = self._name.text().strip()
@@ -509,15 +507,23 @@ class NewProjectDialog(QDialog):
                 QMessageBox.warning(self, "Validation", f"DLC config.yaml not found:\n{dlc_yaml}")
                 return
 
-        folder_text = self._folder.text().strip()
-        if not folder_text:
-            folder_text = str(ROOT / "projects" / _slugify(name))
-        folder = Path(folder_text)
+        slug = _slugify(name)
+        for proj in self.app_cfg.get("projects", []):
+            if _slugify(proj.get("name", "")) == slug:
+                QMessageBox.warning(
+                    self, "Duplicate Project Name",
+                    f"A project named '{name}' already exists.\n"
+                    "Choose a different name."
+                )
+                return
+
+        folder = ROOT / "projects" / slug
 
         if folder.exists():
             QMessageBox.warning(
-                self, "Folder Exists",
-                f"Folder already exists:\n{folder}\n\nChoose a different location."
+                self, "Duplicate Project Name",
+                f"A project named '{name}' already exists.\n"
+                "Choose a different name."
             )
             return
 
@@ -542,14 +548,27 @@ class NewProjectDialog(QDialog):
             cfg["h5_key"] = h5_key
             cfg["h5_source_col"] = h5_source_col
             cfg["h5_manifest_path"] = h5_manifest
-
-            if not meta_csv_path and self._gen_meta_cb.isChecked():
-                from metadata_generator import generate_metadata_template, write_metadata_csv
-                df = generate_metadata_template(h5_path=h5_path)
-                meta_csv_path = str(folder / "metadata.csv")
-                write_metadata_csv(df, meta_csv_path)
+        elif is_dlc:
+            cfg["pose_source"] = "dlc"
         else:
             cfg["pose_source"] = "csv"
+
+        # Auto-generate a starter metadata.csv when none was provided, using
+        # whatever pose source info is available (raw videos and/or H5 keys).
+        generated_meta = False
+        if not meta_csv_path:
+            gen_kwargs = {}
+            if cfg["raw_videos_dir"] and Path(cfg["raw_videos_dir"]).is_dir():
+                gen_kwargs["raw_videos_dir"] = cfg["raw_videos_dir"]
+            if is_h5 and h5_path:
+                gen_kwargs["h5_path"] = h5_path
+            if gen_kwargs:
+                from metadata_generator import generate_metadata_template, write_metadata_csv
+                df = generate_metadata_template(**gen_kwargs)
+                if len(df):
+                    meta_csv_path = str(folder / "metadata.csv")
+                    write_metadata_csv(df, meta_csv_path)
+                    generated_meta = True
 
         cfg["metadata_csv_path"] = meta_csv_path
         if meta_csv_path and Path(meta_csv_path).exists():
@@ -575,4 +594,14 @@ class NewProjectDialog(QDialog):
         save_app_config(self.app_cfg)
 
         self.created_path = str(folder)
+
+        if generated_meta:
+            QMessageBox.information(
+                self, "Project Created",
+                f"Project '{name}' was created.\n\n"
+                "A starter metadata.csv was created in your project folder. "
+                "Open it to fill in context and experiment columns before "
+                "running the pipeline."
+            )
+
         self.accept()

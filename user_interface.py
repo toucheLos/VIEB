@@ -48,6 +48,7 @@ try:
         QProgressBar,
         QRadioButton,
         QScrollArea,
+        QSizePolicy,
         QSlider,
         QSpinBox,
         QStackedWidget,
@@ -432,6 +433,11 @@ _DEFAULT_CFG = {
     "stage_last_run": {},
     "context_groups": "A,B,C",
     "context_descriptions": {},
+    "pose_source": "",
+    "h5_path": "",
+    "h5_key": "",
+    "h5_manifest_path": "",
+    "h5_source_col": "",
     "cohort_csv_path": "",
     "metadata_csv_path": "",
     "hdbscan_min_samples": 0,
@@ -1733,6 +1739,10 @@ class StageRow(QFrame):
         d.setStyleSheet("color:#555;")
         d.setWordWrap(True)
         lay.addWidget(d)
+        self._note_lbl = QLabel("")
+        self._note_lbl.setWordWrap(True)
+        self._note_lbl.hide()
+        lay.addWidget(self._note_lbl)
         self._quality_lbl = None
         self._dom_state_id = -1
         if self.stage["id"] == 3:
@@ -1879,6 +1889,7 @@ class StageRow(QFrame):
             "running": ("◔", "#e0a400"),
             "done": ("✓", "green"),
             "error": ("✕", "red"),
+            "warning": ("⚠", "#e0a400"),
         }
         icon, color = icon_map.get(status, ("○", "#888"))
         self._icon.setText(icon)
@@ -1886,6 +1897,14 @@ class StageRow(QFrame):
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
+
+    def set_note(self, text: str, color: str = "#555"):
+        if text:
+            self._note_lbl.setText(text)
+            self._note_lbl.setStyleSheet(f"color:{color};font-weight:600;")
+            self._note_lbl.show()
+        else:
+            self._note_lbl.hide()
 
     def set_last_run(self, ts):
         self._ts.setText(f"Last run: {_fmt_ts(ts)}")
@@ -2021,6 +2040,8 @@ class RunPipelineView(QWidget):
         self._global_log.setMaximumHeight(300)
         self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;")
         lay.addWidget(self._global_log)
+
+        self._apply_pose_source_status()
 
     def _probe_gpu_async(self):
         class _ProbeThread(QThread):
@@ -2158,6 +2179,34 @@ class RunPipelineView(QWidget):
         for sid, row in self._rows.items():
             row.set_status(ss.get(_state_key(sid), "pending"))
             row.set_last_run(ts.get(_state_key(sid)))
+        self._apply_pose_source_status()
+
+    def _apply_pose_source_status(self):
+        """Adjust the Stage 1 (DLC) row based on the configured pose_source."""
+        row = self._rows.get(1)
+        if row is None:
+            return
+        pose_source = self.cfg.get("pose_source", "")
+        if pose_source == "csv":
+            row.set_status("done")
+            row.set_note(
+                "✓ Per-video CSV files configured — DLC pose estimation not needed.",
+                "green",
+            )
+        elif pose_source == "h5":
+            row.set_status("done")
+            row.set_note(
+                "✓ H5 pose file configured — DLC pose estimation not needed.",
+                "green",
+            )
+        elif pose_source == "none":
+            row.set_status("warning")
+            row.set_note(
+                "⚠ No pose data configured. Go to Settings → Pose Data Source.",
+                "#e0a400",
+            )
+        else:
+            row.set_note("")
 
     def _append_log(self, line):
         self._global_log.insertPlainText(line)
@@ -4281,24 +4330,18 @@ class MainWindow(QMainWindow):
         brand_row.addStretch()
         sl.addLayout(brand_row)
 
-        # Project name row
+        # Project switcher button
         proj_row = QHBoxLayout()
-        proj_row.setContentsMargins(18, 0, 14, 12)
-        proj_row.setSpacing(4)
-        self._proj_name_lbl = QLabel("—")
-        self._proj_name_lbl.setStyleSheet(
-            "font-size:11px;font-weight:600;color:#3A3A3A;"
-            "background:transparent;border:none;"
-        )
-        proj_row.addWidget(self._proj_name_lbl, stretch=1)
-        self._proj_btn = QToolButton()
-        self._proj_btn.setText("⊿")
-        self._proj_btn.setFixedSize(22, 22)
+        proj_row.setContentsMargins(12, 0, 12, 12)
+        self._proj_btn = QPushButton("—")
         self._proj_btn.setCursor(Qt.PointingHandCursor)
+        self._proj_btn.setToolTip("Switch project or create a new one")
+        self._proj_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._proj_btn.setStyleSheet(
-            "QToolButton{border:none;background:transparent;"
-            "color:#9B9B9B;font-size:12px;border-radius:3px;}"
-            "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
+            "QPushButton{background:#4E79A7;color:#fff;font-weight:bold;"
+            "font-size:11px;border:none;border-radius:4px;padding:6px 12px;"
+            "text-align:left;}"
+            "QPushButton:hover{background:#3d6291;}"
         )
         self._proj_btn.clicked.connect(self._open_project_menu)
         proj_row.addWidget(self._proj_btn)
@@ -4384,6 +4427,7 @@ class MainWindow(QMainWindow):
 
         if _HAS_CLUSTER_RUNS_VIEW:
             self._crv = _ClusterRunsView(self.cfg)
+            self._crv.cluster_changed.connect(self._on_cluster_changed)
             add("Cluster Runs", self._crv)
         else:
             self._crv = None
@@ -4466,6 +4510,8 @@ class MainWindow(QMainWindow):
     def _settings_changed(self, cfg):
         self.cfg = cfg
         _save_cfg(self.cfg)
+        self._pv.cfg = cfg
+        self._pv.update_from_cfg()
         self._refresh_view_labels()
         self._load_data()
 
@@ -4589,9 +4635,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Results updated — reloading…", 3000)
 
     def _manual_reload(self) -> None:
+        self._on_cluster_changed()
+
+    def _on_cluster_changed(self) -> None:
+        """Reload config + pipeline data after the active cluster run changes
+        (or on a manual 'Reload data' click)."""
+        self.cfg = _load_cfg()
+        self._pv.cfg = self.cfg
+        self._pv.update_from_cfg()
         self._watch_result_files()   # pick up any new files that weren't there before
         self._load_data()
-        self.statusBar().showMessage("Reloading results from disk…", 2000)
+        self._refresh_view_labels()
+        self.statusBar().showMessage("Cluster run changed — data reloaded.", 4000)
 
     def _load_data(self):
         self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""))
@@ -4750,24 +4805,7 @@ class MainWindow(QMainWindow):
         # Truncate with ellipsis
         if len(name) > 22:
             name = name[:19] + "..."
-        self._proj_name_lbl.setText(name)
-
-        # Style the button based on project count
-        n = len(app_cfg.get("projects", []))
-        if n <= 1:
-            self._proj_btn.setToolTip("Add a new project")
-            self._proj_btn.setStyleSheet(
-                "QToolButton{border:none;background:transparent;"
-                "color:#C8C8C8;font-size:12px;border-radius:3px;}"
-                "QToolButton:hover{color:#9B9B9B;background:rgba(0,0,0,0.04);}"
-            )
-        else:
-            self._proj_btn.setToolTip("Switch project")
-            self._proj_btn.setStyleSheet(
-                "QToolButton{border:none;background:transparent;"
-                "color:#9B9B9B;font-size:12px;border-radius:3px;}"
-                "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
-            )
+        self._proj_btn.setText(f"{name}  ▼")
 
     def _open_project_menu(self):
         app_cfg = _load_app_config()

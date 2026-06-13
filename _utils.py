@@ -289,7 +289,7 @@ _DEFAULT_CFG = {
     "stage_status": {},
     "stage_last_run": {},
     "context_groups": "A,B,C",
-    "pose_source": "csv",
+    "pose_source": "",
     "h5_path": "",
     "h5_key": "",
     "h5_manifest_path": "",
