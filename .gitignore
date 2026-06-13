@@ -5,7 +5,7 @@ Thumbs.db
 # Virtual environment
 .venv/
 venv/
-venv_wsl/
+venv*/
 
 # Python
 __pycache__/
