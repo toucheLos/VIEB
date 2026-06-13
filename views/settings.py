@@ -5,9 +5,9 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from _utils import ROOT, RESULTS, _DEFAULT_CFG, _save_cfg, _load_cfg
@@ -154,6 +154,106 @@ class SettingsView(QWidget):
         form.addWidget(map_btn, r, 1)
         r += 1
 
+        gen_meta_btn = QPushButton("Generate Metadata Template…")
+        gen_meta_btn.setToolTip(
+            "Scan raw_videos/ and/or the configured H5 pose file and build a\n"
+            "metadata.csv template with inferred filename/date/box/experiment/\n"
+            "day/context/animal_id columns. no_shock and fear are left blank."
+        )
+        gen_meta_btn.clicked.connect(self._open_metadata_generator)
+        form.addWidget(QLabel(""), r, 0)
+        form.addWidget(gen_meta_btn, r, 1)
+        r += 1
+
+        # ── H5 Pose Source ──────────────────────────────────────────────
+        h5_sep_lbl = QLabel("Pose Data Source")
+        h5_sep_lbl.setFont(QFont("Arial", 10, QFont.Bold))
+        h5_sep_lbl.setStyleSheet("color:#555; padding-top:10px; padding-bottom:2px;")
+        form.addWidget(h5_sep_lbl, r, 0, 1, 2)
+        r += 1
+
+        self._pose_source = QComboBox()
+        self._pose_source.addItems(["csv", "h5"])
+        self._pose_source.setCurrentText(self.cfg.get("pose_source", "csv"))
+        row(
+            "Pose source", self._pose_source,
+            "csv: per-video DLC pose CSVs in raw_videos/ (default).\n"
+            "h5: a single shared H5 file containing pose data for multiple\n"
+            "animals/trials, matched to metadata.csv rows by filename/animal_id."
+        )
+
+        self._h5_group = QWidget()
+        h5_form = QGridLayout(self._h5_group)
+        h5_form.setContentsMargins(0, 0, 0, 0)
+        h5_form.setHorizontalSpacing(10)
+        h5_form.setVerticalSpacing(8)
+
+        self._h5_path = QLineEdit(self.cfg.get("h5_path", ""))
+        self._h5_path.setPlaceholderText("Path to .h5 pose file …")
+        h5_browse = QPushButton("Browse...")
+        h5_browse.setFixedWidth(80)
+        h5_browse.clicked.connect(self._browse_h5_path)
+        h5_path_row = QWidget()
+        h5_path_h = QHBoxLayout(h5_path_row)
+        h5_path_h.setContentsMargins(0, 0, 0, 0)
+        h5_path_h.setSpacing(4)
+        h5_path_h.addWidget(self._h5_path)
+        h5_path_h.addWidget(h5_browse)
+        h5_form.addWidget(QLabel("H5 file"), 0, 0)
+        h5_form.addWidget(h5_path_row, 0, 1)
+
+        self._h5_manifest = QLineEdit(self.cfg.get("h5_manifest_path", ""))
+        self._h5_manifest.setPlaceholderText("(optional) manifest CSV: animal_id/filename -> h5_key")
+        h5_manifest_browse = QPushButton("Browse...")
+        h5_manifest_browse.setFixedWidth(80)
+        h5_manifest_browse.clicked.connect(self._browse_h5_manifest)
+        h5_manifest_row = QWidget()
+        h5_manifest_h = QHBoxLayout(h5_manifest_row)
+        h5_manifest_h.setContentsMargins(0, 0, 0, 0)
+        h5_manifest_h.setSpacing(4)
+        h5_manifest_h.addWidget(self._h5_manifest)
+        h5_manifest_h.addWidget(h5_manifest_browse)
+        h5_form.addWidget(QLabel("H5 manifest (optional)"), 1, 0)
+        h5_form.addWidget(h5_manifest_row, 1, 1)
+
+        self._h5_key_combo = QComboBox()
+        self._h5_key_combo.setEditable(True)
+        existing_h5_key = self.cfg.get("h5_key", "")
+        if existing_h5_key:
+            self._h5_key_combo.addItem(existing_h5_key)
+        h5_form.addWidget(QLabel("H5 key (default)"), 2, 0)
+        h5_form.addWidget(self._h5_key_combo, 2, 1)
+
+        self._h5_source_col_combo = QComboBox()
+        self._h5_source_col_combo.setEditable(True)
+        existing_source_col = self.cfg.get("h5_source_col", "")
+        if existing_source_col:
+            self._h5_source_col_combo.addItem(existing_source_col)
+        h5_form.addWidget(QLabel("H5 source column"), 3, 0)
+        h5_form.addWidget(self._h5_source_col_combo, 3, 1)
+
+        h5_detect_btn = QPushButton("Detect")
+        h5_detect_btn.setToolTip(
+            "Open the H5 file and auto-populate the available keys and columns."
+        )
+        h5_detect_btn.clicked.connect(self._on_detect_h5)
+        h5_form.addWidget(QLabel(""), 4, 0)
+        h5_form.addWidget(h5_detect_btn, 4, 1)
+
+        self._h5_detect_summary = QLabel("")
+        self._h5_detect_summary.setWordWrap(True)
+        self._h5_detect_summary.setStyleSheet("color:#666; font-size:11px;")
+        h5_form.addWidget(self._h5_detect_summary, 5, 0, 1, 2)
+
+        form.addWidget(self._h5_group, r, 0, 1, 2)
+        r += 1
+
+        def _toggle_h5_group(text):
+            self._h5_group.setVisible(text == "h5")
+
+        self._pose_source.currentTextChanged.connect(_toggle_h5_group)
+        _toggle_h5_group(self._pose_source.currentText())
+
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row(
             "Context groups (comma-separated)", self._ctx_groups,
@@ -205,7 +305,7 @@ class SettingsView(QWidget):
         )
 
         self._fps = QSpinBox()
-        self._fps.setRange(1, 240)
+        self._fps.setRange(1, 256)
         self._fps.setValue(int(self.cfg.get("fps", 30)))
         row(
             "FPS", self._fps,
@@ -253,6 +353,118 @@ class SettingsView(QWidget):
         if p:
             self._meta_csv.setText(p)
 
+    def _browse_h5_path(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select H5 Pose File", self._h5_path.text(), "HDF5 files (*.h5 *.hdf5)"
+        )
+        if p:
+            self._h5_path.setText(p)
+
+    def _browse_h5_manifest(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select H5 Manifest CSV", self._h5_manifest.text(), "CSV files (*.csv)"
+        )
+        if p:
+            self._h5_manifest.setText(p)
+
+    def _on_detect_h5(self):
+        h5_path = self._h5_path.text().strip()
+        if not h5_path:
+            QMessageBox.warning(self, "Detect H5", "Enter or browse to an H5 file first.")
+            return
+        try:
+            from pose_io import inspect_h5
+            info = inspect_h5(h5_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Detect H5", f"Could not read H5 file:\n{e}")
+            return
+
+        keys = info.get("keys", [])
+        if not keys:
+            QMessageBox.warning(self, "Detect H5", "No keys found in this H5 file.")
+            return
+
+        self._h5_key_combo.clear()
+        self._h5_key_combo.addItems(keys)
+
+        first_details = info.get("details", {}).get(keys[0], {})
+        columns = first_details.get("columns") or list(first_details.get("datasets", {}).keys())
+        self._h5_source_col_combo.clear()
+        self._h5_source_col_combo.addItems(columns)
+
+        n_frames = first_details.get("n_frames")
+        summary = f"Found {len(keys)} key(s). '{keys[0]}': "
+        if columns:
+            summary += f"{len(columns)} column(s)"
+        if n_frames is not None:
+            summary += f", {n_frames} frames"
+        self._h5_detect_summary.setText(summary)
+
+    def _open_metadata_generator(self):
+        from metadata_generator import generate_metadata_template, write_metadata_csv
+
+        raw_videos_dir = self._raw.text().strip() or None
+        h5_path = self._h5_path.text().strip() or None
+
+        try:
+            df = generate_metadata_template(raw_videos_dir=raw_videos_dir, h5_path=h5_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Generate Metadata", f"Could not scan inputs:\n{e}")
+            return
+
+        if df.empty:
+            QMessageBox.information(
+                self, "Generate Metadata",
+                "No videos or H5 keys found to generate metadata from.\n"
+                "Set 'Raw videos directory' and/or 'H5 file' first."
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Generate Metadata Template")
+        dlg.setMinimumSize(720, 420)
+        lay = QVBoxLayout(dlg)
+
+        info_lbl = QLabel(
+            f"{len(df)} row(s) inferred. 'no_shock' and 'fear' are left blank for you to fill in."
+        )
+        lay.addWidget(info_lbl)
+
+        table = QTableWidget(len(df), len(df.columns))
+        table.setHorizontalHeaderLabels(list(df.columns))
+        for i, (_, row_data) in enumerate(df.iterrows()):
+            for j, col in enumerate(df.columns):
+                table.setItem(i, j, QTableWidgetItem(str(row_data[col])))
+        table.resizeColumnsToContents()
+        lay.addWidget(table)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save As…")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        lay.addLayout(btn_row)
+
+        def _save_template():
+            default_path = self._meta_csv.text().strip() or str(Path(ROOT) / "metadata.csv")
+            p, _ = QFileDialog.getSaveFileName(
+                dlg, "Save Metadata Template", default_path, "CSV files (*.csv)"
+            )
+            if not p:
+                return
+            write_metadata_csv(df, p)
+            self._meta_csv.setText(p)
+            from views.metadata_mapper import _autodetect_columns
+            self.cfg["metadata_csv_path"] = p
+            self.cfg["column_map"] = _autodetect_columns(p)
+            QMessageBox.information(dlg, "Generate Metadata", f"Saved to {p}")
+            dlg.accept()
+
+        save_btn.clicked.connect(_save_template)
+        cancel_btn.clicked.connect(dlg.reject)
+        dlg.exec_()
+
     def _open_mapper(self):
         from views.metadata_mapper import MetadataMapperWidget
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
@@ -282,6 +494,11 @@ class SettingsView(QWidget):
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        self.cfg["pose_source"] = self._pose_source.currentText()
+        self.cfg["h5_path"] = self._h5_path.text().strip()
+        self.cfg["h5_manifest_path"] = self._h5_manifest.text().strip()
+        self.cfg["h5_key"] = self._h5_key_combo.currentText().strip()
+        self.cfg["h5_source_col"] = self._h5_source_col_combo.currentText().strip()
         self.cfg["condition_a_label"] = self._cond_a_le.text().strip()
         self.cfg["condition_b_label"] = self._cond_b_le.text().strip()
         self.cfg["primary_metric_label"] = self._metric_label_le.text().strip()
