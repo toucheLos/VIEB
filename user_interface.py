@@ -3969,7 +3969,7 @@ class SettingsView(QWidget):
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row("Context groups (comma-separated)", self._ctx_groups)
         self._fps = QSpinBox()
-        self._fps.setRange(1, 240)
+        self._fps.setRange(1, 256)
         self._fps.setValue(int(self.cfg.get("fps", 30)))
         row("FPS", self._fps)
 

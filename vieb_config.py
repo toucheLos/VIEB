@@ -236,6 +236,42 @@ def get_metadata_path() -> str:
     return os.path.join(PROJECT_ROOT, "metadata.csv")
 
 
+def get_pose_source() -> str:
+    """Return 'csv' or 'h5', reading 'pose_source' from config.json.
+    Falls back to 'csv' when absent or invalid."""
+    cfg = _load_config()
+    val = cfg.get("pose_source", "csv")
+    return val if val in ("csv", "h5") else "csv"
+
+
+def get_h5_path() -> str:
+    """Return the configured H5 pose file path, or '' if unset."""
+    cfg = _load_config()
+    val = cfg.get("h5_path", "")
+    return val.strip() if isinstance(val, str) else ""
+
+
+def get_h5_key() -> str:
+    """Return the configured default H5 key, or '' if unset."""
+    cfg = _load_config()
+    val = cfg.get("h5_key", "")
+    return val.strip() if isinstance(val, str) else ""
+
+
+def get_h5_manifest_path() -> str:
+    """Return the configured H5 manifest CSV path, or '' if unset."""
+    cfg = _load_config()
+    val = cfg.get("h5_manifest_path", "")
+    return val.strip() if isinstance(val, str) else ""
+
+
+def get_h5_source_col() -> str:
+    """Return the configured H5 source column/dataset name, or '' if unset."""
+    cfg = _load_config()
+    val = cfg.get("h5_source_col", "")
+    return val.strip() if isinstance(val, str) else ""
+
+
 def get_clips_dir() -> str:
     """Return the clips directory.
     Derived as the sibling of get_results_dir() named 'clips', which reproduces

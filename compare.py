@@ -110,9 +110,149 @@ def _print_hardware_banner():
 
 # Step 1: Feature extraction
 
+def _load_extractor_config():
+    """Load keypoint_roles, object_keypoints (from config.json) and
+    bodypart_names (from DLC config.yaml, if present)."""
+    keypoint_roles = {}
+    object_keypoints = []
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        with open(cfg_path, encoding="utf-8") as _f:
+            _cfg_data = json.load(_f)
+            keypoint_roles = _cfg_data.get("keypoint_roles", {})
+            object_keypoints = _cfg_data.get("object_keypoints", [])
+    except Exception:
+        pass
+
+    bodypart_names = None
+    try:
+        dlc_cfg_path = _vc.get_dlc_config_path()
+        if dlc_cfg_path and os.path.exists(dlc_cfg_path):
+            import yaml as _yaml
+            with open(dlc_cfg_path, encoding="utf-8") as _f:
+                _dlc_cfg = _yaml.safe_load(_f)
+            bodypart_names = _dlc_cfg.get("bodyparts") or None
+    except Exception:
+        pass
+
+    return keypoint_roles, object_keypoints, bodypart_names
+
+
+def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
+    """Feature extraction from a single shared H5 pose file (video-less mode).
+
+    Iterates metadata.csv rows, resolving each row to a key inside the H5
+    file via h5_manifest.resolve_h5_key (exact/manifest/ordinal matching).
+    """
+    from ml import PoseFeatureExtractor
+    from pose_io import inspect_h5, load_pose_h5
+    from h5_manifest import load_manifest, resolve_h5_key
+
+    h5_path = _vc.get_h5_path()
+    if not h5_path or not os.path.exists(h5_path):
+        sys.exit(f"H5 pose source configured but file not found: {h5_path!r}")
+
+    if not os.path.exists(_meta()):
+        sys.exit(f"H5 mode requires a metadata CSV. Not found: {_meta()}")
+
+    meta = pd.read_csv(_meta(), dtype=str).fillna("")
+    meta = _vc.normalize_metadata_columns(meta)
+
+    h5_info = inspect_h5(h5_path)
+    h5_keys = h5_info["keys"]
+    if not h5_keys:
+        sys.exit(f"No keys found in H5 file: {h5_path}")
+
+    manifest = load_manifest(_vc.get_h5_manifest_path())
+    source_col = _vc.get_h5_source_col() or None
+
+    os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    index = {}
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            index = json.load(f)
+
+    keypoint_roles, object_keypoints, bodypart_names = _load_extractor_config()
+
+    extractor = None
+    new_count = 0
+    skip_count = 0
+
+    if not use_wavelets:
+        print("(wavelets disabled)")
+    print(f"Extracting features from {len(meta)} metadata rows (H5 mode: {h5_path})...")
+
+    for i, (_, row) in enumerate(meta.iterrows()):
+        row_dict = row.to_dict()
+        filename = row_dict.get("filename", "")
+        stem = os.path.splitext(filename)[0] if filename else row_dict.get("animal_id", f"row{i}")
+        out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+
+        if os.path.exists(out_path):
+            skip_count += 1
+            continue
+
+        try:
+            h5_key, strategy = resolve_h5_key(row_dict, h5_keys, manifest, i)
+        except ValueError as e:
+            print(f"  SKIP ({e})")
+            continue
+
+        print(f"  {stem}  (h5_key={h5_key!r}, match={strategy})")
+        pose, conf, h5_bodyparts = load_pose_h5(h5_path, key=h5_key, source_col=source_col)
+
+        if extractor is None:
+            extractor = PoseFeatureExtractor(
+                fps=fps,
+                use_wavelets=use_wavelets,
+                keypoint_roles=keypoint_roles,
+                bodypart_names=bodypart_names or h5_bodyparts,
+                object_keypoints=object_keypoints,
+            )
+
+        features_dict = extractor.extract_features(pose, confidence=conf)
+        features_flat = extractor._flatten_features(features_dict)
+
+        np.save(out_path, features_flat.astype(np.float32))
+        index[stem] = {
+            "video_path": None,
+            "csv_path": None,
+            "h5_path": h5_path,
+            "h5_key": h5_key,
+            "n_frames": int(pose.shape[0]),
+            "n_keypoints": int(pose.shape[1]),
+            "n_features": int(features_flat.shape[1]),
+            "features_path": out_path,
+        }
+        new_count += 1
+
+    first_entry = next((v for k, v in index.items() if k != '_meta'), {})
+    index["_meta"] = {
+        "n_keypoints": int(first_entry.get("n_keypoints", 8)),
+        "n_features": int(first_entry.get("n_features", 91)),
+        "use_wavelets": use_wavelets,
+        "vieb_version": "1.0",
+        "pose_source": "h5",
+    }
+
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    print(f"\nDone. Extracted {new_count} new, skipped {skip_count} already done.")
+    print(f"Total in index: {len(index)} videos")
+    print(f"Feature files saved to results/features/")
+
+
 def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     from ml import PoseFeatureExtractor
     from pose_io import load_pose, _find_dlc_csv
+
+    pose_source = _vc.get_pose_source()
+
+    if pose_source == "h5":
+        return _cmd_extract_h5(fps=fps, use_wavelets=use_wavelets)
 
     videos = sorted(glob.glob(os.path.join(_raw(), "*.mp4")))
     if not videos:
@@ -126,29 +266,7 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         with open(index_path) as f:
             index = json.load(f)
 
-    # Load keypoint role mapping and object keypoints from config.json
-    keypoint_roles = {}
-    object_keypoints = []
-    try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-        with open(cfg_path, encoding="utf-8") as _f:
-            _cfg_data = json.load(_f)
-            keypoint_roles = _cfg_data.get("keypoint_roles", {})
-            object_keypoints = _cfg_data.get("object_keypoints", [])
-    except Exception:
-        pass
-
-    # Load bodypart names from DLC config.yaml (defines index → name ordering)
-    bodypart_names = None
-    try:
-        dlc_cfg_path = _vc.get_dlc_config_path()
-        if dlc_cfg_path and os.path.exists(dlc_cfg_path):
-            import yaml as _yaml
-            with open(dlc_cfg_path, encoding="utf-8") as _f:
-                _dlc_cfg = _yaml.safe_load(_f)
-            bodypart_names = _dlc_cfg.get("bodyparts") or None
-    except Exception:
-        pass
+    keypoint_roles, object_keypoints, bodypart_names = _load_extractor_config()
 
     extractor = PoseFeatureExtractor(
         fps=fps,

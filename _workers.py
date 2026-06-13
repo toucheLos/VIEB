@@ -121,14 +121,17 @@ class PipelineRunner(QThread):
         self.cfg = cfg
 
     def _run_subprocess(self, args):
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         p = subprocess.Popen(
-            [sys.executable, *args],
+            [sys.executable, "-u", *args],
             cwd=str(ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
         assert p.stdout is not None
         for line in p.stdout:
