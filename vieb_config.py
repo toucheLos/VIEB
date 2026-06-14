@@ -244,6 +244,13 @@ def get_pose_source() -> str:
     return val if val in ("csv", "h5") else "csv"
 
 
+def get_use_wavelets() -> bool:
+    """Return the 'use_wavelets' feature-extraction setting from config.json.
+    Falls back to True when absent."""
+    cfg = _load_config()
+    return bool(cfg.get("use_wavelets", True))
+
+
 def get_h5_path() -> str:
     """Return the configured H5 pose file path, or '' if unset."""
     cfg = _load_config()
