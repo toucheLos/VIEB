@@ -34,6 +34,19 @@ _DAY_RE = re.compile(r"Day[_-]?(?P<day>\d+)", re.IGNORECASE)
 _CONTEXT_RE = re.compile(r"Context[_-]?\(?(?P<context>[A-Za-z0-9]+)\)?", re.IGNORECASE)
 _ANIMAL_RE = re.compile(r"_(?P<animal_id>\d{3,})(?:\.\w+)?$")
 
+# Additional fallback patterns for animal_id / day, tried when the patterns
+# above find nothing.
+_ANIMAL_FALLBACK_RES = [
+    re.compile(r"rat[_-]?(?P<animal_id>\d+)", re.IGNORECASE),
+    re.compile(r"mouse[_-]?(?P<animal_id>\d+)", re.IGNORECASE),
+    re.compile(r"animal[_-]?(?P<animal_id>\d+)", re.IGNORECASE),
+    re.compile(r"(?P<animal_id>\d{4})"),
+]
+_DAY_FALLBACK_RES = [
+    re.compile(r"session[_-]?(?P<day>\d+)", re.IGNORECASE),
+    re.compile(r"[ds][_-]?(?P<day>\d+)", re.IGNORECASE),
+]
+
 
 def infer_fields_from_name(name: str) -> dict:
     """Infer metadata fields from a filename or H5-key stem.
@@ -59,6 +72,20 @@ def infer_fields_from_name(name: str) -> dict:
         m = rx.search(name)
         if m:
             result[field] = m.group(field)
+
+    if "animal_id" not in result:
+        for rx in _ANIMAL_FALLBACK_RES:
+            m = rx.search(name)
+            if m:
+                result["animal_id"] = m.group("animal_id")
+                break
+
+    if "day" not in result:
+        for rx in _DAY_FALLBACK_RES:
+            m = rx.search(name)
+            if m:
+                result["day"] = m.group("day")
+                break
 
     return result
 

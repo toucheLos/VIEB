@@ -513,6 +513,10 @@ class BrowseStatesView(QWidget):
         if self._selected_sid is not None:
             self._show_state(self._selected_sid)
 
+    def refresh(self, data):
+        """Rescan the clips directory and reload the state card list with fresh data."""
+        self.update_data(data)
+
     # ── Left panel: build state cards list ────────────────────────────────────
 
     def _state_info(self):

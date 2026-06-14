@@ -177,6 +177,7 @@ class ClusterRunsView(QWidget):
     """View for browsing, saving, and restoring versioned cluster runs."""
 
     run_activated = pyqtSignal()
+    cluster_changed = pyqtSignal()
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -397,6 +398,7 @@ class ClusterRunsView(QWidget):
 
         self.refresh()
         self.run_activated.emit()
+        self.cluster_changed.emit()
 
     def _rename_current_run(self):
         manifest_path = _shared_dir() / "run_manifest.json"

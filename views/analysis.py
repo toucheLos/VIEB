@@ -776,6 +776,12 @@ class AnalysisView(QWidget):
                 loader()
                 self._tab_dirty[i] = False
 
+    def refresh(self, data: dict) -> None:
+        """Reload only the currently visible tab with fresh data; others reload lazily on switch."""
+        self._data = data
+        self._mark_all_dirty()
+        self._load_current_tab()
+
     # ─────────────────────── Tab 1 loader ──
 
     def _load_tab1(self) -> None:

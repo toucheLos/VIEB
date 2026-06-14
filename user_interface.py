@@ -458,6 +458,7 @@ _DEFAULT_CFG = {
     "primary_metric_label": "",
     "reviewer_categories": [],
     "reviewer_seed": 0,
+    "pose_source": "",
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -1740,6 +1741,11 @@ class StageRow(QFrame):
         d.setStyleSheet("color:#555;")
         d.setWordWrap(True)
         lay.addWidget(d)
+        self._pose_source_lbl = None
+        if self.stage["id"] == 1:
+            self._pose_source_lbl = QLabel("")
+            self._pose_source_lbl.setWordWrap(True)
+            lay.addWidget(self._pose_source_lbl)
         self._quality_lbl = None
         self._dom_state_id = -1
         if self.stage["id"] == 3:
@@ -1894,6 +1900,32 @@ class StageRow(QFrame):
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
 
+    def set_pose_source(self, pose_source: str):
+        """For Stage 1: reflect the configured pose data source."""
+        if self._pose_source_lbl is None:
+            return
+        if pose_source == "csv":
+            self._pose_source_lbl.setText(
+                "✓ Per-video CSV files configured — DLC pose estimation not needed."
+            )
+            self._pose_source_lbl.setStyleSheet("color:#2e7d32;font-weight:600;")
+            self.set_status("done")
+        elif pose_source == "h5":
+            self._pose_source_lbl.setText(
+                "✓ H5 pose file configured — DLC pose estimation not needed."
+            )
+            self._pose_source_lbl.setStyleSheet("color:#2e7d32;font-weight:600;")
+            self.set_status("done")
+        elif pose_source == "none":
+            self._pose_source_lbl.setText(
+                "⚠ No pose data configured. Go to Settings → Pose Data Source."
+            )
+            self._pose_source_lbl.setStyleSheet("color:#e0a400;font-weight:600;")
+            self._icon.setText("⚠")
+            self._icon.setStyleSheet("color:#e0a400;font-weight:bold;")
+        else:
+            self._pose_source_lbl.setText("")
+
     def set_last_run(self, ts):
         self._ts.setText(f"Last run: {_fmt_ts(ts)}")
 
@@ -2005,6 +2037,7 @@ class RunPipelineView(QWidget):
                 row.run_stage.connect(lambda _: self.navigate_dlc.emit())
                 row._run_btn.setText("Open DLC Setup")
                 row._from_btn.hide()
+                row.set_pose_source(self.cfg.get("pose_source", ""))
             else:
                 row.run_stage.connect(self._run_stage)
                 row.run_from_here.connect(self._run_from_here)
@@ -2165,6 +2198,8 @@ class RunPipelineView(QWidget):
         for sid, row in self._rows.items():
             row.set_status(ss.get(_state_key(sid), "pending"))
             row.set_last_run(ts.get(_state_key(sid)))
+        if 1 in self._rows:
+            self._rows[1].set_pose_source(self.cfg.get("pose_source", ""))
 
     def _append_log(self, line):
         self._global_log.insertPlainText(line)
@@ -4002,6 +4037,22 @@ class SettingsView(QWidget):
         lay.addWidget(save)
         lay.addStretch()
 
+    def load_from_cfg(self):
+        """Repopulate widgets from self.cfg (e.g. after switching projects)."""
+        ab = self.cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
+        self._xmin.setValue(ab["x_min"])
+        self._ymin.setValue(ab["y_min"])
+        self._xmax.setValue(ab["x_max"])
+        self._ymax.setValue(ab["y_max"])
+        self._results.setText(self.cfg.get("results_dir", ""))
+        self._raw.setText(self.cfg.get("raw_videos_dir", ""))
+        self._meta_le.setText(self.cfg.get("metadata_csv_path", ""))
+        self._cohort_out.setText(self.cfg.get("cohort_output_dir", ""))
+        self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
+        self._fps.setValue(int(self.cfg.get("fps", 30)))
+        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
+        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
+
     def _browse(self, le):
         d = QFileDialog.getExistingDirectory(self, "Select Directory", le.text())
         if d:
@@ -4254,9 +4305,33 @@ class MainWindow(QMainWindow):
     def _build(self):
         central = QWidget()
         self.setCentralWidget(central)
-        ml = QHBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Setup banner (shown after onboarding for csv/h5 projects) ──────
+        self._setup_banner = QFrame()
+        self._setup_banner.setStyleSheet(
+            "QFrame{background:#fff3cd;border-bottom:1px solid #ffc107;}"
+        )
+        banner_lay = QHBoxLayout(self._setup_banner)
+        banner_lay.setContentsMargins(16, 8, 16, 8)
+        self._setup_banner_lbl = QLabel("")
+        self._setup_banner_lbl.setWordWrap(True)
+        self._setup_banner_lbl.setStyleSheet("color:#664d03;")
+        banner_lay.addWidget(self._setup_banner_lbl, stretch=1)
+        banner_close = QPushButton("×")
+        banner_close.setFixedSize(22, 22)
+        banner_close.clicked.connect(self._setup_banner.hide)
+        banner_lay.addWidget(banner_close)
+        self._setup_banner.hide()
+        outer.addWidget(self._setup_banner)
+
+        body = QWidget()
+        ml = QHBoxLayout(body)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(0)
+        outer.addWidget(body, stretch=1)
 
         # ── Sidebar ────────────────────────────────────────────────────────
         sidebar = QWidget()
@@ -4291,27 +4366,20 @@ class MainWindow(QMainWindow):
         brand_row.addStretch()
         sl.addLayout(brand_row)
 
-        # Project name row
+        # Project switcher button
         proj_row = QHBoxLayout()
-        proj_row.setContentsMargins(18, 0, 14, 12)
-        proj_row.setSpacing(4)
-        self._proj_name_lbl = QLabel("—")
-        self._proj_name_lbl.setStyleSheet(
-            "font-size:11px;font-weight:600;color:#3A3A3A;"
-            "background:transparent;border:none;"
-        )
-        proj_row.addWidget(self._proj_name_lbl, stretch=1)
-        self._proj_btn = QToolButton()
-        self._proj_btn.setText("⊿")
-        self._proj_btn.setFixedSize(22, 22)
+        proj_row.setContentsMargins(18, 0, 18, 12)
+        self._proj_btn = QPushButton("—  ▼")
         self._proj_btn.setCursor(Qt.PointingHandCursor)
+        self._proj_btn.setToolTip("Switch project or create a new one")
         self._proj_btn.setStyleSheet(
-            "QToolButton{border:none;background:transparent;"
-            "color:#9B9B9B;font-size:12px;border-radius:3px;}"
-            "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
+            "QPushButton{background:#4E79A7;color:#FFFFFF;font-weight:bold;"
+            "font-size:11px;border:none;border-radius:4px;padding:6px 12px;"
+            "text-align:left;}"
+            "QPushButton:hover{background:#3d6291;}"
         )
         self._proj_btn.clicked.connect(self._open_project_menu)
-        proj_row.addWidget(self._proj_btn)
+        proj_row.addWidget(self._proj_btn, stretch=1)
         sl.addLayout(proj_row)
         self._refresh_project_label()
 
@@ -4347,20 +4415,28 @@ class MainWindow(QMainWindow):
         self._sb_footer.setWordWrap(True)
         sl.addWidget(self._sb_footer)
 
-        reload_btn = QPushButton("⟳  Reload data")
-        reload_btn.setToolTip(
-            "Re-read all results from disk.\n"
-            "Use this after running compare.py or characterize.py from the terminal."
+        self._reload_btn = QPushButton("⟳  Reload data")
+        self._reload_btn.setToolTip(
+            "Re-run comparison report and refresh all views with latest results.\n"
+            "Use this after changing cluster parameters or completing a new pipeline stage."
         )
-        reload_btn.setStyleSheet(
+        self._reload_btn.setStyleSheet(
             "QPushButton {"
             "  background:transparent; border:none; color:#9B9B9B;"
             "  font-size:11px; padding:6px 18px; text-align:left;"
             "}"
             "QPushButton:hover { color:#1a73e8; background:#EBEBEB; }"
         )
-        reload_btn.clicked.connect(self._manual_reload)
-        sl.addWidget(reload_btn)
+        self._reload_btn.clicked.connect(self._on_reload_clicked)
+        sl.addWidget(self._reload_btn)
+
+        self._reload_terminal = _TerminalWidget()
+        self._reload_terminal.setFixedHeight(120)
+        self._reload_terminal.setStyleSheet(
+            "background:#151515;color:#cfd8dc;font-family:Consolas;font-size:10px;"
+        )
+        self._reload_terminal.hide()
+        sl.addWidget(self._reload_terminal)
 
         ml.addWidget(sidebar)
 
@@ -4395,6 +4471,7 @@ class MainWindow(QMainWindow):
         if _HAS_CLUSTER_RUNS_VIEW:
             self._crv = _ClusterRunsView(self.cfg)
             self._crv.run_activated.connect(self._manual_reload)
+            self._crv.cluster_changed.connect(self._on_cluster_changed)
             add("Cluster Runs", self._crv)
         else:
             self._crv = None
@@ -4428,7 +4505,20 @@ class MainWindow(QMainWindow):
         add("Help", self._hv)
 
         self._build_status_bar()
-        self._switch(self.cfg.get("last_view", "Overview"))
+
+        if getattr(self, "_is_new_project", False):
+            pose_source = getattr(self, "_new_project_pose_source", "none")
+            if pose_source == "none":
+                self._switch("Pipeline")
+            else:
+                self._switch("Settings")
+                self._setup_banner_lbl.setText(
+                    "Set your raw videos directory and pose file path in "
+                    "Settings, then go to Pipeline to run analysis."
+                )
+                self._setup_banner.show()
+        else:
+            self._switch(self.cfg.get("last_view", "Overview"))
 
     def _build_status_bar(self):
         sb: QStatusBar = self.statusBar()
@@ -4625,8 +4715,58 @@ class MainWindow(QMainWindow):
 
     def _manual_reload(self) -> None:
         self._watch_result_files()   # pick up any new files that weren't there before
-        self._load_data()
-        self.statusBar().showMessage("Reloading results from disk…", 2000)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Cluster Run Changed")
+        msg.setIcon(QMessageBox.Question)
+        msg.setText(
+            "Cluster run changed. Regenerate comparison report?\n"
+            "This runs compare.py --report using the new cluster labels.\n"
+            "Estimated time: 1-2 minutes."
+        )
+        regen_btn = msg.addButton("Yes, regenerate", QMessageBox.AcceptRole)
+        msg.addButton("No, just reload from disk", QMessageBox.RejectRole)
+        msg.exec_()
+        if msg.clickedButton() == regen_btn:
+            self._run_report_regen()
+        else:
+            self._load_data()
+            self.statusBar().showMessage("Reloading results from disk…", 2000)
+
+    def _on_cluster_changed(self) -> None:
+        """Reload cfg after the active cluster run changes."""
+        self.cfg = _load_cfg()
+        self._watch_result_files()
+
+    def _on_reload_clicked(self) -> None:
+        """Re-run compare.py --report and refresh all views with the latest results."""
+        self.statusBar().showMessage("Reloading…", 2000)
+        self._run_report_regen()
+
+    def _run_report_regen(self) -> None:
+        self._reload_btn.setEnabled(False)
+        self._report_log_buf: list[str] = []
+        self._reload_terminal.clear()
+        self._reload_terminal.show()
+        self.statusBar().showMessage("Running compare.py --report…")
+        self._report_worker = SubprocessWorker(["compare.py", "--report"])
+        self._report_worker.log.connect(self._on_report_log)
+        self._report_worker.done.connect(self._on_report_done)
+        self._report_worker.start()
+
+    def _on_report_log(self, text: str) -> None:
+        self._report_log_buf.append(text)
+        self._reload_terminal.append(text.rstrip())
+
+    def _on_report_done(self, ok: bool) -> None:
+        self._reload_btn.setEnabled(True)
+        if ok:
+            self._reload_terminal.hide()
+            self._load_data()
+            self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
+        else:
+            last = "".join(self._report_log_buf[-10:]).strip() or "(no output captured)"
+            QMessageBox.warning(self, "Report Generation Failed", last)
+            self.statusBar().showMessage("Report generation failed — see error above.", 6000)
 
     def _load_data(self):
         self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""))
@@ -4672,6 +4812,10 @@ class MainWindow(QMainWindow):
         self._qv.update_data(data)
         if self._av is not None:
             self._av.update_data(data)
+        if hasattr(self._av, "refresh"):
+            self._av.refresh(data)
+        if hasattr(self._sv, "refresh"):
+            self._sv.refresh(data)
 
     def _load_session(self):
         if self._cached_data:
@@ -4704,64 +4848,75 @@ class MainWindow(QMainWindow):
     def _init_project(self):
         """Ensure an active project is selected before the window is built.
 
-        On first launch (no app_config.json), silently migrates the existing
-        ROOT/config.json to projects/<slug>/config.json and writes app_config.json.
-        On subsequent launches with multiple projects and no default, shows
-        ProjectSelectorDialog.
+        FIRST LAUNCH (no projects in app_config.json):
+          If a legacy ROOT/config.json exists, silently migrate it into
+          projects/<slug>/. Otherwise show the minimal two-screen
+          WelcomeDialog onboarding flow (no ProjectSelectorDialog).
+
+        SUBSEQUENT LAUNCHES:
+          Auto-load "default_project" if set, otherwise the project with the
+          most recent "last_opened" timestamp. No dialog is shown. The chosen
+          project's "last_opened" is updated on every launch.
         """
+        self._is_new_project = False
+        self._new_project_pose_source = "none"
+
         app_cfg = _load_app_config()
 
-        # ── First launch: migrate existing config ──────────────────────────
         if not app_cfg.get("projects"):
-            project_dir = _migrate_to_project()
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            # Derive a human-friendly name from what was in the config
-            try:
-                cfg_text = (project_dir / "config.json").read_text(encoding="utf-8")
-                name = json.loads(cfg_text).get("project_name", "Luna Fear Conditioning")
-            except Exception:
-                name = "Luna Fear Conditioning"
-            app_cfg = {
-                "projects": [
-                    {"name": name, "path": str(project_dir), "last_opened": now}
-                ],
-                "active_project": str(project_dir),
-                "default_project": "",
-            }
-            _save_app_config(app_cfg)
-            return
+            # ── Legacy upgrade: silently migrate existing config.json ──────
+            if CONFIG_PATH.exists():
+                project_dir = _migrate_to_project()
+                now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                try:
+                    cfg_text = (project_dir / "config.json").read_text(encoding="utf-8")
+                    name = json.loads(cfg_text).get("project_name", "Luna Fear Conditioning")
+                except Exception:
+                    name = "Luna Fear Conditioning"
+                app_cfg = {
+                    "projects": [
+                        {"name": name, "path": str(project_dir), "last_opened": now}
+                    ],
+                    "active_project": str(project_dir),
+                    "default_project": "",
+                }
+                _save_app_config(app_cfg)
+                return
 
+            # ── True first launch: minimal onboarding ──────────────────────
+            from views.project_selector import WelcomeDialog
+            while True:
+                dlg = WelcomeDialog(app_cfg, None, first_launch=True)
+                if dlg.exec_() == QDialog.Accepted and dlg.created_path:
+                    self._is_new_project = True
+                    self._new_project_pose_source = dlg.pose_source
+                    return
+                # User cancelled — a project is required to continue.
+
+        # ── Subsequent launches: auto-load, no dialog ──────────────────────
         projects = app_cfg.get("projects", [])
         default = app_cfg.get("default_project", "")
-        active = app_cfg.get("active_project", "")
 
-        # ── Default project set: load silently ────────────────────────────
         if default and Path(default).exists():
-            if default != active:
-                app_cfg["active_project"] = default
-                _save_app_config(app_cfg)
-            return
+            active = default
+        else:
+            valid = [p for p in projects if Path(p.get("path", "")).exists()]
+            if valid:
+                def _last_opened_key(p):
+                    try:
+                        return datetime.strptime(p.get("last_opened", ""), "%Y-%m-%d %H:%M")
+                    except Exception:
+                        return datetime.min
+                active = max(valid, key=_last_opened_key)["path"]
+            else:
+                active = app_cfg.get("active_project", "")
 
-        # ── Single project: load silently ─────────────────────────────────
-        if len(projects) == 1:
-            p = projects[0]["path"]
-            if p != active:
-                app_cfg["active_project"] = p
-                _save_app_config(app_cfg)
-            return
-
-        # ── Active project already set and valid ──────────────────────────
-        if active and Path(active).exists():
-            return
-
-        # ── Multiple projects, none active: show selector ─────────────────
-        try:
-            from views.project_selector import ProjectSelectorDialog
-            dlg = ProjectSelectorDialog(app_cfg, None)
-            dlg.exec_()
-            # selected_path was written to app_config.json inside _select()
-        except Exception:
-            pass
+        app_cfg["active_project"] = active
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for p in projects:
+            if p.get("path") == active:
+                p["last_opened"] = now
+        _save_app_config(app_cfg)
 
     def _refresh_project_label(self):
         """Update the sidebar project name label from the active project's config."""
@@ -4783,57 +4938,26 @@ class MainWindow(QMainWindow):
                         name = p.get("name", name)
                         break
         # Truncate with ellipsis
-        if len(name) > 22:
-            name = name[:19] + "..."
-        self._proj_name_lbl.setText(name)
-
-        # Style the button based on project count
-        n = len(app_cfg.get("projects", []))
-        if n <= 1:
-            self._proj_btn.setToolTip("Add a new project")
-            self._proj_btn.setStyleSheet(
-                "QToolButton{border:none;background:transparent;"
-                "color:#C8C8C8;font-size:12px;border-radius:3px;}"
-                "QToolButton:hover{color:#9B9B9B;background:rgba(0,0,0,0.04);}"
-            )
-        else:
-            self._proj_btn.setToolTip("Switch project")
-            self._proj_btn.setStyleSheet(
-                "QToolButton{border:none;background:transparent;"
-                "color:#9B9B9B;font-size:12px;border-radius:3px;}"
-                "QToolButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);}"
-            )
+        if len(name) > 18:
+            name = name[:15] + "..."
+        self._proj_btn.setText(f"{name}  ▼")
 
     def _open_project_menu(self):
         app_cfg = _load_app_config()
         projects = app_cfg.get("projects", [])
         active = app_cfg.get("active_project", "")
 
-        if len(projects) <= 1:
-            # Single project: open NewProjectDialog directly
-            try:
-                from views.project_selector import NewProjectDialog
-                dlg = NewProjectDialog(app_cfg, self)
-                if dlg.exec_() == QDialog.Accepted and dlg.created_path:
-                    self._do_switch(dlg.created_path)
-            except Exception:
-                pass
-            return
-
-        # Multiple projects: show dropdown menu
         menu = QMenu(self)
         for proj in projects:
             path = proj.get("path", "")
             pname = proj.get("name", "Unnamed")
-            action = menu.addAction(pname)
-            action.setCheckable(True)
-            action.setChecked(path == active)
+            label = f"✓ {pname}" if path == active else pname
+            action = menu.addAction(label)
             action.triggered.connect(
                 lambda checked=False, p=path: self._switch_project(p)
             )
         menu.addSeparator()
-        menu.addAction("New Project...").triggered.connect(self._new_project_from_menu)
-        menu.addAction("Manage Projects...").triggered.connect(self._manage_projects)
+        menu.addAction("＋  New Project...").triggered.connect(self._new_project_from_menu)
 
         btn_pos = self._proj_btn.mapToGlobal(self._proj_btn.rect().bottomLeft())
         menu.exec_(btn_pos)
@@ -4842,10 +4966,11 @@ class MainWindow(QMainWindow):
         active = _load_app_config().get("active_project", "")
         if path == active:
             return
-        if self._pipeline_running or self._clip_running:
+        if not self.cfg.get("current_run_saved", True):
+            current_name = self.cfg.get("project_name", "current project")
             result = QMessageBox.question(
                 self, "Switch Project",
-                "A pipeline is currently running. Switch project anyway?",
+                f"Unsaved cluster run in {current_name}. Switch anyway?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -4854,7 +4979,7 @@ class MainWindow(QMainWindow):
         self._do_switch(path)
 
     def _do_switch(self, path: str):
-        """Write the new active_project to app_config.json and restart."""
+        """Switch the active project in-place without restarting the app."""
         app_cfg = _load_app_config()
         app_cfg["active_project"] = path
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -4862,31 +4987,43 @@ class MainWindow(QMainWindow):
             if p.get("path") == path:
                 p["last_opened"] = now
         _save_app_config(app_cfg)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        self.cfg = _load_cfg()
+        self._propagate_cfg()
+        self._load_data()
+        self._refresh_project_label()
+        self._switch("Overview")
+        name = self.cfg.get("project_name", Path(path).name)
+        self.statusBar().showMessage(f"Switched to {name}", 5000)
+
+    def _propagate_cfg(self):
+        """Push the freshly-loaded project config out to every subview."""
+        for view in (
+            self._dlc, self._pv, self._crv, self._sv, self._av,
+            self._vv, self._qv, self._setv,
+        ):
+            if view is not None and hasattr(view, "cfg"):
+                view.cfg = self.cfg
+        if hasattr(self._pv, "update_from_cfg"):
+            self._pv.update_from_cfg()
+        if hasattr(self._setv, "load_from_cfg"):
+            self._setv.load_from_cfg()
 
     def _new_project_from_menu(self):
-        try:
-            from views.project_selector import NewProjectDialog
-            app_cfg = _load_app_config()
-            dlg = NewProjectDialog(app_cfg, self)
-            if dlg.exec_() == QDialog.Accepted and dlg.created_path:
-                self._do_switch(dlg.created_path)
-        except Exception:
-            pass
-
-    def _manage_projects(self):
-        try:
-            from views.project_selector import ProjectSelectorDialog
-            app_cfg = _load_app_config()
-            dlg = ProjectSelectorDialog(app_cfg, self)
-            if dlg.exec_() == QDialog.Accepted and dlg.selected_path:
-                current = _load_app_config().get("active_project", "")
-                if dlg.selected_path != current:
-                    self._do_switch(dlg.selected_path)
-                else:
-                    self._refresh_project_label()
-        except Exception:
-            pass
+        from views.project_selector import WelcomeDialog
+        app_cfg = _load_app_config()
+        dlg = WelcomeDialog(app_cfg, self, first_launch=False)
+        if dlg.exec_() == QDialog.Accepted and dlg.created_path:
+            self._do_switch(dlg.created_path)
+            if dlg.pose_source == "none":
+                self._switch("Pipeline")
+            else:
+                self._switch("Settings")
+                self._setup_banner_lbl.setText(
+                    "Set your raw videos directory and pose file path in "
+                    "Settings, then go to Pipeline to run analysis."
+                )
+                self._setup_banner.show()
 
     def closeEvent(self, e):
         self.cfg["window_size"] = [self.width(), self.height()]
