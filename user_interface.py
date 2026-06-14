@@ -4812,18 +4812,6 @@ class MainWindow(QMainWindow):
         projects = app_cfg.get("projects", [])
         active = app_cfg.get("active_project", "")
 
-        if len(projects) <= 1:
-            # Single project: open NewProjectDialog directly
-            try:
-                from views.project_selector import NewProjectDialog
-                dlg = NewProjectDialog(app_cfg, self)
-                if dlg.exec_() == QDialog.Accepted and dlg.created_path:
-                    self._do_switch(dlg.created_path)
-            except Exception:
-                pass
-            return
-
-        # Multiple projects: show dropdown menu
         menu = QMenu(self)
         for proj in projects:
             path = proj.get("path", "")
@@ -4834,9 +4822,11 @@ class MainWindow(QMainWindow):
             action.triggered.connect(
                 lambda checked=False, p=path: self._switch_project(p)
             )
-        menu.addSeparator()
-        menu.addAction("New Project...").triggered.connect(self._new_project_from_menu)
-        menu.addAction("Manage Projects...").triggered.connect(self._manage_projects)
+        if projects:
+            menu.addSeparator()
+        menu.addAction("New Project +").triggered.connect(self._new_project_from_menu)
+        if len(projects) > 1:
+            menu.addAction("Manage Projects...").triggered.connect(self._manage_projects)
 
         btn_pos = self._proj_btn.mapToGlobal(self._proj_btn.rect().bottomLeft())
         menu.exec_(btn_pos)
