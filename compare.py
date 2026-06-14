@@ -31,6 +31,18 @@ def _raw(): return _vc.get_raw_videos_dir()
 def _res(): return _vc.get_results_dir()
 def _meta(): return _vc.get_metadata_path()
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
+_WINDOWS_ROOT = "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB"
+
+
+def _fix_features_path(path: str) -> str:
+    """Normalize a features_path from index.json so it resolves on this machine."""
+    path = path.replace("\\", "/")
+    if "C:/" in path or path.startswith(_WINDOWS_ROOT):
+        path = path.replace(_WINDOWS_ROOT, ROOT)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # GPU detection and hardware banner
@@ -758,10 +770,21 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     boundaries = {}
     cursor = 0
     for stem in stems:
-        feat = np.load(index[stem]["features_path"].replace("\\", "/"))
+        feat_path = _fix_features_path(index[stem].get("features_path", ""))
+        if not os.path.exists(feat_path):
+            print(f"  SKIP {stem}: feature file not found at {feat_path}")
+            continue
+        feat = np.load(feat_path)
         boundaries[stem] = (cursor, cursor + len(feat))
         cursor += len(feat)
         all_features.append(feat)
+
+    if not all_features:
+        sys.exit("No feature files could be loaded. Check results/features/index.json.")
+
+    stems = [s for s in stems if s in boundaries]
+    train_stems = [s for s in train_stems if s in boundaries]
+    test_stems = [s for s in test_stems if s in boundaries]
 
     pooled = np.vstack(all_features).astype(np.float64)
     print(f"Pooled matrix: {pooled.shape[0]:,} frames × {pooled.shape[1]} features")
