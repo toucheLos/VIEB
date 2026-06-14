@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
+import vieb_config as _vc
 from _utils import CLIPS, RESULTS, ROOT, _MPL, _state_colors
 from _workers import SubprocessWorker
 
@@ -1011,16 +1012,44 @@ class AnalysisView(QWidget):
             canvas = self._t2_kin_canvas
             canvas.fig.clf()
             ax = canvas.fig.add_subplot(111)
+
+            # Preferred kinematic metrics, matched case-insensitively against
+            # whatever columns state_summary.csv actually has.
+            preferred = [
+                ("centroid_speed",   "Speed"),
+                ("angular_vel",      "Angular Vel."),
+                ("bout_dur",         "Bout Duration"),
+                ("elongation",       "Elongation"),
+                ("rearing",          "Rearing"),
+            ]
+            id_cols = {"state", "state_id", "cluster_id", "heuristic_label"}
+            cols_lower = {c.lower(): c for c in ss.columns}
+
             metrics = {}
-            for display, col in [
-                ("Mean Speed", "mean_centroid_speed"),
-                ("Angular Vel.", "mean_angular_vel"),
-                ("Bout Duration", "mean_bout_dur_sec"),
-                ("Elongation", "mean_elongation"),
-            ]:
+            used_cols = set()
+            for keyword, display in preferred:
+                col = next(
+                    (c for lc, c in cols_lower.items() if keyword in lc), None
+                )
+                if col is None or col in used_cols:
+                    continue
                 v = r.get(col, None)
                 if v is not None and not pd.isna(v):
                     metrics[display] = float(v)
+                    used_cols.add(col)
+
+            # Fill in remaining numeric columns so the chart isn't empty
+            # when state_summary.csv doesn't have the preferred metrics.
+            for col in ss.columns:
+                if col in id_cols or col in used_cols:
+                    continue
+                v = r.get(col, None)
+                if v is None or pd.isna(v) or not isinstance(v, (int, float, np.integer, np.floating)):
+                    continue
+                display = col.replace("mean_", "").replace("_", " ").title()
+                metrics[display] = float(v)
+                used_cols.add(col)
+
             if metrics:
                 vals = list(metrics.values())
                 max_v = max(abs(v) for v in vals) or 1.0
@@ -1086,7 +1115,7 @@ class AnalysisView(QWidget):
         sid = self._t2_load_clip_btn.property("_sid")
         if sid is None:
             return
-        clip_dir = CLIPS / f"state_{sid}"
+        clip_dir = Path(_vc.get_clips_dir()) / f"state_{sid}"
         if not clip_dir.exists():
             self._t2_clip_status.setText(
                 f"No clips found for state {sid} — run: python generate_clips.py"

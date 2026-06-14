@@ -444,6 +444,7 @@ _DEFAULT_CFG = {
     "hdbscan_jobs": 1,
     "current_run_saved": False,
     "current_run_id": "",
+    "dlc_python": "",
     "column_map": {
         "animal_id":  "animal_id",
         "day":        "day",
@@ -4430,14 +4431,6 @@ class MainWindow(QMainWindow):
         self._reload_btn.clicked.connect(self._on_reload_clicked)
         sl.addWidget(self._reload_btn)
 
-        self._reload_terminal = _TerminalWidget()
-        self._reload_terminal.setFixedHeight(120)
-        self._reload_terminal.setStyleSheet(
-            "background:#151515;color:#cfd8dc;font-family:Consolas;font-size:10px;"
-        )
-        self._reload_terminal.hide()
-        sl.addWidget(self._reload_terminal)
-
         ml.addWidget(sidebar)
 
         self._stack = QStackedWidget()
@@ -4745,8 +4738,6 @@ class MainWindow(QMainWindow):
     def _run_report_regen(self) -> None:
         self._reload_btn.setEnabled(False)
         self._report_log_buf: list[str] = []
-        self._reload_terminal.clear()
-        self._reload_terminal.show()
         self.statusBar().showMessage("Running compare.py --report…")
         self._report_worker = SubprocessWorker(["compare.py", "--report"])
         self._report_worker.log.connect(self._on_report_log)
@@ -4755,12 +4746,10 @@ class MainWindow(QMainWindow):
 
     def _on_report_log(self, text: str) -> None:
         self._report_log_buf.append(text)
-        self._reload_terminal.append(text.rstrip())
 
     def _on_report_done(self, ok: bool) -> None:
         self._reload_btn.setEnabled(True)
         if ok:
-            self._reload_terminal.hide()
             self._load_data()
             self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
         else:

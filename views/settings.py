@@ -129,6 +129,29 @@ class SettingsView(QWidget):
             "Default: raw_videos/ inside the VIEB project folder."
         )
 
+        # ── DLC Python interpreter ──────────────────────────────────────
+        _dlc_python_tip = (
+            "Path to a Python interpreter with DeepLabCut installed.\n"
+            "Leave blank to use the same Python that runs VIEB.\n"
+            "Example: /home/carlos/Projects/vieb/venv-dlc/bin/python"
+        )
+        self._dlc_python_le = QLineEdit(self.cfg.get("dlc_python", ""))
+        self._dlc_python_le.setToolTip(_dlc_python_tip)
+        dlc_python_browse = QPushButton("Browse...")
+        dlc_python_browse.setFixedWidth(80)
+        dlc_python_browse.clicked.connect(self._browse_dlc_python)
+        _dlc_python_row_widget = QWidget()
+        _dlc_python_row_h = QHBoxLayout(_dlc_python_row_widget)
+        _dlc_python_row_h.setContentsMargins(0, 0, 0, 0)
+        _dlc_python_row_h.setSpacing(4)
+        _dlc_python_row_h.addWidget(self._dlc_python_le)
+        _dlc_python_row_h.addWidget(dlc_python_browse)
+        lbl_dlc_python = QLabel("DLC Python interpreter")
+        lbl_dlc_python.setToolTip(_dlc_python_tip)
+        form.addWidget(lbl_dlc_python, r, 0)
+        form.addWidget(_dlc_python_row_widget, r, 1)
+        r += 1
+
         # ── Metadata CSV ──────────────────────────────────────────────────
         self._meta_csv = QLineEdit(self.cfg.get("metadata_csv_path", ""))
         self._meta_csv.setPlaceholderText("Path to metadata.csv …")
@@ -353,6 +376,14 @@ class SettingsView(QWidget):
         if p:
             self._meta_csv.setText(p)
 
+    def _browse_dlc_python(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select DLC Python Interpreter", self._dlc_python_le.text(),
+            "Python (python python3 *)"
+        )
+        if p:
+            self._dlc_python_le.setText(p)
+
     def _browse_h5_path(self):
         p, _ = QFileDialog.getOpenFileName(
             self, "Select H5 Pose File", self._h5_path.text(), "HDF5 files (*.h5 *.hdf5)"
@@ -493,6 +524,7 @@ class SettingsView(QWidget):
         }
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
+        self.cfg["dlc_python"] = self._dlc_python_le.text().strip()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
         self.cfg["pose_source"] = self._pose_source.currentText()
         self.cfg["h5_path"] = self._h5_path.text().strip()

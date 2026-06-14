@@ -73,8 +73,7 @@ class RunPipelineView(QWidget):
         top.addStretch()
         self._run_full = QPushButton("Run Full Pipeline (Stages 2–11)")
         self._run_full.setToolTip(
-            "Run all behavioral analysis stages in order.\n"
-            "Prerequisite: complete DLC Setup (pose estimation) first."
+            "Run all behavioral analysis stages in order."
         )
         self._run_full.clicked.connect(self.run_full_pipeline)
         top.addWidget(self._run_full)
@@ -99,6 +98,10 @@ class RunPipelineView(QWidget):
         holder = QWidget()
         v = QVBoxLayout(holder)
         for stage in STAGES:
+            if stage["id"] == 1:
+                # Stage 1 (DLC pose estimation) is accessible via the
+                # sidebar's DLC Setup view; don't render it here too.
+                continue
             row = StageRow(stage, self.cfg)
             if stage["id"] == 0:
                 row.run_stage.connect(lambda _: self._open_env_setup())
@@ -107,10 +110,6 @@ class RunPipelineView(QWidget):
                 # Auto-complete if venv already exists
                 if self._venv_exists():
                     row.set_status("done")
-            elif stage["id"] == 1:
-                row.run_stage.connect(lambda _: self.navigate_dlc.emit())
-                row._run_btn.setText("Open DLC Setup ▶")
-                row._from_btn.hide()
             else:
                 row.run_stage.connect(self._run_stage)
                 row.run_from_here.connect(self._run_from_here)
@@ -275,8 +274,6 @@ class RunPipelineView(QWidget):
         self._global_log.insertPlainText(line)
         sb = self._global_log.verticalScrollBar()
         sb.setValue(sb.maximum())
-        for sid in self._active_stages:
-            self._rows[sid].append_log(line)
 
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)
@@ -410,31 +407,30 @@ class RunPipelineView(QWidget):
         t.start()
 
     def _build_sequence(self, start_sid=1, from_here=False):
-        # Stage 0 (environment setup) is never run through the pipeline runner
-        all_ids = [s["id"] for s in STAGES if s["id"] >= max(start_sid, 1)] if from_here else [start_sid]
-        if not from_here and start_sid in (4, 5, 6):
-            all_ids = list(range(3, start_sid + 1))
-        if not from_here and start_sid == 3:
-            all_ids = [3]
-        if from_here and start_sid in (4, 5, 6):
-            all_ids = [3] + [s for s in range(7, 12)]
+        # Get all stage IDs in order
+        all_stage_ids = [s["id"] for s in STAGES]
 
-        if not self.cfg.get("enable_state_collapse", False):
-            all_ids = [i for i in all_ids if i != 7]
-        if not self.cfg.get("export_clips", False) and from_here:
-            pass
-        if _has_pose_csvs(Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))):
-            if 1 in all_ids:
-                all_ids.remove(1)
-                self._rows[1].set_status("done")
         if from_here:
-            done_ids = {
-                int(k)
-                for k, v in self.cfg.get("stage_status", {}).items()
-                if str(v) == "done" and str(k).isdigit()
-            }
-            all_ids = [sid for sid in all_ids if sid not in done_ids]
-        return all_ids
+            # Include start_sid and everything after
+            ids = [sid for sid in all_stage_ids if sid >= start_sid]
+        else:
+            # Run only this specific stage
+            ids = [start_sid]
+
+        # Filter out collapse stage if not enabled
+        if not self.cfg.get("enable_state_collapse", False):
+            ids = [i for i in ids if i != 7]
+
+        # Filter out DLC stage if pose CSVs already exist
+        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
+        if _has_pose_csvs(raw_dir) and 1 in ids:
+            ids.remove(1)
+
+        # Never run stage 1 from pipeline runner (it opens DLC Setup)
+        if 1 in ids and from_here:
+            ids.remove(1)
+
+        return ids
 
     def run_full_pipeline(self):
         self._start_worker(self._build_sequence(2, from_here=True))

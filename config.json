@@ -39,7 +39,7 @@
   "umap_sweep": false,
   "hdbscan_jobs": 1,
   "current_run_saved": false,
-  "current_run_id": "run_011_20260609_0143_mcs2500_umap15",
+  "current_run_id": "run_012_20260614_0157_mcs2500_umap15",
   "cohort_input_file": "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB/design_and_cohorts/Luna Wildtype Behavior Checklis.xlsx",
   "cohort_file": "cohort_normalized.csv",
   "jess_file": "",

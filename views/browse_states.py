@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 
 import vieb_config as _vc
 
-from _utils import ROOT, RESULTS, CLIPS, _open_folder, _fmt_ts, _state_colors, _CV2, _MPL, _thumb_from_video
+from _utils import ROOT, RESULTS, _open_folder, _fmt_ts, _state_colors, _CV2, _MPL, _thumb_from_video
 from _widgets import VideoPlayer, MplCanvas, KinematicsPanel
 
 if _CV2:
@@ -68,7 +68,7 @@ class StateDetailDialog(QDialog):
         self._build()
 
     def _clip_groups(self):
-        sd = CLIPS / f"state_{self.sid}"
+        sd = Path(_vc.get_clips_dir()) / f"state_{self.sid}"
         if not sd.exists():
             return {}, False
         return {
@@ -301,7 +301,8 @@ class StateCard(QFrame):
         th = QLabel(alignment=Qt.AlignCenter)
         th.setFixedSize(170, 100)
         th.setStyleSheet("background:#eee;border-radius:4px;")
-        pm = _thumb_from_video(next(iter((CLIPS / f"state_{sid}").glob("*.mp4")), None)) if (CLIPS / f"state_{sid}").exists() else None
+        clip_dir = Path(_vc.get_clips_dir()) / f"state_{sid}"
+        pm = _thumb_from_video(next(iter(clip_dir.glob("*.mp4")), None)) if clip_dir.exists() else None
         if pm:
             th.setPixmap(pm)
         else:
@@ -874,7 +875,7 @@ class BrowseStatesView(QWidget):
             return
 
         # ── Fallback: pre-generated clip files ────────────────────────────
-        clip_dir = Path(os.path.abspath(str(CLIPS / f"state_{sid}")))
+        clip_dir = Path(os.path.abspath(str(Path(_vc.get_clips_dir()) / f"state_{sid}")))
         if not clip_dir.exists() or not list(clip_dir.glob("*.mp4")):
             self._clip_files = []
             self._clip_page = 0

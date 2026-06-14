@@ -2,6 +2,12 @@
   "projects": [
     {
       "name": "VIEB-Carlos-2026-02-11",
+      "path": "/home/carlos/Projects/vieb/VIEB-Carlos-2026-02-11",
+      "config": "/home/carlos/Projects/vieb/VIEB-Carlos-2026-02-11/config.yaml",
+      "added": "2026-06-14 02:23"
+    },
+    {
+      "name": "VIEB-Carlos-2026-02-11",
       "path": "C:\\Users\\playtoe\\Programs\\neuron\\luna_lab\\VIEB\\VIEB-Carlos-2026-02-11",
       "config": "C:\\Users\\playtoe\\Programs\\neuron\\luna_lab\\VIEB\\VIEB-Carlos-2026-02-11\\config.yaml",
       "added": "2026-05-15 01:19"

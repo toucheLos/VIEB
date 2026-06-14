@@ -280,14 +280,15 @@ class SubprocessWorker(QThread):
     log = pyqtSignal(str)
     done = pyqtSignal(bool)
 
-    def __init__(self, args: list[str]):
+    def __init__(self, args: list[str], python_exe: str | None = None):
         super().__init__()
         self.args = args
+        self.python_exe = python_exe or sys.executable
 
     def run(self):
         try:
             p = subprocess.Popen(
-                [sys.executable, *self.args],
+                [self.python_exe, *self.args],
                 cwd=str(ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

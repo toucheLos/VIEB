@@ -1,14 +1,13 @@
 from __future__ import annotations
 import math
 import os
-from collections import deque
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSlider, QTextEdit, QToolButton,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QSlider, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -348,7 +347,6 @@ class StageRow(QFrame):
         super().__init__()
         self.stage = stage
         self.cfg = cfg
-        self.logs = deque(maxlen=20)
         self._dom_state_id = -1
         self._build()
 
@@ -485,12 +483,6 @@ class StageRow(QFrame):
         params.addStretch()
         dl.addLayout(params)
 
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setFixedHeight(46)
-        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;font-size:11px;")
-        dl.addWidget(self._log)
-
         acts = QHBoxLayout()
         self._run_btn = QPushButton("Run")
         self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
@@ -499,11 +491,6 @@ class StageRow(QFrame):
         acts.addWidget(self._run_btn)
         acts.addWidget(self._from_btn)
         acts.addStretch()
-        self._copy_log_btn = QPushButton("Copy Output")
-        self._copy_log_btn.setFixedHeight(26)
-        self._copy_log_btn.setToolTip("Copy this stage's output to clipboard")
-        self._copy_log_btn.clicked.connect(self._copy_log)
-        acts.addWidget(self._copy_log_btn)
         dl.addLayout(acts)
 
         self._details.hide()
@@ -554,15 +541,6 @@ class StageRow(QFrame):
             f"border-radius:4px;padding:3px 8px;color:{color_text};font-size:12px;"
         )
         self._fix_btn.setVisible(dominant_frac > 0.50)
-
-    def append_log(self, line):
-        self.logs.append(line.rstrip("\n"))
-        self._log.setPlainText("\n".join(self.logs))
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _copy_log(self):
-        QApplication.clipboard().setText(self._log.toPlainText())
 
     def set_enabled(self, enabled):
         self._run_btn.setEnabled(enabled)
