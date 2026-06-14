@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, _DEFAULT_CFG, _save_cfg, _load_cfg
+from _utils import ROOT, RESULTS, _DEFAULT_CFG, _save_cfg, _load_cfg, _open_folder
 
 
 class SettingsView(QWidget):
@@ -163,6 +163,16 @@ class SettingsView(QWidget):
         gen_meta_btn.clicked.connect(self._open_metadata_generator)
         form.addWidget(QLabel(""), r, 0)
         form.addWidget(gen_meta_btn, r, 1)
+        r += 1
+
+        validate_meta_btn = QPushButton("Validate Metadata…")
+        validate_meta_btn.setToolTip(
+            "Check metadata.csv for blank 'animal_id' or 'context' values\n"
+            "before running feature extraction / comparison."
+        )
+        validate_meta_btn.clicked.connect(self._validate_metadata)
+        form.addWidget(QLabel(""), r, 0)
+        form.addWidget(validate_meta_btn, r, 1)
         r += 1
 
         # ── H5 Pose Source ──────────────────────────────────────────────
@@ -459,11 +469,32 @@ class SettingsView(QWidget):
             self.cfg["metadata_csv_path"] = p
             self.cfg["column_map"] = _autodetect_columns(p)
             QMessageBox.information(dlg, "Generate Metadata", f"Saved to {p}")
+            _open_folder(Path(p).parent)
             dlg.accept()
 
         save_btn.clicked.connect(_save_template)
         cancel_btn.clicked.connect(dlg.reject)
         dlg.exec_()
+
+    def _validate_metadata(self):
+        from metadata_generator import validate_metadata_csv
+
+        meta_path = self._meta_csv.text().strip() or str(Path(ROOT) / "metadata.csv")
+        report = validate_metadata_csv(meta_path)
+
+        if report["valid"]:
+            QMessageBox.information(
+                self, "Validate Metadata",
+                f"{meta_path}\n\nLooks good — 'animal_id' and 'context' are filled in for all rows."
+            )
+            return
+
+        details = "\n".join(f"- {m}" for m in report["messages"])
+        QMessageBox.warning(
+            self, "Validate Metadata",
+            f"{meta_path}\n\nIssues found:\n{details}\n\n"
+            "Fill in these rows before running feature extraction / comparison."
+        )
 
     def _open_mapper(self):
         from views.metadata_mapper import MetadataMapperWidget
