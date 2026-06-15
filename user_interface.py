@@ -3910,13 +3910,8 @@ class SettingsView(QWidget):
 
 class NavBtn(QPushButton):
     """Sidebar navigation button styled to match the design spec."""
-    def __init__(self, text):
-        icon = _NAV_ICONS.get(text, "·")
-        super().__init__(f"  {icon}   {text}")
-        self.setCheckable(True)
-        self.setFixedHeight(38)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("""
+
+    _STYLE = """
             QPushButton {
                 text-align: left;
                 padding: 0 18px;
@@ -3937,7 +3932,49 @@ class NavBtn(QPushButton):
                 color: #1A1A1A;
                 font-weight: 600;
             }
-        """)
+        """
+
+    _STYLE_COLLAPSED = """
+            QPushButton {
+                text-align: center;
+                padding: 0;
+                border: none;
+                border-left: 3px solid transparent;
+                background: transparent;
+                font-size: 15px;
+                color: #6B6B6B;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QPushButton:hover {
+                background: rgba(0,0,0,0.03);
+                color: #1A1A1A;
+            }
+            QPushButton:checked {
+                border-left-color: #4E79A7;
+                background: rgba(78,121,167,0.08);
+                color: #1A1A1A;
+                font-weight: 600;
+            }
+        """
+
+    def __init__(self, text):
+        self._label = text
+        self._icon = _NAV_ICONS.get(text, "·")
+        super().__init__(f"  {self._icon}   {text}")
+        self.setCheckable(True)
+        self.setFixedHeight(38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(self._STYLE)
+
+    def set_collapsed(self, collapsed):
+        if collapsed:
+            self.setText(self._icon)
+            self.setToolTip(self._label)
+            self.setStyleSheet(self._STYLE_COLLAPSED)
+        else:
+            self.setText(f"  {self._icon}   {self._label}")
+            self.setToolTip("")
+            self.setStyleSheet(self._STYLE)
 
 
 
@@ -4172,27 +4209,38 @@ class MainWindow(QMainWindow):
         sl.setContentsMargins(0, 18, 0, 10)
         sl.setSpacing(0)
 
-        # Brand
+        # Brand + collapse toggle
         brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(18, 0, 18, 20)
-        logo = QLabel("VIEB")
-        logo.setStyleSheet(
+        brand_row.setContentsMargins(18, 0, 12, 20)
+        self._logo_lbl = QLabel("VIEB")
+        self._logo_lbl.setStyleSheet(
             "font-family:'Consolas','IBM Plex Mono',monospace;"
             "font-size:16px;font-weight:600;letter-spacing:2px;color:#1A1A1A;"
             "background:transparent;border:none;"
         )
-        ver = QLabel("v1.0")
-        ver.setStyleSheet(
+        self._ver_lbl = QLabel("v1.0")
+        self._ver_lbl.setStyleSheet(
             "font-family:'Consolas','IBM Plex Mono',monospace;"
             "font-size:10px;color:#9B9B9B;background:transparent;border:none;"
         )
-        brand_row.addWidget(logo)
-        brand_row.addWidget(ver)
+        brand_row.addWidget(self._logo_lbl)
+        brand_row.addWidget(self._ver_lbl)
         brand_row.addStretch()
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setFixedSize(22, 22)
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setToolTip("Collapse sidebar")
+        self._collapse_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#9B9B9B;border:none;font-size:13px;}"
+            "QPushButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);border-radius:4px;}"
+        )
+        self._collapse_btn.clicked.connect(self._toggle_sidebar)
+        brand_row.addWidget(self._collapse_btn)
         sl.addLayout(brand_row)
 
         # Project switcher button
-        proj_row = QHBoxLayout()
+        self._proj_row_w = QWidget()
+        proj_row = QHBoxLayout(self._proj_row_w)
         proj_row.setContentsMargins(18, 0, 18, 12)
         self._proj_btn = QPushButton("—  ▼")
         self._proj_btn.setCursor(Qt.PointingHandCursor)
@@ -4205,17 +4253,17 @@ class MainWindow(QMainWindow):
         )
         self._proj_btn.clicked.connect(self._open_project_menu)
         proj_row.addWidget(self._proj_btn, stretch=1)
-        sl.addLayout(proj_row)
+        sl.addWidget(self._proj_row_w)
         self._refresh_project_label()
 
         # Section label
-        ws_lbl = QLabel("WORKSPACE")
-        ws_lbl.setStyleSheet(
+        self._ws_lbl = QLabel("WORKSPACE")
+        self._ws_lbl.setStyleSheet(
             "font-size:10px;font-weight:600;letter-spacing:2px;color:#9B9B9B;"
             "padding:6px 18px;background:transparent;border:none;"
             "text-transform:uppercase;"
         )
-        sl.addWidget(ws_lbl)
+        sl.addWidget(self._ws_lbl)
 
         # Nav buttons
         self._nav = {}
@@ -4227,10 +4275,10 @@ class MainWindow(QMainWindow):
         sl.addStretch()
 
         # Footer
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
-        sl.addWidget(sep)
+        self._sb_sep = QFrame()
+        self._sb_sep.setFrameShape(QFrame.HLine)
+        self._sb_sep.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
+        sl.addWidget(self._sb_sep)
         self._sb_footer = QLabel("No project loaded")
         self._sb_footer.setStyleSheet(
             "font-family:'Consolas','IBM Plex Mono',monospace;"
@@ -4255,6 +4303,8 @@ class MainWindow(QMainWindow):
         self._reload_btn.clicked.connect(self._on_reload_clicked)
         sl.addWidget(self._reload_btn)
 
+        self._sidebar = sidebar
+        self._sidebar_collapsed = False
         ml.addWidget(sidebar)
 
         self._stack = QStackedWidget()
@@ -4341,6 +4391,48 @@ class MainWindow(QMainWindow):
                 self._setup_banner.show()
         else:
             self._switch(self.cfg.get("last_view", "Overview"))
+
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        collapsed = self._sidebar_collapsed
+
+        self._sidebar.setFixedWidth(56 if collapsed else 220)
+        self._logo_lbl.setVisible(not collapsed)
+        self._ver_lbl.setVisible(not collapsed)
+        self._proj_row_w.setVisible(not collapsed)
+        self._ws_lbl.setVisible(not collapsed)
+        self._sb_footer.setVisible(not collapsed)
+        self._sb_sep.setVisible(not collapsed)
+
+        self._collapse_btn.setText("»" if collapsed else "«")
+        self._collapse_btn.setToolTip("Expand sidebar" if collapsed else "Collapse sidebar")
+
+        for b in self._nav.values():
+            b.set_collapsed(collapsed)
+
+        if collapsed:
+            self._reload_btn.setText("⟳")
+            self._reload_btn.setToolTip("Reload data")
+            self._reload_btn.setStyleSheet(
+                "QPushButton {"
+                "  background:transparent; border:none; color:#9B9B9B;"
+                "  font-size:14px; padding:6px 0; text-align:center;"
+                "}"
+                "QPushButton:hover { color:#1a73e8; background:#EBEBEB; }"
+            )
+        else:
+            self._reload_btn.setText("⟳  Reload data")
+            self._reload_btn.setToolTip(
+                "Re-run comparison report and refresh all views with latest results.\n"
+                "Use this after changing cluster parameters or completing a new pipeline stage."
+            )
+            self._reload_btn.setStyleSheet(
+                "QPushButton {"
+                "  background:transparent; border:none; color:#9B9B9B;"
+                "  font-size:11px; padding:6px 18px; text-align:left;"
+                "}"
+                "QPushButton:hover { color:#1a73e8; background:#EBEBEB; }"
+            )
 
     def _build_status_bar(self):
         sb: QStatusBar = self.statusBar()
