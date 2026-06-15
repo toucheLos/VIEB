@@ -281,8 +281,34 @@ class RunPipelineView(QWidget):
             if sid != 0:  # Stage 0 is not a pipeline step; keep its button usable
                 row.set_enabled(enabled)
 
+    def _check_metadata(self, stage_ids) -> bool:
+        """If feature extraction (stage 2) is about to run, warn the user about
+        incomplete metadata.csv rows. Returns False if the user wants to abort."""
+        if 2 not in stage_ids:
+            return True
+        try:
+            import vieb_config as _vc
+            from metadata_generator import validate_metadata_csv
+            report = validate_metadata_csv(_vc.get_metadata_path())
+        except Exception:
+            return True
+        if report["valid"]:
+            return True
+        details = "\n".join(f"- {m}" for m in report["messages"])
+        reply = QMessageBox.warning(
+            self, "Incomplete metadata.csv",
+            f"metadata.csv has rows missing 'animal_id' or 'context':\n\n{details}\n\n"
+            "Feature extraction can still run, but comparison/quantification\n"
+            "will fail or be meaningless until these are filled in.\n\n"
+            "Continue anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
     def _start_worker(self, stage_ids):
         if self._worker and self._worker.isRunning():
+            return
+        if not self._check_metadata(stage_ids):
             return
         self._worker = PipelineRunner(stage_ids, self.cfg)
         self._active_stages = set(stage_ids)

@@ -257,9 +257,31 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     print(f"Feature files saved to results/features/")
 
 
+def _check_metadata_before_extract():
+    """Warn (non-fatal) if metadata.csv is missing required animal_id/context
+    values. Feature extraction can still proceed without metadata, but
+    downstream comparison/quantification will fail or be meaningless."""
+    from metadata_generator import validate_metadata_csv
+
+    meta_path = _meta()
+    if not os.path.exists(meta_path):
+        print(f"[warn] metadata.csv not found at {meta_path} — "
+              f"downstream comparison steps will need it.")
+        return
+
+    report = validate_metadata_csv(meta_path)
+    if not report["valid"]:
+        print(f"[warn] metadata.csv has incomplete rows ({meta_path}):")
+        for msg in report["messages"]:
+            print(f"  - {msg}")
+        print("  Fill in these rows before running 'compare.py --report' or '--quantify'.")
+
+
 def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     from ml import PoseFeatureExtractor
     from pose_io import load_pose, _find_dlc_csv
+
+    _check_metadata_before_extract()
 
     pose_source = _vc.get_pose_source()
 
