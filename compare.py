@@ -1072,7 +1072,23 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
             min_samples=effective_min_samples,
             cluster_selection_method="eom",
         )
-        clusterer_model.fit(train_umap)
+        try:
+            clusterer_model.fit(train_umap)
+        except Exception as _gpu_err:
+            if use_gpu:
+                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
+                import hdbscan as _hdbscan_lib
+                use_gpu = False
+                HDBSCANClass = _hdbscan_lib.HDBSCAN
+                clusterer_model = HDBSCANClass(
+                    min_cluster_size=min_cluster_size,
+                    min_samples=effective_min_samples,
+                    cluster_selection_method="eom",
+                    prediction_data=True,
+                )
+                clusterer_model.fit(train_umap)
+            else:
+                raise
         train_raw_labels = clusterer_model.labels_
         if hasattr(train_raw_labels, "to_numpy"):
             train_raw_labels = train_raw_labels.to_numpy()
@@ -1142,7 +1158,22 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
             min_samples=effective_min_samples,
             cluster_selection_method="eom",
         )
-        clusterer_model.fit(pooled_umap)
+        try:
+            clusterer_model.fit(pooled_umap)
+        except Exception as _gpu_err:
+            if use_gpu:
+                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
+                import hdbscan as _hdbscan_lib
+                use_gpu = False
+                HDBSCANClass = _hdbscan_lib.HDBSCAN
+                clusterer_model = HDBSCANClass(
+                    min_cluster_size=min_cluster_size,
+                    min_samples=effective_min_samples,
+                    cluster_selection_method="eom",
+                )
+                clusterer_model.fit(pooled_umap)
+            else:
+                raise
         raw_labels = clusterer_model.labels_
         if hasattr(raw_labels, "to_numpy"):
             raw_labels = raw_labels.to_numpy()
