@@ -1013,54 +1013,38 @@ class AnalysisView(QWidget):
             canvas.fig.clf()
             ax = canvas.fig.add_subplot(111)
 
-            # Preferred kinematic metrics, matched case-insensitively against
+            # Fixed kinematic metrics, matched case-insensitively against
             # whatever columns state_summary.csv actually has.
-            preferred = [
+            kinematic_metrics = [
                 ("centroid_speed",   "Speed"),
-                ("angular_vel",      "Angular Vel."),
-                ("bout_dur",         "Bout Duration"),
-                ("elongation",       "Elongation"),
-                ("rearing",          "Rearing"),
+                ("angular_velocity", "Angular Velocity"),
+                ("body_elongation",  "Elongation"),
+                ("rearing_score",    "Rearing Score"),
+                ("bout_duration_s",  "Bout Duration"),
             ]
-            id_cols = {"state", "state_id", "cluster_id", "heuristic_label"}
             cols_lower = {c.lower(): c for c in ss.columns}
 
             metrics = {}
-            used_cols = set()
-            for keyword, display in preferred:
-                col = next(
-                    (c for lc, c in cols_lower.items() if keyword in lc), None
-                )
-                if col is None or col in used_cols:
+            for col_name, display in kinematic_metrics:
+                col = cols_lower.get(col_name.lower())
+                if col is None:
                     continue
                 v = r.get(col, None)
-                if v is not None and not pd.isna(v):
-                    metrics[display] = float(v)
-                    used_cols.add(col)
-
-            # Fill in remaining numeric columns so the chart isn't empty
-            # when state_summary.csv doesn't have the preferred metrics.
-            for col in ss.columns:
-                if col in id_cols or col in used_cols:
+                if v is None or pd.isna(v):
                     continue
-                v = r.get(col, None)
-                if v is None or pd.isna(v) or not isinstance(v, (int, float, np.integer, np.floating)):
+                max_v = ss[col].max()
+                if pd.isna(max_v) or max_v == 0:
                     continue
-                display = col.replace("mean_", "").replace("_", " ").title()
-                metrics[display] = float(v)
-                used_cols.add(col)
+                metrics[display] = float(v) / float(max_v)
 
             if metrics:
-                vals = list(metrics.values())
-                max_v = max(abs(v) for v in vals) or 1.0
-                norm_v = [v / max_v for v in vals]
+                norm_v = list(metrics.values())
                 y = np.arange(len(metrics))
-                colors = ["#4E79A7" if v >= 0 else "#E63946" for v in norm_v]
-                ax.barh(y, norm_v, color=colors, alpha=0.85)
+                ax.barh(y, norm_v, color="#4E79A7", alpha=0.85)
                 ax.set_yticks(y)
                 ax.set_yticklabels(list(metrics.keys()), fontsize=9)
-                ax.set_xlabel("Normalized value (relative to max)")
-                ax.axvline(0, color="#999", linewidth=0.8)
+                ax.set_xlim(0, 1)
+                ax.set_xlabel("Normalized value (relative to max across states)")
             else:
                 ax.text(0.5, 0.5, "No kinematic data",
                         ha="center", va="center", transform=ax.transAxes, color="#999")
