@@ -1059,6 +1059,9 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
 
     # ---- HDBSCAN clustering ----
     effective_min_samples = min_samples if min_samples is not None else min_cluster_size
+    if use_gpu and effective_min_samples > 1023:
+        print(f"  [info] cuML HDBSCAN requires min_samples <= 1023; clamping {effective_min_samples} -> 1023.")
+        effective_min_samples = 1023
     print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={effective_min_samples})...")
 
     if validate:

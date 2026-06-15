@@ -1,19 +1,16 @@
 from __future__ import annotations
-import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
-    QDialogButtonBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QScrollArea, QTextEdit, QVBoxLayout, QWidget, QDialogButtonBox,
 )
 
 # Canonical role names shown in the keypoint-mapping dropdowns
@@ -29,23 +26,26 @@ _ROLE_OPTIONS = [
     "tail_tip",
 ]
 
-from _utils import ROOT, RESULTS, _load_cfg, _save_cfg, _register_project, _load_projects
+from _utils import ROOT, _save_cfg, _register_project, _find_dlc_project
 from _workers import SubprocessWorker
 from _dialogs import _CreateProjectDialog
 
 try:
-    from vieb_config import get_dlc_project_path, set_dlc_project_path, get_dlc_config_path
+    from vieb_config import get_dlc_project_path
 except ImportError:
     get_dlc_project_path = lambda: None
-    set_dlc_project_path = lambda p: None
-    get_dlc_config_path = lambda: None
 
 try:
-    from pretrained_manager import list_available_pretrained, load_pretrained_model, analyze_with_pretrained
+    from pretrained_manager import list_available_pretrained
 except ImportError:
     list_available_pretrained = lambda: []
-    load_pretrained_model = lambda *a, **kw: None
-    analyze_with_pretrained = lambda *a, **kw: []
+
+_PRIMARY_BTN_STYLE = (
+    "QPushButton{background-color:#4E79A7;color:white;border-radius:6px;"
+    "font-weight:bold;font-size:12pt;padding:8px;}"
+    "QPushButton:hover{background-color:#3d6291;}"
+    "QPushButton:disabled{background-color:#b0bec5;}"
+)
 
 _LABELING_GUIDE = """
 <h3>Labeling Guide — DeepLabCut + Napari</h3>
@@ -125,15 +125,25 @@ _DLC_NOT_INSTALLED_MSG = (
 )
 
 
-def _find_dlc_project():
-    for p in ROOT.glob("VIEB-*/config.yaml"):
-        return p.parent
-    return None
+def _map_color(val: float) -> str:
+    if val >= 95:
+        return "#2e7d32"
+    if val >= 80:
+        return "#e65100"
+    return "#c62828"
+
+
+def _rmse_color(val: float) -> str:
+    if val <= 5:
+        return "#2e7d32"
+    if val <= 10:
+        return "#e65100"
+    return "#c62828"
 
 
 class _ClickableLabel(QLabel):
     """A QLabel that emits `clicked` on left mouse-button press — used for
-    lightweight hyperlink-style and collapsible-section headers."""
+    lightweight hyperlink-style headers."""
 
     clicked = pyqtSignal()
 
@@ -143,27 +153,197 @@ class _ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class _ClickableFrame(QFrame):
+    """A QFrame that emits `clicked` on left mouse-button press."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class _ModeCard(_ClickableFrame):
+    """A clickable card representing one 'what's your situation?' option."""
+
+    def __init__(self, icon: str, title: str, description: str):
+        super().__init__()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(100)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+
+        top = QLabel(f"{icon}  {title}")
+        top.setWordWrap(True)
+        top.setStyleSheet("font-weight:bold;color:#333;background:transparent;border:none;")
+        lay.addWidget(top)
+
+        desc = QLabel(description)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color:#666;font-size:11px;background:transparent;border:none;")
+        lay.addWidget(desc)
+        lay.addStretch()
+
+        self.set_selected(False)
+
+    def set_selected(self, selected: bool):
+        if selected:
+            self.setStyleSheet(
+                "QFrame{background:#e3f2fd;border:2px solid #1565c0;border-radius:6px;}"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame{background:#fff;border:1px solid #e0e0e0;border-radius:6px;}"
+                "QFrame:hover{background:#f5f9ff;}"
+            )
+
+
+class _StepCard(QFrame):
+    """A single collapsible step in the guided setup wizard.
+
+    Status is one of 'done' (✓, collapsed by default), 'current'
+    (▶, expanded, highlighted), or 'pending' (○, collapsed, greyed).
+    Clicking the header toggles the expanded state regardless of status.
+    """
+
+    _COLORS = {
+        "done":    ("#e8f5e9", "#a5d6a7", "#2e7d32"),
+        "current": ("#e3f2fd", "#90caf9", "#1565c0"),
+        "pending": ("#fafafa", "#e0e0e0", "#999999"),
+    }
+    _ICONS = {"done": "✓", "current": "▶", "pending": "○"}
+
+    def __init__(self, number: int, title: str, description: str):
+        super().__init__()
+        self.setObjectName("stepCard")
+        sp = self.sizePolicy()
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._header = header = _ClickableFrame()
+        header.setCursor(Qt.PointingHandCursor)
+        header.setStyleSheet("background:transparent;border:none;")
+        header.clicked.connect(self.toggle)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+        self._icon_lbl = QLabel("○")
+        self._icon_lbl.setFixedWidth(20)
+        hl.addWidget(self._icon_lbl)
+        self._title_lbl = QLabel(f"Step {number}: {title}")
+        self._title_lbl.setStyleSheet("font-weight:bold;color:#333;background:transparent;border:none;")
+        hl.addWidget(self._title_lbl, stretch=1)
+        self._arrow_lbl = QLabel("▾")
+        self._arrow_lbl.setStyleSheet("color:#999;background:transparent;border:none;")
+        hl.addWidget(self._arrow_lbl)
+        outer.addWidget(header)
+
+        self._desc = QLabel(description)
+        self._desc.setWordWrap(True)
+        self._desc.setStyleSheet("color:#666;font-size:11px;padding:0 14px 8px 40px;background:transparent;border:none;")
+        outer.addWidget(self._desc)
+
+        self._body = QWidget()
+        self._body.setStyleSheet("background:transparent;")
+        self._body_lay = QVBoxLayout(self._body)
+        self._body_lay.setContentsMargins(40, 0, 14, 14)
+        self._body_lay.setSpacing(8)
+        outer.addWidget(self._body)
+
+        self.set_status("pending")
+
+    def body_layout(self) -> QVBoxLayout:
+        return self._body_lay
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.updateGeometry()
+
+    def toggle(self):
+        expanded = not self._body.isVisible()
+        self._body.setVisible(expanded)
+        self._desc.setVisible(expanded)
+        self._arrow_lbl.setText("▾" if expanded else "▸")
+
+    def set_status(self, status: str, expanded: bool | None = None):
+        if expanded is None:
+            expanded = status == "current"
+        self._icon_lbl.setText(self._ICONS.get(status, "○"))
+        self._body.setVisible(expanded)
+        self._desc.setVisible(expanded)
+        self._arrow_lbl.setText("▾" if expanded else "▸")
+        bg, border, icon_color = self._COLORS.get(status, self._COLORS["pending"])
+        self.setStyleSheet(
+            f"QFrame#stepCard{{background:{bg};border:1px solid {border};border-radius:6px;}}"
+        )
+        self._icon_lbl.setStyleSheet(
+            f"background:transparent;border:none;font-size:13px;font-weight:bold;color:{icon_color};"
+        )
+
+
 class DLCSetupView(QWidget):
-    """Dedicated tab for all DeepLabCut project management and pose estimation."""
+    """Guided, situation-aware DeepLabCut setup page.
+
+    Lets the user pick "what's your situation" (starting from scratch,
+    already have a trained model, use a pretrained model, or already have
+    pose CSV/H5 files) and walks them through only the steps that apply.
+    """
 
     navigate_pipeline = pyqtSignal()
+    navigate_settings = pyqtSignal()
+
+    _MODES = [
+        ("scratch", "🆕", "Starting from scratch",
+         "I have raw videos and need to label frames and train a tracking model."),
+        ("existing", "📂", "I already have a trained DLC model",
+         "Link my existing DeepLabCut project and run it on my videos."),
+        ("pretrained", "⚡", "Use a ready-made model",
+         "Use a pretrained model included with VIEB — no labeling or training needed."),
+        ("have_pose", "📄", "I already have pose data (CSV/H5)",
+         "Skip DeepLabCut entirely — point VIEB to existing pose files."),
+    ]
 
     def __init__(self, cfg: dict):
         super().__init__()
         self.cfg = cfg
         self._worker: SubprocessWorker | None = None
+        self._dlc_error_shown = False
+        self._action_buttons: list[QPushButton] = []
+        self._mode_cards: dict[str, _ModeCard] = {}
         self._keypoint_combos: dict[str, QComboBox] = {}
         self._keypoint_object_checks: dict[str, QCheckBox] = {}
-        self._build()
-        self._refresh_recent()
-        self._refresh_project_status()
-        QTimer.singleShot(0, self._detect_and_show_status)
-        QTimer.singleShot(50, self._try_preload_keypoints)
+        self._pretrained_selection = ""
 
-    # ── Layout ───────────────────────────────────────────────────────────────
+        try:
+            self._project_path = get_dlc_project_path() or ""
+        except Exception:
+            self._project_path = ""
+        if not self._project_path:
+            dlc_dir = _find_dlc_project()
+            self._project_path = str(dlc_dir) if dlc_dir else ""
+
+        self._build()
+        self._detect_and_show_status()
+        self._select_mode(self._detect_mode())
+
+    # ── Top-level layout ─────────────────────────────────────────────────────
 
     def _build(self):
-        outer = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        root.addWidget(scroll)
+
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(20, 20, 20, 20)
         outer.setSpacing(12)
 
@@ -172,20 +352,21 @@ class DLCSetupView(QWidget):
         outer.addWidget(title)
 
         subtitle = QLabel(
-            "Configure your DeepLabCut project, label frames, train a model, "
-            "and run pose estimation before proceeding to the Pipeline."
+            "Get pose-tracking data for your videos. Pick the option below that matches "
+            "your situation, then follow the steps in order."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:#555;")
         outer.addWidget(subtitle)
 
-        # ── Zone 1: Status banner ────────────────────────────────────────────
+        # ── Status banner ─────────────────────────────────────────────────────
         self._banner_frame = QFrame()
         self._banner_frame.setObjectName("statusBanner")
         banner_lay = QHBoxLayout(self._banner_frame)
         banner_lay.setContentsMargins(14, 10, 14, 10)
         self._banner_label = QLabel("")
         self._banner_label.setWordWrap(True)
+        self._banner_label.setTextFormat(Qt.RichText)
         self._banner_label.setStyleSheet("background:transparent;border:none;")
         banner_lay.addWidget(self._banner_label, stretch=1)
         self._banner_btn = QPushButton("Proceed to Pipeline →")
@@ -202,188 +383,30 @@ class DLCSetupView(QWidget):
         banner_lay.addWidget(self._banner_btn)
         outer.addWidget(self._banner_frame)
 
-        # ── Zone 2: DLC Project ───────────────────────────────────────────────
-        proj_box = QGroupBox("DLC Project")
-        proj_box.setStyleSheet("QGroupBox{font-weight:bold;color:#333;}")
-        pl = QVBoxLayout(proj_box)
+        # ── Mode selector ────────────────────────────────────────────────────
+        mode_title = QLabel("What's your situation?")
+        mode_title.setStyleSheet("font-weight:bold;color:#333;")
+        outer.addWidget(mode_title)
 
-        path_row = QHBoxLayout()
-        self._path_le = QLineEdit()
-        self._path_le.setReadOnly(True)
-        self._path_le.setPlaceholderText("No DLC project linked yet…")
-        self._path_le.setToolTip(
-            "The root directory of your DLC project.\n"
-            "Must contain a config.yaml file."
-        )
-        self._path_le.textChanged.connect(self._on_path_changed)
-        path_row.addWidget(self._path_le, stretch=1)
+        mode_box = QWidget()
+        mode_grid = QGridLayout(mode_box)
+        mode_grid.setContentsMargins(0, 0, 0, 0)
+        mode_grid.setSpacing(10)
+        for i, (mode_id, icon, mtitle, mdesc) in enumerate(self._MODES):
+            card = _ModeCard(icon, mtitle, mdesc)
+            card.clicked.connect(lambda m=mode_id: self._select_mode(m))
+            mode_grid.addWidget(card, i // 2, i % 2)
+            self._mode_cards[mode_id] = card
+        outer.addWidget(mode_box)
 
-        browse_btn = QPushButton("Browse…")
-        browse_btn.setToolTip("Select an existing DLC config.yaml to load that project")
-        browse_btn.clicked.connect(self._browse_project)
-        path_row.addWidget(browse_btn)
-        pl.addLayout(path_row)
+        # ── Steps container (rebuilt whenever the mode changes) ─────────────
+        self._steps_container = QWidget()
+        self._steps_lay = QVBoxLayout(self._steps_container)
+        self._steps_lay.setContentsMargins(0, 0, 0, 0)
+        self._steps_lay.setSpacing(8)
+        outer.addWidget(self._steps_container)
 
-        self._project_status = QLabel("")
-        self._project_status.setWordWrap(True)
-        pl.addWidget(self._project_status)
-
-        self._create_link = _ClickableLabel("＋ Create a new DLC project from scratch")
-        self._create_link.setStyleSheet(
-            "color:#1a73e8;text-decoration:underline;font-size:11px;"
-        )
-        self._create_link.setCursor(Qt.PointingHandCursor)
-        self._create_link.setToolTip("Create a brand-new DLC project directory")
-        self._create_link.clicked.connect(self._create_project)
-        pl.addWidget(self._create_link)
-
-        outer.addWidget(proj_box)
-
-        # ── Evaluation results panel (hidden until eval results found) ───────
-        self._build_eval_panel(outer)
-
-        # Hidden — kept only so _refresh_recent()/_load_from_recent() keep working
-        self._recent_combo = QComboBox()
-        self._recent_combo.hide()
-        self._recent_combo.currentIndexChanged.connect(self._load_from_recent)
-
-        # ── Import existing project + keypoint mapping ───────────────────────
-        self._build_import_section(outer)
-        self._build_keypoint_panel(outer)
-
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine)
-        sep1.setStyleSheet("color:#e0e0e0;")
-        outer.addWidget(sep1)
-
-        # ── Zone 3: Primary action — Run Pose Estimation ─────────────────────
-        self._btn_analyze = QPushButton("🎯  Run Pose Estimation")
-        self._btn_analyze.setToolTip(
-            "Run the trained DLC model on all videos to generate pose CSV files."
-        )
-        self._btn_analyze.setMinimumHeight(52)
-        self._btn_analyze.setStyleSheet(
-            "QPushButton{background-color:#4E79A7;color:white;border-radius:6px;"
-            "font-weight:bold;font-size:13pt;}"
-            "QPushButton:hover{background-color:#3d6291;}"
-            "QPushButton:disabled{background-color:#b0bec5;}"
-        )
-        self._btn_analyze.clicked.connect(self._run_pose_estimation)
-        outer.addWidget(self._btn_analyze)
-
-        analyze_hint = QLabel(
-            "Requires a trained DLC model. Use the advanced options below to train first."
-        )
-        analyze_hint.setStyleSheet("color:#888;font-style:italic;font-size:11px;")
-        analyze_hint.setWordWrap(True)
-        outer.addWidget(analyze_hint)
-
-        # ── Zone 4: Advanced options (collapsed by default) ──────────────────
-        self._advanced_header = _ClickableLabel("Advanced options  ▾")
-        self._advanced_header.setStyleSheet("color:#555;font-size:11px;padding:4px 0;")
-        self._advanced_header.setCursor(Qt.PointingHandCursor)
-        self._advanced_header.clicked.connect(self._toggle_advanced)
-        outer.addWidget(self._advanced_header)
-
-        self._advanced_frame = QFrame()
-        self._advanced_frame.setObjectName("advancedFrame")
-        self._advanced_frame.setStyleSheet(
-            "QFrame#advancedFrame{background:#f5f5f5;border:1px solid #e0e0e0;"
-            "border-radius:4px;}"
-        )
-        adv_lay = QVBoxLayout(self._advanced_frame)
-        adv_lay.setContentsMargins(8, 8, 8, 8)
-        adv_lay.setSpacing(8)
-
-        # Sub-section A — pretrained model
-        pre_row = QHBoxLayout()
-        pre_row.addWidget(QLabel("Pretrained:"))
-        self._pretrained_combo = QComboBox()
-        self._pretrained_combo.setToolTip(
-            "Available pretrained models in pretrained/\n"
-            "Download from GitHub Releases if empty."
-        )
-        self._refresh_pretrained()
-        pre_row.addWidget(self._pretrained_combo, stretch=1)
-        use_pre_btn = QPushButton("Use Pretrained")
-        use_pre_btn.setToolTip(
-            "Load a pretrained model and run pose estimation — no training required"
-        )
-        use_pre_btn.setMinimumWidth(140)
-        use_pre_btn.clicked.connect(self._use_pretrained)
-        pre_row.addWidget(use_pre_btn)
-        adv_lay.addLayout(pre_row)
-
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet("color:#e0e0e0;")
-        adv_lay.addWidget(sep2)
-
-        # Sub-section B — step by step (for new projects)
-        step_lbl = QLabel("Step-by-step for new projects:")
-        step_lbl.setStyleSheet("font-weight:bold;color:#333;")
-        adv_lay.addWidget(step_lbl)
-
-        step_grid = QGridLayout()
-        step_grid.setSpacing(8)
-
-        def _dlc_btn(label, tip, slot):
-            b = QPushButton(label)
-            b.setToolTip(tip)
-            b.setMinimumHeight(34)
-            b.setMinimumWidth(130)
-            b.clicked.connect(slot)
-            return b
-
-        self._btn_extract = _dlc_btn(
-            "Extract Frames",
-            "Extract frames from your videos for labeling (kmeans sampling).",
-            lambda: self._run_dlc("--", "extract_frames"),
-        )
-        self._btn_label = _dlc_btn(
-            "Open Labeling GUI",
-            "Launch the Napari labeling interface for the next unlabeled video.",
-            self._open_labeling,
-        )
-        self._btn_train = _dlc_btn(
-            "Train Model",
-            "Train the ResNet50 DLC model on your labeled frames.\nThis can take 30 min – 2 hrs with a GPU.",
-            lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--train"]),
-        )
-        self._btn_evaluate = _dlc_btn(
-            "Evaluate Model",
-            "Evaluate the trained model and produce accuracy metrics (mAP).",
-            lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--evaluate"]),
-        )
-        step_grid.addWidget(self._btn_extract, 0, 0)
-        step_grid.addWidget(self._btn_label, 0, 1)
-        step_grid.addWidget(self._btn_train, 1, 0)
-        step_grid.addWidget(self._btn_evaluate, 1, 1)
-        adv_lay.addLayout(step_grid)
-
-        step_hint = QLabel(
-            "New project? Extract frames → label keypoints → train → evaluate → "
-            "Run Pose Estimation"
-        )
-        step_hint.setWordWrap(True)
-        step_hint.setStyleSheet("color:#888;font-size:11px;")
-        adv_lay.addWidget(step_hint)
-
-        # Sub-section C — train-first toggle
-        self._train_first = QCheckBox(
-            "Train model before running pose estimation (new projects)"
-        )
-        self._train_first.setChecked(False)
-        self._train_first.setToolTip(
-            "When checked, clicking 'Run Pose Estimation' will:\n"
-            "  1. Run DLC training first\n"
-            "  2. Then run inference on all videos\n\n"
-            "Leave unchecked if you already have a trained model."
-        )
-        adv_lay.addWidget(self._train_first)
-
-        self._advanced_frame.hide()
-        outer.addWidget(self._advanced_frame)
-
-        # ── Zone 5: Log (collapsed by default) ───────────────────────────────
+        # ── Log (collapsed by default) ───────────────────────────────────────
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setFixedHeight(180)
@@ -410,7 +433,7 @@ class DLCSetupView(QWidget):
         outer.addLayout(log_hdr_row)
         outer.addWidget(self._log)
 
-        # ── Zone 6: Bottom bar ────────────────────────────────────────────────
+        # ── Bottom bar ────────────────────────────────────────────────────────
         bottom_row = QHBoxLayout()
 
         guide_btn = QPushButton("Labeling Guide")
@@ -431,12 +454,7 @@ class DLCSetupView(QWidget):
         outer.addLayout(bottom_row)
         outer.addStretch()
 
-    # ── Collapsible sections / banner ───────────────────────────────────────
-
-    def _toggle_advanced(self):
-        visible = not self._advanced_frame.isVisible()
-        self._advanced_frame.setVisible(visible)
-        self._advanced_header.setText("Advanced options  ▴" if visible else "Advanced options  ▾")
+    # ── Log collapsing ───────────────────────────────────────────────────────
 
     def _toggle_log(self):
         visible = not self._log.isVisible()
@@ -447,15 +465,48 @@ class DLCSetupView(QWidget):
         from PyQt5.QtWidgets import QApplication
         QApplication.clipboard().setText(self._log.toPlainText())
 
-    def _update_import_visibility(self):
-        """Show the 'Import Existing DLC Project' section only when no project is linked."""
-        linked = bool(self._path_le.text().strip())
-        self._import_box.setVisible(not linked)
+    # ── Status banner / overall detection ────────────────────────────────────
+
+    def _count_pose_csvs(self) -> int:
+        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
+        return len(list(raw_dir.glob("*DLC*.csv"))) if raw_dir.exists() else 0
+
+    def _count_total_videos(self) -> int:
+        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
+        return len(list(raw_dir.glob("*.mp4"))) if raw_dir.exists() else 0
+
+    def _count_extracted_videos(self) -> int:
+        if not self._project_path:
+            return 0
+        labeled_dir = Path(self._project_path) / "labeled-data"
+        if not labeled_dir.exists():
+            return 0
+        return sum(
+            1 for d in labeled_dir.iterdir()
+            if d.is_dir() and any(f.suffix == ".png" for f in d.iterdir())
+        )
+
+    def _count_labeled_videos(self) -> int:
+        if not self._project_path:
+            return 0
+        labeled_dir = Path(self._project_path) / "labeled-data"
+        if not labeled_dir.exists():
+            return 0
+        return sum(
+            1 for d in labeled_dir.iterdir()
+            if d.is_dir() and any(
+                f.name.startswith("CollectedData") and f.suffix == ".h5" for f in d.iterdir()
+            )
+        )
+
+    def _detect_and_show_status(self):
+        """Refresh the top status banner based on current pose-CSV count."""
+        self._dlc_csv_count = self._count_pose_csvs()
+        self._update_banner()
 
     def _update_banner(self):
-        """Refresh the Zone 1 status banner based on _detect_and_show_status() results."""
-        project_path = getattr(self, "_dlc_project_path", None)
         csv_count = getattr(self, "_dlc_csv_count", 0)
+        total = self._count_total_videos()
 
         if csv_count > 0:
             self._banner_frame.setStyleSheet(
@@ -463,18 +514,18 @@ class DLCSetupView(QWidget):
                 "border-radius:6px;}"
             )
             self._banner_label.setText(
-                f"✓  Pose estimation complete — {csv_count} video(s) have CSV files.<br>"
-                "You do not need to redo this step unless adding new videos."
+                f"✓  Pose estimation complete — {csv_count}/{max(total, csv_count)} video(s) "
+                "have CSV files.<br>You do not need to redo this step unless adding new videos."
             )
             self._banner_btn.show()
-        elif project_path:
+        elif self._project_path:
             self._banner_frame.setStyleSheet(
                 "QFrame#statusBanner{background:#fff8e1;border:1px solid #ffe082;"
                 "border-radius:6px;}"
             )
             self._banner_label.setText(
-                "⚠  DLC project linked but no pose CSVs found.<br>"
-                "Run Pose Estimation below to generate them."
+                "⚠  DLC project linked but no pose CSVs found yet.<br>"
+                "Follow the steps below to generate them."
             )
             self._banner_btn.hide()
         else:
@@ -483,222 +534,124 @@ class DLCSetupView(QWidget):
                 "border-radius:6px;}"
             )
             self._banner_label.setText(
-                "ℹ  Link your DLC project below to get started.<br>"
-                "If you already have CSV or H5 pose files, go to Settings → "
-                "Pose Data Source instead."
+                "ℹ  Pick the option below that matches your situation to get started.<br>"
+                "If you already have CSV or H5 pose files, choose "
+                "\"I already have pose data\"."
             )
             self._banner_btn.hide()
-        self._banner_label.setTextFormat(Qt.RichText)
 
-        if hasattr(self, "_bottom_proceed_btn"):
-            self._bottom_proceed_btn.setVisible(csv_count == 0)
+        self._bottom_proceed_btn.setVisible(csv_count == 0)
 
-    # ── Import section builders ───────────────────────────────────────────────
+    # ── Mode selection / step rebuilding ─────────────────────────────────────
 
-    def _build_import_section(self, layout: QVBoxLayout):
-        """'Import Existing DLC Project' group box, inserted at the top of the tools area."""
-        import_box = QGroupBox("Import Existing DLC Project")
-        import_box.setStyleSheet("QGroupBox{font-weight:bold;color:#333;}")
-        self._import_box = import_box
-        il = QVBoxLayout(import_box)
-        il.setSpacing(8)
-
-        desc = QLabel(
-            "If you have already trained a DLC model, point VIEB to your config.yaml file. "
-            "VIEB only needs the config.yaml and the dlc-models/ folder in the same directory."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color:#555;")
-        il.addWidget(desc)
-
-        path_row = QHBoxLayout()
-        self._import_path_le = QLineEdit()
-        self._import_path_le.setReadOnly(True)
-        self._import_path_le.setPlaceholderText("No DLC project linked yet…")
-        # Pre-fill from vieb_config (may already be set from a previous session)
+    def _detect_mode(self) -> str:
+        csv_count = self._count_pose_csvs()
+        pose_source = "csv"
         try:
-            cur = get_dlc_project_path()
-            if cur:
-                self._import_path_le.setText(cur)
+            import vieb_config
+            pose_source = vieb_config.get_pose_source()
         except Exception:
             pass
-        path_row.addWidget(self._import_path_le, stretch=1)
 
-        browse_import_btn = QPushButton("Browse…")
-        browse_import_btn.setToolTip("Select a config.yaml from your trained DLC project")
-        browse_import_btn.clicked.connect(self._on_import_browse)
-        path_row.addWidget(browse_import_btn)
-        il.addLayout(path_row)
+        if not self._project_path and pose_source == "h5" and self.cfg.get("h5_path"):
+            return "have_pose"
+        if not self._project_path and csv_count > 0:
+            return "have_pose"
+        if self._project_path and self._validate_model(warn=False):
+            return "existing"
+        if not self._project_path:
+            try:
+                if list_available_pretrained():
+                    return "pretrained"
+            except Exception:
+                pass
+        return "scratch"
 
-        layout.addWidget(import_box)
+    def _select_mode(self, mode_id: str):
+        self._mode = mode_id
+        for m, card in self._mode_cards.items():
+            card.set_selected(m == mode_id)
+        self._rebuild_steps()
 
-    def _build_keypoint_panel(self, layout: QVBoxLayout):
-        """Keypoint role mapping panel — hidden until a project is successfully imported."""
-        self._keypoint_panel = QGroupBox(
-            "Keypoint Roles (optional — improves postural feature quality)"
-        )
-        self._keypoint_panel.hide()
-        kp_outer = QVBoxLayout(self._keypoint_panel)
-        kp_outer.setSpacing(8)
+    def _add_step(self, number: int, title: str, description: str) -> _StepCard:
+        card = _StepCard(number, title, description)
+        self._steps_lay.addWidget(card)
+        return card
 
-        # Scroll area hosts the two-column grid (replaced on each import)
-        self._keypoint_scroll = QScrollArea()
-        self._keypoint_scroll.setWidgetResizable(True)
-        self._keypoint_scroll.setMaximumHeight(260)
-        self._keypoint_scroll.setFrameShape(QFrame.NoFrame)
-        kp_outer.addWidget(self._keypoint_scroll)
+    def _rebuild_steps(self):
+        while self._steps_lay.count():
+            item = self._steps_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
 
-        save_btn = QPushButton("Save Keypoint Mapping")
-        save_btn.setToolTip(
-            "Write the mapping to config.json under 'keypoint_roles' "
-            "(used by feature_extraction.py for correct postural scalars)"
-        )
-        save_btn.clicked.connect(self._save_keypoint_mapping)
-        kp_outer.addWidget(save_btn, alignment=Qt.AlignRight)
+        self._action_buttons = []
+        self._keypoint_combos = {}
+        self._keypoint_object_checks = {}
 
-        layout.addWidget(self._keypoint_panel)
+        if self._mode == "scratch":
+            self._build_steps_scratch()
+        elif self._mode == "existing":
+            self._build_steps_existing()
+        elif self._mode == "pretrained":
+            self._build_steps_pretrained()
+        else:
+            self._build_steps_have_pose()
 
-    def _build_eval_panel(self, layout: QVBoxLayout):
-        """'Model Performance' panel — hidden until DLC evaluation results are found."""
-        self._eval_panel = QFrame()
-        self._eval_panel.setObjectName("evalPanel")
-        self._eval_panel.setStyleSheet(
-            "QFrame#evalPanel{background:#f8f9fa;border:1px solid #e0e0e0;border-radius:6px;}"
-        )
-        eval_lay = QVBoxLayout(self._eval_panel)
-        eval_lay.setContentsMargins(12, 12, 12, 12)
-        eval_lay.setSpacing(8)
+    # ── Shared building blocks ────────────────────────────────────────────────
 
-        title_row = QHBoxLayout()
-        eval_title = QLabel("Model Performance")
-        eval_title.setStyleSheet("font-weight:bold;color:#333;background:transparent;border:none;")
-        title_row.addWidget(eval_title)
-        title_row.addStretch()
-        eval_subtitle = QLabel("Best snapshot")
-        eval_subtitle.setStyleSheet("color:#888;font-size:11px;background:transparent;border:none;")
-        title_row.addWidget(eval_subtitle)
-        eval_lay.addLayout(title_row)
+    def _project_status_text(self) -> tuple[str, str]:
+        path = self._project_path
+        if not path:
+            return "", "#666"
+        if not os.path.isdir(path):
+            return "⚠ Directory not found.", "#c62828"
+        if not os.path.exists(os.path.join(path, "config.yaml")):
+            return "⚠ config.yaml not found in this directory.", "#c62828"
+        return f"✓ Valid DLC project — {os.path.join(path, 'config.yaml')}", "#2e7d32"
 
-        cards_row = QHBoxLayout()
-        self._eval_card_test_map, card1 = self._make_stat_card("--", "Test mAP")
-        self._eval_card_test_rmse, card2 = self._make_stat_card("--", "Test RMSE")
-        self._eval_card_train_map, card3 = self._make_stat_card("--", "Train mAP")
-        self._eval_card_epochs, card4 = self._make_stat_card("--", "Epochs")
-        for card in (card1, card2, card3, card4):
-            cards_row.addWidget(card)
-        cards_row.addStretch()
-        eval_lay.addLayout(cards_row)
+    def _build_project_section(self, layout: QVBoxLayout):
+        """Project path field + Browse + status + 'create new project' link."""
+        path_row = QHBoxLayout()
+        path_le = QLineEdit(self._project_path)
+        path_le.setReadOnly(True)
+        path_le.setPlaceholderText("No DLC project linked yet…")
+        path_row.addWidget(path_le, stretch=1)
 
-        eval_note = QLabel(
-            "Evaluated on held-out test frames. "
-            "RMSE = mean keypoint position error in pixels."
-        )
-        eval_note.setWordWrap(True)
-        eval_note.setStyleSheet("color:#888;font-size:11px;background:transparent;border:none;")
-        eval_lay.addWidget(eval_note)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setToolTip("Select an existing DLC config.yaml to load that project")
+        browse_btn.clicked.connect(self._browse_project)
+        path_row.addWidget(browse_btn)
+        layout.addLayout(path_row)
 
-        self._eval_thumb_row = QHBoxLayout()
-        eval_lay.addLayout(self._eval_thumb_row)
+        status_text, status_color = self._project_status_text()
+        if status_text:
+            status_lbl = QLabel(status_text)
+            status_lbl.setWordWrap(True)
+            status_lbl.setStyleSheet(f"color:{status_color};")
+            layout.addWidget(status_lbl)
 
-        self._eval_thumb_label = QLabel("Predicted keypoints on test frames")
-        self._eval_thumb_label.setStyleSheet("color:#888;font-size:11px;background:transparent;border:none;")
-        self._eval_thumb_label.hide()
-        eval_lay.addWidget(self._eval_thumb_label)
+        create_link = _ClickableLabel("＋ Create a new DLC project from scratch")
+        create_link.setStyleSheet("color:#1a73e8;text-decoration:underline;font-size:11px;")
+        create_link.setCursor(Qt.PointingHandCursor)
+        create_link.setToolTip("Create a brand-new DLC project directory")
+        create_link.clicked.connect(self._create_project)
+        layout.addWidget(create_link)
 
-        self._eval_panel.hide()
-        layout.addWidget(self._eval_panel)
-
-    @staticmethod
-    def _make_stat_card(value_text: str, label_text: str) -> tuple[QLabel, QFrame]:
-        """Build a single stat card (white box with a big value and a small label)."""
-        card = QFrame()
-        card.setStyleSheet(
-            "QFrame{background:white;border:1px solid #e8e8e8;border-radius:4px;}"
-        )
-        card.setMinimumWidth(100)
-        v = QVBoxLayout(card)
-        v.setContentsMargins(8, 8, 16, 8)
-        v.setAlignment(Qt.AlignCenter)
-        value_lbl = QLabel(value_text)
-        value_lbl.setAlignment(Qt.AlignCenter)
-        value_lbl.setStyleSheet(
-            "font-size:16pt;font-weight:bold;color:#333;background:transparent;border:none;"
-        )
-        label_lbl = QLabel(label_text)
-        label_lbl.setAlignment(Qt.AlignCenter)
-        label_lbl.setStyleSheet("color:#666;font-size:11px;background:transparent;border:none;")
-        v.addWidget(value_lbl)
-        v.addWidget(label_lbl)
-        return value_lbl, card
-
-    # ── Import logic ──────────────────────────────────────────────────────────
-
-    def _on_import_browse(self):
-        """Open a file dialog to select config.yaml from an existing DLC project."""
-        start_dir = self._import_path_le.text().strip() or str(Path.home())
-        config_file, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select DLC config.yaml",
-            start_dir,
-            "config.yaml (config.yaml);;All files (*)",
-        )
-        if config_file:
-            self._do_import_config(config_file)
-
-    def _do_import_config(self, config_file: str):
-        """Execute the full import sequence for a selected config.yaml."""
-        # a. Parse YAML
+    def _load_bodyparts(self) -> list:
+        if not self._project_path:
+            return []
+        config_yaml = os.path.join(self._project_path, "config.yaml")
+        if not os.path.exists(config_yaml):
+            return []
         try:
             import yaml as _yaml
-            with open(config_file, encoding="utf-8") as fh:
+            with open(config_yaml, encoding="utf-8") as fh:
                 dlc_cfg = _yaml.safe_load(fh)
-        except Exception as exc:
-            QMessageBox.warning(self, "Parse Error", f"Could not read config.yaml:\n{exc}")
-            return
-
-        if not isinstance(dlc_cfg, dict):
-            QMessageBox.warning(
-                self, "Invalid Config",
-                "The selected file does not appear to be a valid DLC config.yaml."
-            )
-            return
-
-        project_dir = os.path.dirname(os.path.abspath(config_file))
-
-        # b. Warn if dlc-models/ is absent (non-fatal)
-        if not os.path.isdir(os.path.join(project_dir, "dlc-models")):
-            QMessageBox.warning(
-                self,
-                "dlc-models/ Not Found",
-                "dlc-models/ folder not found next to config.yaml. The model weights may be "
-                "missing. VIEB can still run analysis if the CSVs already exist in raw_videos/.",
-            )
-
-        # c. Persist the project path via vieb_config
-        set_dlc_project_path(project_dir)
-
-        # d. Also write it into the GUI's live config dict and save to config.json
-        self.cfg["dlc_project_path"] = project_dir
-        _save_cfg(self.cfg)
-
-        # e. Update the read-only display field
-        self._import_path_le.setText(project_dir)
-
-        # f. Success notification
-        QMessageBox.information(self, "DLC Project Linked", "DLC project linked successfully.")
-
-        # Sync the existing project-path line edit and status so the rest of the
-        # UI (pose-estimation buttons, _validate_project, etc.) picks it up too.
-        self._path_le.setText(project_dir)
-        _register_project(project_dir)
-        self._refresh_recent()
-
-        # Show keypoint mapping panel
-        bodyparts = dlc_cfg.get("bodyparts", [])
-        if bodyparts:
-            self._populate_keypoint_panel(bodyparts)
-
-    # ── Keypoint mapping ──────────────────────────────────────────────────────
+            return dlc_cfg.get("bodyparts", []) if isinstance(dlc_cfg, dict) else []
+        except Exception:
+            return []
 
     @staticmethod
     def _match_role(name: str) -> str:
@@ -723,10 +676,31 @@ class DLCSetupView(QWidget):
             return "tail_tip"
         return "— unassigned —"
 
-    def _populate_keypoint_panel(self, bodyparts: list):
-        """Build (or rebuild) the three-column keypoint → role / object grid and show the panel."""
-        self._keypoint_combos = {}
-        self._keypoint_object_checks = {}
+    def _make_object_toggle_handler(self, combo: QComboBox):
+        """Closure that disables/replaces the role combo when 'Object' is toggled."""
+        state = {"prev": "— unassigned —"}
+
+        def handler(checked: bool):
+            if checked:
+                state["prev"] = combo.currentText() if combo.isEnabled() else "— unassigned —"
+                combo.clear()
+                combo.addItem("— object point —")
+                combo.setEnabled(False)
+            else:
+                combo.clear()
+                for role in _ROLE_OPTIONS:
+                    combo.addItem(role)
+                prev = state["prev"]
+                idx = _ROLE_OPTIONS.index(prev) if prev in _ROLE_OPTIONS else 0
+                combo.setCurrentIndex(idx)
+                combo.setEnabled(True)
+
+        return handler
+
+    def _build_keypoint_section(self, layout: QVBoxLayout, bodyparts: list):
+        """Keypoint → role / object mapping grid + Save button."""
+        saved_roles: dict = self.cfg.get("keypoint_roles", {})
+        saved_objects: list = self.cfg.get("object_keypoints", [])
 
         container = QWidget()
         grid = QGridLayout(container)
@@ -737,7 +711,6 @@ class DLCSetupView(QWidget):
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(2, 0)
 
-        # Header row
         hdr_kp = QLabel("Keypoint Name")
         hdr_kp.setStyleSheet("font-weight:bold;color:#333;")
         hdr_role = QLabel("Role")
@@ -758,39 +731,18 @@ class DLCSetupView(QWidget):
             combo = QComboBox()
             for role in _ROLE_OPTIONS:
                 combo.addItem(role)
-            matched = self._match_role(name)
-            combo.setCurrentIndex(
-                _ROLE_OPTIONS.index(matched) if matched in _ROLE_OPTIONS else 0
-            )
+            matched = saved_roles.get(name) or self._match_role(name)
+            if matched in _ROLE_OPTIONS:
+                combo.setCurrentIndex(_ROLE_OPTIONS.index(matched))
 
             chk = QCheckBox()
             chk.setToolTip(
                 "Check if this keypoint tracks an object, not a body part.\n"
                 "Object keypoints contribute to distance features but not posture calculations."
             )
-
-            # Wire checkbox to disable/enable the role combo
-            def _make_handler(c: QComboBox) -> object:
-                state = {"prev": "— unassigned —"}
-
-                def handler(checked: bool):
-                    if checked:
-                        state["prev"] = c.currentText() if c.isEnabled() else "— unassigned —"
-                        c.clear()
-                        c.addItem("— object point —")
-                        c.setEnabled(False)
-                    else:
-                        c.clear()
-                        for role in _ROLE_OPTIONS:
-                            c.addItem(role)
-                        prev = state["prev"]
-                        idx = _ROLE_OPTIONS.index(prev) if prev in _ROLE_OPTIONS else 0
-                        c.setCurrentIndex(idx)
-                        c.setEnabled(True)
-
-                return handler
-
-            chk.toggled.connect(_make_handler(combo))
+            chk.toggled.connect(self._make_object_toggle_handler(combo))
+            if name in saved_objects:
+                chk.setChecked(True)
 
             grid.addWidget(lbl, row_idx, 0)
             grid.addWidget(combo, row_idx, 1)
@@ -798,14 +750,24 @@ class DLCSetupView(QWidget):
             self._keypoint_combos[name] = combo
             self._keypoint_object_checks[name] = chk
 
-        # Pad so the grid doesn't stretch weirdly when there are few keypoints
         grid.setRowStretch(len(bodyparts) + 1, 1)
 
-        self._keypoint_scroll.setWidget(container)
-        self._keypoint_panel.show()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(220)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+        save_btn = QPushButton("Save Keypoint Mapping")
+        save_btn.setToolTip(
+            "Write the mapping to config.json under 'keypoint_roles' "
+            "(used by feature_extraction.py for correct postural scalars)"
+        )
+        save_btn.clicked.connect(self._save_keypoint_mapping)
+        layout.addWidget(save_btn, alignment=Qt.AlignRight)
 
     def _save_keypoint_mapping(self):
-        """Write keypoint_roles and object_keypoints to config.json."""
         if not self._keypoint_combos:
             QMessageBox.information(
                 self, "Nothing to Save",
@@ -832,109 +794,34 @@ class DLCSetupView(QWidget):
             f"Saved {' and '.join(parts)} to config.json."
         )
 
-    def _try_preload_keypoints(self):
-        """On startup, show the keypoint panel if a valid project is already linked."""
-        try:
-            project_dir = get_dlc_project_path()
-            if not project_dir:
-                return
-            config_yaml = os.path.join(project_dir, "config.yaml")
-            if not os.path.exists(config_yaml):
-                return
-            import yaml as _yaml
-            with open(config_yaml, encoding="utf-8") as fh:
-                dlc_cfg = _yaml.safe_load(fh)
-            bodyparts = dlc_cfg.get("bodyparts", []) if isinstance(dlc_cfg, dict) else []
-            if bodyparts:
-                # Apply any previously saved role assignments as defaults
-                saved_roles: dict = self.cfg.get("keypoint_roles", {})
-                saved_objects: list = self.cfg.get("object_keypoints", [])
-                self._populate_keypoint_panel(bodyparts)
-                for name, combo in self._keypoint_combos.items():
-                    if name in saved_roles and saved_roles[name] in _ROLE_OPTIONS:
-                        combo.setCurrentIndex(_ROLE_OPTIONS.index(saved_roles[name]))
-                # Restore object flags (setting the checkbox triggers the handler)
-                for name, chk in self._keypoint_object_checks.items():
-                    if name in saved_objects:
-                        chk.setChecked(True)
-            self._refresh_eval_panel(project_dir)
-        except Exception:
-            pass  # Non-critical startup enhancement — never crash here
-
-    # ── Project management ────────────────────────────────────────────────────
-
-    def _refresh_recent(self):
-        self._recent_combo.blockSignals(True)
-        self._recent_combo.clear()
-        self._recent_combo.addItem("— select a recent project —")
-        for p in _load_projects():
-            label = f"{p.get('name', '?')}  ({p.get('added', '')})"
-            self._recent_combo.addItem(label, p.get("path", ""))
-        self._recent_combo.blockSignals(False)
-
-        # Pre-fill from vieb_config if no explicit path is set
-        if not self._path_le.text().strip():
-            try:
-                import vieb_config
-                cur = vieb_config.get_dlc_project_path()
-                if cur:
-                    self._path_le.setText(cur)
-            except Exception:
-                pass
-
-    def _load_from_recent(self, idx: int):
-        if idx <= 0:
-            return
-        path = self._recent_combo.itemData(idx)
-        if path:
-            self._path_le.setText(path)
-
-    def _on_path_changed(self, text: str):
-        self._refresh_project_status()
-
-    def _detect_and_show_status(self):
-        """Check whether DLC has already been run and update the status banner (Zone 1)."""
-        project_path = None
-        csv_count = 0
-        labels_count = 0
-
-        # Check 1: config.json explicit path
-        try:
-            import vieb_config
-            project_path = vieb_config.get_dlc_project_path()
-        except Exception:
-            pass
-
-        # Check 2: auto-discovery
-        if project_path is None:
-            dlc_dir = _find_dlc_project()
-            if dlc_dir:
-                project_path = str(dlc_dir)
-
-        # Check 3: labels.npy files already exist
-        labels_count = len(list((RESULTS / "shared").glob("*_labels.npy"))) if (RESULTS / "shared").exists() else 0
-
-        # Check 4: DLC CSVs in raw_videos/
-        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        if raw_dir.exists():
-            csv_count = len(list(raw_dir.glob("*DLC*.csv")))
-
-        self._dlc_project_path = project_path
-        self._dlc_csv_count = csv_count
-        self._dlc_labels_count = labels_count
-
-        if project_path and not self._path_le.text().strip():
-            self._path_le.setText(project_path)
-
-        self._update_banner()
-        if project_path:
-            self._refresh_eval_panel(project_path)
-        else:
-            self._eval_panel.hide()
+    @staticmethod
+    def _make_stat_card(value_text: str, label_text: str) -> tuple[QLabel, QFrame]:
+        """Build a single stat card (white box with a big value and a small label)."""
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame{background:white;border:1px solid #e8e8e8;border-radius:4px;}"
+        )
+        card.setMinimumWidth(100)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(8, 8, 16, 8)
+        v.setAlignment(Qt.AlignCenter)
+        value_lbl = QLabel(value_text)
+        value_lbl.setAlignment(Qt.AlignCenter)
+        value_lbl.setStyleSheet(
+            "font-size:16pt;font-weight:bold;color:#333;background:transparent;border:none;"
+        )
+        label_lbl = QLabel(label_text)
+        label_lbl.setAlignment(Qt.AlignCenter)
+        label_lbl.setStyleSheet("color:#666;font-size:11px;background:transparent;border:none;")
+        v.addWidget(value_lbl)
+        v.addWidget(label_lbl)
+        return value_lbl, card
 
     @staticmethod
     def _load_eval_results(dlc_project_path: str) -> dict | None:
         """Return the best-snapshot row from a DLC CombinedEvaluation-results.csv, or None."""
+        if not dlc_project_path:
+            return None
         patterns = [
             "evaluation-results-pytorch/iteration-*/CombinedEvaluation-results.csv",
             "evaluation-results/iteration-*/CombinedEvaluation-results.csv",
@@ -965,26 +852,24 @@ class DLCSetupView(QWidget):
                 return result
         return None
 
-    def _refresh_eval_panel(self, project_path: str) -> None:
-        """Populate and show the Model Performance panel, or hide it if no results exist."""
-        results = self._load_eval_results(project_path) if project_path else None
+    def _build_eval_section(self, layout: QVBoxLayout, results: dict | None, project_path: str):
+        """Stat cards + thumbnails for evaluation results, or a hint if none exist."""
         if not results:
-            self._eval_panel.hide()
+            note = QLabel("Run \"Evaluate Model\" below to see accuracy metrics here.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#888;font-size:11px;")
+            layout.addWidget(note)
             return
 
-        def _map_color(val: float) -> str:
-            if val >= 95:
-                return "#2e7d32"
-            if val >= 80:
-                return "#e65100"
-            return "#c62828"
-
-        def _rmse_color(val: float) -> str:
-            if val <= 5:
-                return "#2e7d32"
-            if val <= 10:
-                return "#e65100"
-            return "#c62828"
+        cards_row = QHBoxLayout()
+        test_map_lbl, card1 = self._make_stat_card("--", "Test mAP")
+        test_rmse_lbl, card2 = self._make_stat_card("--", "Test RMSE")
+        train_map_lbl, card3 = self._make_stat_card("--", "Train mAP")
+        epochs_lbl, card4 = self._make_stat_card("--", "Epochs")
+        for card in (card1, card2, card3, card4):
+            cards_row.addWidget(card)
+        cards_row.addStretch()
+        layout.addLayout(cards_row)
 
         def _set_card(label: QLabel, text: str, color: str | None = None):
             label.setText(text)
@@ -997,44 +882,41 @@ class DLCSetupView(QWidget):
         epochs = results.get("Training epochs")
 
         if test_map is not None:
-            _set_card(self._eval_card_test_map, f"{float(test_map):.1f}%", _map_color(float(test_map)))
+            _set_card(test_map_lbl, f"{float(test_map):.1f}%", _map_color(float(test_map)))
         if test_rmse is not None:
-            _set_card(self._eval_card_test_rmse, f"{float(test_rmse):.2f}px", _rmse_color(float(test_rmse)))
+            _set_card(test_rmse_lbl, f"{float(test_rmse):.2f}px", _rmse_color(float(test_rmse)))
         if train_map is not None:
-            _set_card(self._eval_card_train_map, f"{float(train_map):.1f}%", _map_color(float(train_map)))
+            _set_card(train_map_lbl, f"{float(train_map):.1f}%", _map_color(float(train_map)))
         if epochs is not None:
-            _set_card(self._eval_card_epochs, f"{int(epochs)}")
+            _set_card(epochs_lbl, f"{int(epochs)}")
 
-        self._refresh_eval_thumbnails(project_path)
-        self._eval_panel.show()
+        note = QLabel(
+            "Evaluated on held-out test frames. RMSE = mean keypoint position error in pixels."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;font-size:11px;")
+        layout.addWidget(note)
 
-    def _refresh_eval_thumbnails(self, project_path: str) -> None:
-        """Populate the labeled-image thumbnail strip below the stat cards."""
-        while self._eval_thumb_row.count():
-            item = self._eval_thumb_row.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-
+        thumb_row = QHBoxLayout()
         pattern = "evaluation-results-pytorch/iteration-*/*/LabeledImages_*/*.png"
-        pngs = sorted(Path(project_path).glob(pattern))[:3]
-        if not pngs:
-            self._eval_thumb_label.hide()
-            return
-
-        for png in pngs:
-            thumb = _ClickableLabel()
-            pix = QPixmap(str(png))
-            if not pix.isNull():
-                thumb.setPixmap(pix.scaled(120, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            thumb.setFixedSize(120, 80)
-            thumb.setCursor(Qt.PointingHandCursor)
-            thumb.setStyleSheet("border:1px solid #ccc;background:white;")
-            thumb.setToolTip("Click to view full size")
-            thumb.clicked.connect(lambda p=png: self._show_full_image(p))
-            self._eval_thumb_row.addWidget(thumb)
-        self._eval_thumb_row.addStretch()
-        self._eval_thumb_label.show()
+        pngs = sorted(Path(project_path).glob(pattern))[:3] if project_path else []
+        if pngs:
+            thumb_lbl = QLabel("Predicted keypoints on test frames")
+            thumb_lbl.setStyleSheet("color:#888;font-size:11px;")
+            layout.addWidget(thumb_lbl)
+            for png in pngs:
+                thumb = _ClickableLabel()
+                pix = QPixmap(str(png))
+                if not pix.isNull():
+                    thumb.setPixmap(pix.scaled(120, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                thumb.setFixedSize(120, 80)
+                thumb.setCursor(Qt.PointingHandCursor)
+                thumb.setStyleSheet("border:1px solid #ccc;background:white;")
+                thumb.setToolTip("Click to view full size")
+                thumb.clicked.connect(lambda p=png: self._show_full_image(p))
+                thumb_row.addWidget(thumb)
+            thumb_row.addStretch()
+            layout.addLayout(thumb_row)
 
     def _show_full_image(self, png_path: Path) -> None:
         dlg = QDialog(self)
@@ -1052,31 +934,332 @@ class DLCSetupView(QWidget):
         lay.addWidget(btns)
         dlg.exec_()
 
-    def _refresh_project_status(self):
-        path = self._path_le.text().strip()
-        if not path:
-            self._project_status.setText("")
-            self._update_import_visibility()
-            return
-        config_yaml = os.path.join(path, "config.yaml")
-        if not os.path.isdir(path):
-            self._project_status.setText("⚠ Directory not found.")
-            self._project_status.setStyleSheet("color:#c62828;")
-        elif not os.path.exists(config_yaml):
-            self._project_status.setText("⚠ config.yaml not found in this directory.")
-            self._project_status.setStyleSheet("color:#c62828;")
+    # ── Step flows per mode ────────────────────────────────────────────────────
+
+    def _build_steps_scratch(self):
+        project_ok = bool(self._project_path) and os.path.exists(
+            os.path.join(self._project_path, "config.yaml")
+        )
+        extracted = self._count_extracted_videos()
+        labeled = self._count_labeled_videos()
+        total_videos = self._count_total_videos()
+        model_trained = self._validate_model(warn=False)
+        eval_results = self._load_eval_results(self._project_path)
+        csv_count = self._count_pose_csvs()
+
+        # Step 1: Connect project
+        step1 = self._add_step(
+            1, "Connect your DLC project",
+            "Link an existing DeepLabCut project, or create a brand-new one to get started."
+        )
+        self._build_project_section(step1.body_layout())
+        step1.set_status("done" if project_ok else "current")
+
+        # Step 2: Extract frames
+        step2 = self._add_step(
+            2, "Prepare frames for labeling",
+            "Pull a sample of frames from your videos so you can mark body parts on them."
+        )
+        extract_btn = QPushButton("Extract Frames")
+        extract_btn.setMinimumHeight(34)
+        extract_btn.setToolTip(
+            "Register your videos and extract a representative sample of frames (kmeans sampling)."
+        )
+        extract_btn.clicked.connect(self._extract_frames)
+        step2.body_layout().addWidget(extract_btn, alignment=Qt.AlignLeft)
+        self._action_buttons.append(extract_btn)
+        if extracted > 0:
+            info = QLabel(f"✓ Frames extracted for {extracted} video(s).")
+            info.setStyleSheet("color:#2e7d32;font-size:11px;")
+            step2.body_layout().addWidget(info)
+        if not project_ok:
+            step2.set_status("pending", expanded=False)
+        elif extracted > 0:
+            step2.set_status("done", expanded=False)
         else:
-            self._project_status.setText(f"✓ Valid DLC project  —  {config_yaml}")
-            self._project_status.setStyleSheet("color:#2e7d32;")
-            # Persist to vieb_config so rest of the app can find it
-            try:
-                import vieb_config
-                vieb_config.set_dlc_project_path(path)
-            except Exception:
-                pass
-            _register_project(path)
-            self._refresh_recent()
-        self._update_import_visibility()
+            step2.set_status("current")
+
+        # Step 3: Label keypoints
+        step3 = self._add_step(
+            3, "Label keypoints",
+            "Open the labeling tool and click on each of the 8 body parts in every frame."
+        )
+        row = QHBoxLayout()
+        label_btn = QPushButton("Continue Labeling")
+        label_btn.setMinimumHeight(34)
+        label_btn.setToolTip("Launch the Napari labeling interface for the next unlabeled video.")
+        label_btn.clicked.connect(self._open_labeling)
+        self._action_buttons.append(label_btn)
+        guide_btn = QPushButton("Labeling Guide")
+        guide_btn.setFlat(True)
+        guide_btn.clicked.connect(self._show_labeling_guide)
+        row.addWidget(label_btn)
+        row.addWidget(guide_btn)
+        row.addStretch()
+        step3.body_layout().addLayout(row)
+        progress = QLabel(f"Progress: {labeled}/{max(extracted, labeled)} video(s) labeled.")
+        progress.setStyleSheet("color:#666;font-size:11px;")
+        step3.body_layout().addWidget(progress)
+        if extracted == 0:
+            step3.set_status("pending", expanded=False)
+        elif labeled >= extracted:
+            step3.set_status("done", expanded=False)
+        else:
+            step3.set_status("current")
+
+        # Step 4: Train
+        step4 = self._add_step(
+            4, "Train the model",
+            "Teach DeepLabCut to find these body parts automatically. Training can take "
+            "30 minutes to 2 hours depending on your hardware."
+        )
+        train_btn = QPushButton("Train Model")
+        train_btn.setMinimumHeight(34)
+        train_btn.setToolTip(
+            "Train the ResNet50 DLC model on your labeled frames.\n"
+            "This can take 30 min – 2 hrs with a GPU."
+        )
+        train_btn.clicked.connect(lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--train"]))
+        step4.body_layout().addWidget(train_btn, alignment=Qt.AlignLeft)
+        self._action_buttons.append(train_btn)
+        if labeled == 0:
+            step4.set_status("pending", expanded=False)
+        elif model_trained:
+            step4.set_status("done", expanded=False)
+        else:
+            step4.set_status("current")
+
+        # Step 5: Evaluate
+        step5 = self._add_step(
+            5, "Check accuracy",
+            "See how well the trained model performs on test frames it has not seen before."
+        )
+        self._build_eval_section(step5.body_layout(), eval_results, self._project_path)
+        eval_btn = QPushButton("Evaluate Model")
+        eval_btn.setMinimumHeight(34)
+        eval_btn.setToolTip("Evaluate the trained model and produce accuracy metrics (mAP).")
+        eval_btn.clicked.connect(lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--evaluate"]))
+        step5.body_layout().addWidget(eval_btn, alignment=Qt.AlignLeft)
+        self._action_buttons.append(eval_btn)
+        if not model_trained:
+            step5.set_status("pending", expanded=False)
+        elif eval_results:
+            step5.set_status("done", expanded=False)
+        else:
+            step5.set_status("current")
+
+        # Step 6: Run pose estimation
+        step6 = self._add_step(
+            6, "Run on all your videos",
+            "Use the trained model to generate pose-tracking data (CSV files) for every video."
+        )
+        info = QLabel(f"{csv_count}/{max(total_videos, csv_count)} video(s) have pose data.")
+        info.setStyleSheet("color:#666;font-size:11px;")
+        step6.body_layout().addWidget(info)
+        analyze_btn = QPushButton("🎯  Run Pose Estimation")
+        analyze_btn.setMinimumHeight(40)
+        analyze_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
+        analyze_btn.setToolTip("Run the trained DLC model on all videos to generate pose CSV files.")
+        analyze_btn.clicked.connect(self._run_pose_estimation)
+        step6.body_layout().addWidget(analyze_btn)
+        self._action_buttons.append(analyze_btn)
+        if not model_trained:
+            step6.set_status("pending", expanded=False)
+        elif csv_count >= total_videos and total_videos > 0:
+            step6.set_status("done", expanded=False)
+        else:
+            step6.set_status("current")
+
+    def _build_steps_existing(self):
+        project_ok = bool(self._project_path) and os.path.exists(
+            os.path.join(self._project_path, "config.yaml")
+        )
+        model_trained = self._validate_model(warn=False)
+        eval_results = self._load_eval_results(self._project_path)
+        csv_count = self._count_pose_csvs()
+        total_videos = self._count_total_videos()
+
+        step1 = self._add_step(
+            1, "Import your DLC project",
+            "Point VIEB to your existing config.yaml. VIEB only needs config.yaml and "
+            "the dlc-models/ folder in the same directory."
+        )
+        self._build_project_section(step1.body_layout())
+        step1.set_status("done" if (project_ok and model_trained) else "current")
+
+        next_num = 2
+        bodyparts = self._load_bodyparts() if project_ok else []
+        if bodyparts:
+            step_kp = self._add_step(
+                next_num, "Check keypoint roles (optional)",
+                "Map each tracked body part to its role so VIEB computes posture features correctly."
+            )
+            self._build_keypoint_section(step_kp.body_layout(), bodyparts)
+            step_kp.set_status("done" if self.cfg.get("keypoint_roles") else "pending", expanded=False)
+            next_num += 1
+
+        step_eval = self._add_step(
+            next_num, "Check accuracy (optional)",
+            "See how well this model performs on test frames, if evaluation results are available."
+        )
+        self._build_eval_section(step_eval.body_layout(), eval_results, self._project_path)
+        eval_btn = QPushButton("Evaluate Model")
+        eval_btn.setToolTip("Evaluate the model and produce accuracy metrics (mAP).")
+        eval_btn.clicked.connect(lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--evaluate"]))
+        step_eval.body_layout().addWidget(eval_btn, alignment=Qt.AlignLeft)
+        self._action_buttons.append(eval_btn)
+        step_eval.set_status("done" if eval_results else "pending", expanded=False)
+        next_num += 1
+
+        step_run = self._add_step(
+            next_num, "Run on all your videos",
+            "Use this model to generate pose-tracking data (CSV files) for every video."
+        )
+        info = QLabel(f"{csv_count}/{max(total_videos, csv_count)} video(s) have pose data.")
+        info.setStyleSheet("color:#666;font-size:11px;")
+        step_run.body_layout().addWidget(info)
+        analyze_btn = QPushButton("🎯  Run Pose Estimation")
+        analyze_btn.setMinimumHeight(40)
+        analyze_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
+        analyze_btn.setToolTip("Run the trained DLC model on all videos to generate pose CSV files.")
+        analyze_btn.clicked.connect(self._run_pose_estimation)
+        step_run.body_layout().addWidget(analyze_btn)
+        self._action_buttons.append(analyze_btn)
+        if not (project_ok and model_trained):
+            step_run.set_status("pending", expanded=False)
+        elif csv_count >= total_videos and total_videos > 0:
+            step_run.set_status("done", expanded=False)
+        else:
+            step_run.set_status("current")
+
+    def _build_steps_pretrained(self):
+        try:
+            models = list_available_pretrained()
+        except Exception:
+            models = []
+
+        step1 = self._add_step(
+            1, "Choose a ready-made model",
+            "Use a model that's already trained on mouse keypoints — no labeling or training needed."
+        )
+        if not models:
+            note = QLabel(
+                "No pretrained models found in pretrained/. Download a model package from "
+                "GitHub Releases and unzip it into the pretrained/ folder, then reopen this page."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#888;font-size:11px;")
+            step1.body_layout().addWidget(note)
+            step1.set_status("current")
+        else:
+            combo = QComboBox()
+            for m in models:
+                combo.addItem(m.get("model_name", "?"), m)
+            if self._pretrained_selection:
+                idx = combo.findText(self._pretrained_selection)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            self._pretrained_selection = combo.currentText()
+
+            desc_lbl = QLabel("")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setStyleSheet("color:#666;font-size:11px;")
+
+            def _update_desc(_text, combo=combo, desc_lbl=desc_lbl):
+                self._pretrained_selection = combo.currentText()
+                info = combo.currentData() or {}
+                parts = []
+                if info.get("description"):
+                    parts.append(str(info["description"]))
+                if info.get("keypoints"):
+                    parts.append("Keypoints: " + ", ".join(info["keypoints"]))
+                desc_lbl.setText(" — ".join(parts))
+
+            combo.currentTextChanged.connect(_update_desc)
+            _update_desc(combo.currentText())
+
+            step1.body_layout().addWidget(combo)
+            step1.body_layout().addWidget(desc_lbl)
+            step1.set_status("done", expanded=False)
+
+        step2 = self._add_step(
+            2, "Run on all your videos",
+            "Apply this model to every video to generate pose-tracking data (CSV files)."
+        )
+        csv_count = self._count_pose_csvs()
+        total_videos = self._count_total_videos()
+        info = QLabel(f"{csv_count}/{max(total_videos, csv_count)} video(s) have pose data.")
+        info.setStyleSheet("color:#666;font-size:11px;")
+        step2.body_layout().addWidget(info)
+        analyze_btn = QPushButton("🎯  Run Pose Estimation")
+        analyze_btn.setMinimumHeight(40)
+        analyze_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
+        analyze_btn.setEnabled(bool(models))
+        analyze_btn.clicked.connect(self._use_pretrained)
+        step2.body_layout().addWidget(analyze_btn)
+        self._action_buttons.append(analyze_btn)
+        if not models:
+            step2.set_status("pending", expanded=False)
+        elif csv_count >= total_videos and total_videos > 0:
+            step2.set_status("done", expanded=False)
+        else:
+            step2.set_status("current")
+
+    def _build_steps_have_pose(self):
+        csv_count = self._count_pose_csvs()
+        total_videos = self._count_total_videos()
+        pose_source = "csv"
+        try:
+            import vieb_config
+            pose_source = vieb_config.get_pose_source()
+        except Exception:
+            pass
+
+        step = self._add_step(
+            1, "Use your existing pose data",
+            "VIEB can use pose-tracking files you already have — DeepLabCut is not required."
+        )
+        if pose_source == "h5":
+            h5_path = self.cfg.get("h5_path", "")
+            info = QLabel(f"Pose source is set to H5: {h5_path or '(not set yet)'}")
+        else:
+            info = QLabel(
+                f"{csv_count}/{max(total_videos, csv_count)} video(s) already have a "
+                "DLC pose CSV in raw_videos/."
+            )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#666;font-size:11px;")
+        step.body_layout().addWidget(info)
+
+        settings_btn = QPushButton("Open Settings → Pose Data Source")
+        settings_btn.setToolTip("Configure where VIEB should read pose data from (CSV or H5).")
+        settings_btn.clicked.connect(self.navigate_settings.emit)
+        step.body_layout().addWidget(settings_btn, alignment=Qt.AlignLeft)
+
+        note = QLabel(
+            "Use this if you ran DeepLabCut (or another pose tracker) outside of VIEB "
+            "and already have CSV or H5 pose files for your videos."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;font-size:11px;")
+        step.body_layout().addWidget(note)
+
+        has_pose = csv_count > 0 or (pose_source == "h5" and self.cfg.get("h5_path"))
+        step.set_status("done" if has_pose else "current")
+
+    # ── Project management ────────────────────────────────────────────────────
+
+    def _set_project_path(self, path: str):
+        self._project_path = path
+        try:
+            import vieb_config
+            vieb_config.set_dlc_project_path(path)
+        except Exception:
+            pass
+        self.cfg["dlc_project_path"] = path
+        _save_cfg(self.cfg)
+        _register_project(path)
+        self._detect_and_show_status()
 
     def _browse_project(self):
         config_file, _ = QFileDialog.getOpenFileName(
@@ -1090,8 +1273,8 @@ class DLCSetupView(QWidget):
         import yaml as _yaml
         try:
             with open(config_file, encoding="utf-8") as f:
-                cfg = _yaml.safe_load(f)
-            if not isinstance(cfg, dict) or "bodyparts" not in cfg:
+                dlc_cfg = _yaml.safe_load(f)
+            if not isinstance(dlc_cfg, dict) or "bodyparts" not in dlc_cfg:
                 QMessageBox.warning(
                     self,
                     "Invalid DLC Config",
@@ -1101,31 +1284,20 @@ class DLCSetupView(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Parse Error", f"Could not read config.yaml:\n{exc}")
             return
-        self._path_le.setText(os.path.dirname(config_file))
+        self._set_project_path(os.path.dirname(config_file))
+        self._rebuild_steps()
 
     def _create_project(self):
         dlg = _CreateProjectDialog(self.cfg, self)
         if dlg.exec_() == QDialog.Accepted and dlg.result_path:
-            self._path_le.setText(dlg.result_path)
+            self._set_project_path(dlg.result_path)
+            self._rebuild_steps()
 
     # ── Pretrained models ─────────────────────────────────────────────────────
 
-    def _refresh_pretrained(self):
-        self._pretrained_combo.clear()
-        try:
-            from pretrained_manager import list_available_pretrained
-            models = list_available_pretrained()
-        except Exception:
-            models = []
-        if models:
-            for m in models:
-                self._pretrained_combo.addItem(m.get("model_name", "?"))
-        else:
-            self._pretrained_combo.addItem("(no pretrained models found)")
-
     def _use_pretrained(self):
-        name = self._pretrained_combo.currentText()
-        if not name or name.startswith("("):
+        name = self._pretrained_selection
+        if not name:
             QMessageBox.information(
                 self,
                 "No Model",
@@ -1133,7 +1305,14 @@ class DLCSetupView(QWidget):
                 "Download a model from GitHub Releases and unzip it into pretrained/",
             )
             return
-        self._run_dlc_subprocess(["setup_dlc_training.py", "--use-pretrained", name])
+        raw_dir = self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")).replace("\\", "\\\\")
+        code = (
+            "from pretrained_manager import load_pretrained_model, analyze_with_pretrained; "
+            f"load_pretrained_model({name!r}, {raw_dir!r}); "
+            f"analyze_with_pretrained({name!r}, {raw_dir!r})"
+        )
+        self._log_human(f"⏳ Loading pretrained model '{name}' and running pose estimation…")
+        self._run_dlc_subprocess(["-c", code])
 
     # ── DLC subprocess helpers ────────────────────────────────────────────────
 
@@ -1149,74 +1328,48 @@ class DLCSetupView(QWidget):
         self._worker.done.connect(self._on_worker_done)
         self._worker.start()
 
-    def _run_dlc(self, _unused, action: str):
-        """Thin wrapper used by buttons that map to CLI flags."""
-        mapping = {
-            "extract_frames": ["setup_dlc_training.py"],  # default flow
-        }
-        args = mapping.get(action, [])
-        if args:
-            self._run_dlc_subprocess(args)
+    def _extract_frames(self):
+        if not self._validate_project():
+            return
+        self._log_human("⏳ Registering videos and extracting sample frames…")
+        self._run_dlc_subprocess(["-c", "import setup_dlc_training as s; s.add_videos_to_config(); s.extract_frames()"])
 
     def _open_labeling(self):
+        if not self._validate_project():
+            return
         self._show_labeling_guide(before_launch=True)
         self._run_dlc_subprocess(["setup_dlc_training.py", "--label"])
 
     def _run_pose_estimation(self):
-        """Run training first (if toggled), then pose estimation."""
         if not self._validate_project():
             return
-        if self._train_first.isChecked():
-            if not self._validate_model(warn=False):
-                reply = QMessageBox.question(
-                    self,
-                    "Train First?",
-                    "Train model first is checked. This will run training then pose estimation.\n\n"
-                    "Training can take 30 min – 2 hrs. Continue?",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
-                    return
-            self._log_human("⏳ Training model first, then running pose estimation…")
-            self._train_then_analyze = True
-            self._run_dlc_subprocess(["setup_dlc_training.py", "--train"])
-        else:
-            if not self._validate_model(warn=True):
-                return
-            self._train_then_analyze = False
-            self._log_human("⏳ Running pose estimation on all videos…")
-            self._run_dlc_subprocess(["setup_dlc_training.py", "--analyze"])
+        if not self._validate_model(warn=True):
+            return
+        self._log_human("⏳ Running pose estimation on all videos…")
+        self._run_dlc_subprocess(["setup_dlc_training.py", "--analyze"])
 
     def _validate_project(self) -> bool:
-        path = self._path_le.text().strip()
-        if not path or not os.path.exists(os.path.join(path, "config.yaml")):
+        if not self._project_path or not os.path.exists(os.path.join(self._project_path, "config.yaml")):
             QMessageBox.warning(
                 self,
                 "No DLC Project",
-                "Please select a valid DLC project directory first.\n"
-                "Use 'Browse…' or 'Create New Project…'",
+                "Please connect a DLC project first (Step 1).",
             )
             return False
         return True
 
     def _validate_model(self, warn: bool = True) -> bool:
         """Return True if a trained DLC model snapshot exists."""
-        path = self._path_le.text().strip()
-        if not path:
+        if not self._project_path:
             return False
-        snapshots = list(Path(path).glob("dlc-models/**/train/snapshot-*.index"))
+        snapshots = list(Path(self._project_path).glob("dlc-models/**/train/snapshot-*.index"))
         if not snapshots:
             if warn:
-                reply = QMessageBox.question(
+                QMessageBox.information(
                     self,
                     "No Trained Model Found",
-                    f"No trained model found at:\n  {path}/dlc-models/\n\n"
-                    "Would you like to train now?",
-                    QMessageBox.Yes | QMessageBox.No,
+                    "No trained model found yet. Complete the \"Train the model\" step first.",
                 )
-                if reply == QMessageBox.Yes:
-                    self._train_first.setChecked(True)
-                    self._run_pose_estimation()
             return False
         return True
 
@@ -1225,17 +1378,10 @@ class DLCSetupView(QWidget):
         self._detect_and_show_status()
         if ok:
             self._log_human("✓ Task completed successfully.")
-            path = self._path_le.text().strip()
-            if path:
-                self._refresh_eval_panel(path)
-            # If train-then-analyze: launch analyze now
-            if getattr(self, "_train_then_analyze", False):
-                self._train_then_analyze = False
-                self._log_human("⏳ Training done — now running pose estimation…")
-                self._run_dlc_subprocess(["setup_dlc_training.py", "--analyze"])
         else:
             self._check_dlc_error("")
             self._log_human("✕ Task failed — check the log above for details.")
+        self._rebuild_steps()
 
     def _check_dlc_error(self, text: str) -> bool:
         """Detect a missing-DeepLabCut/torch import error and surface a helpful message."""
@@ -1243,7 +1389,7 @@ class DLCSetupView(QWidget):
                 "ModuleNotFoundError: No module named deeplabcut" in text or \
                 "ModuleNotFoundError: No module named 'torch'" in text or \
                 "ModuleNotFoundError: No module named torch" in text:
-            if not getattr(self, "_dlc_error_shown", False):
+            if not self._dlc_error_shown:
                 self._dlc_error_shown = True
                 self._log.append(
                     f"<pre style='color:#ffb300;'>{_DLC_NOT_INSTALLED_MSG}</pre>"
@@ -1255,8 +1401,7 @@ class DLCSetupView(QWidget):
         return False
 
     def _set_buttons_enabled(self, enabled: bool):
-        for b in (self._btn_extract, self._btn_label, self._btn_train,
-                  self._btn_evaluate, self._btn_analyze):
+        for b in self._action_buttons:
             b.setEnabled(enabled)
 
     # ── Logging ───────────────────────────────────────────────────────────────
@@ -1276,7 +1421,7 @@ class DLCSetupView(QWidget):
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    # ── Labeling guide (P11) ──────────────────────────────────────────────────
+    # ── Labeling guide ───────────────────────────────────────────────────────
 
     def _show_labeling_guide(self, before_launch: bool = False):
         dlg = QDialog(self)

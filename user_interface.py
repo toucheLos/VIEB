@@ -143,7 +143,10 @@ except Exception:
     _ClusterRunsView = None
     _HAS_CLUSTER_RUNS_VIEW = False
 
+from views.state_characterization import StateCharacterizationView
+
 from views.help import HelpView
+from views.dlc_setup import DLCSetupView
 
 # ---------------------------------------------------------------------------
 # WSL2 / Linux GPU detection - cached at first use
@@ -467,22 +470,21 @@ _NAV_VIEWS = [
     "Overview",
     "Pipeline",
     "Cluster Runs",
-    "Browse States",
+    "State Characterization",
     "Analysis",
-    "Validation",
     "Settings",
     "Help",
 ]
 
 _NAV_ICONS = {
-    "Overview":       "⊞",
-    "Pipeline":       "▶",
-    "Cluster Runs":   "⊙",
-    "Browse States":  "▣",
-    "Analysis":       "◈",
-    "Validation":     "✓",
-    "Settings":       "≡",
-    "Help":           "?",
+    "Overview":               "⊞",
+    "Pipeline":               "▶",
+    "Cluster Runs":           "⊙",
+    "State Characterization": "▣",
+    "Analysis":               "◈",
+    "Validation":             "✓",
+    "Settings":               "≡",
+    "Help":                   "?",
 }
 
 
@@ -590,12 +592,6 @@ def _state_key(stage_id):
 
 def _results_exist():
     return RESULTS.exists() and any(RESULTS.iterdir())
-
-
-def _find_dlc_project():
-    for p in ROOT.glob("VIEB-*/config.yaml"):
-        return p.parent
-    return None
 
 
 def _has_pose_csvs(raw_videos_dir: Path):
@@ -945,23 +941,41 @@ class ClipGenerationWorker(QThread):
     def __init__(self, cfg: dict):
         super().__init__()
         self.cfg = cfg
+        self._proc: subprocess.Popen | None = None
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self):
-        cap = _Capture()
-        cap.text.connect(self.log)
-        old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = sys.stderr = cap
         ok = False
         try:
-            sys.path.insert(0, str(ROOT))
-            from generate_clips import cmd_clips
-
-            cmd_clips(fps=float(self.cfg.get("fps", 30)))
-            ok = True
+            p = subprocess.Popen(
+                [sys.executable, "generate_clips.py", "--fps", str(self.cfg.get("fps", 30))],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            self._proc = p
+            assert p.stdout is not None
+            for line in p.stdout:
+                if self._stop_flag:
+                    p.terminate()
+                    break
+                self.log.emit(line)
+            rc = p.wait()
+            self._proc = None
+            ok = rc == 0 and not self._stop_flag
         except Exception:
-            print(traceback.format_exc())
-        finally:
-            sys.stdout, sys.stderr = old_out, old_err
+            self.log.emit(traceback.format_exc())
         self.done.emit(ok)
 
 
@@ -2363,196 +2377,6 @@ class RunPipelineView(QWidget):
 
     def _run_from_here(self, sid):
         self._start_worker(self._build_sequence(sid, from_here=True))
-
-
-_LABELING_GUIDE = """
-<h3>Labeling Guide - DeepLabCut + Napari</h3>
-<p><b>What you are doing:</b> label the 8 mouse body keypoints in extracted frames.</p>
-<ol>
-  <li>left_ear</li><li>right_ear</li><li>nose</li><li>center</li>
-  <li>left_hip</li><li>right_hip</li><li>tail_base</li><li>tail_tip</li>
-</ol>
-<p><b>Napari controls:</b> click to place points, use Left/Right to change frames,
-Ctrl+Z to undo, and Ctrl+S to save before closing.</p>
-"""
-
-
-class DLCSetupView(QWidget):
-    """Compact DeepLabCut setup/actions page."""
-
-    navigate_pipeline = pyqtSignal()
-
-    def __init__(self, cfg: dict):
-        super().__init__()
-        self.cfg = cfg
-        self._worker = None
-        self._build()
-        self._refresh_pretrained()
-        QTimer.singleShot(0, self._detect_and_show_status)
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        title = QLabel("DLC Setup")
-        title.setFont(QFont("Arial", 18, QFont.Bold))
-        lay.addWidget(title)
-
-        self._done_banner = QFrame()
-        self._done_banner.setStyleSheet("QFrame{background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;}")
-        db = QHBoxLayout(self._done_banner)
-        self._done_lbl = QLabel("")
-        self._done_lbl.setWordWrap(True)
-        db.addWidget(self._done_lbl, stretch=1)
-        self._done_banner.hide()
-        lay.addWidget(self._done_banner)
-
-        project = QGroupBox("DLC Project")
-        pl = QVBoxLayout(project)
-        path_row = QHBoxLayout()
-        self._path_le = QLineEdit()
-        self._path_le.setPlaceholderText("DLC project directory containing config.yaml")
-        self._path_le.textChanged.connect(self._refresh_project_status)
-        browse = QPushButton("Browse...")
-        browse.clicked.connect(self._browse_project)
-        path_row.addWidget(self._path_le, stretch=1)
-        path_row.addWidget(browse)
-        pl.addLayout(path_row)
-        self._project_status = QLabel("")
-        self._project_status.setWordWrap(True)
-        pl.addWidget(self._project_status)
-        lay.addWidget(project)
-
-        pre = QGroupBox("Pretrained Model")
-        pr = QHBoxLayout(pre)
-        self._pretrained_combo = QComboBox()
-        pr.addWidget(self._pretrained_combo, stretch=1)
-        use_pre = QPushButton("Use Pretrained Model")
-        use_pre.clicked.connect(self._use_pretrained)
-        pr.addWidget(use_pre)
-        lay.addWidget(pre)
-
-        actions = QGroupBox("DLC Actions")
-        al = QVBoxLayout(actions)
-        btn_grid = QGridLayout()
-        btn_grid.setSpacing(6)
-        for i, (label, slot) in enumerate([
-            ("Extract Frames", lambda: self._run_dlc_subprocess(["-c", "import setup_dlc_training as s; s.extract_frames()"])),
-            ("Open Labeling GUI", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--label"])),
-            ("Train", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--train"])),
-            ("Evaluate", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--evaluate"])),
-            ("Run Pose Estimation", lambda: self._run_dlc_subprocess(["setup_dlc_training.py", "--analyze"])),
-        ]):
-            b = QPushButton(label)
-            b.setMinimumHeight(32)
-            b.clicked.connect(slot)
-            btn_grid.addWidget(b, i // 3, i % 3)
-        al.addLayout(btn_grid)
-        self._log = _TerminalWidget()
-        self._log.setMaximumHeight(220)
-        self._log.setMinimumHeight(80)
-        self._log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;")
-        al.addWidget(self._log)
-        lay.addWidget(actions)
-
-        bottom = QHBoxLayout()
-        guide = QPushButton("Labeling Guide")
-        guide.clicked.connect(self._show_labeling_guide)
-        bottom.addWidget(guide)
-        bottom.addStretch()
-        proceed = QPushButton("Proceed to Pipeline")
-        proceed.clicked.connect(self.navigate_pipeline.emit)
-        bottom.addWidget(proceed)
-        lay.addLayout(bottom)
-        lay.addStretch()
-
-    def _refresh_project_status(self):
-        path = self._path_le.text().strip()
-        if not path:
-            self._project_status.setText("")
-            return
-        cfg = os.path.join(path, "config.yaml")
-        if os.path.exists(cfg):
-            self._project_status.setText(f"Valid DLC project: {cfg}")
-            self._project_status.setStyleSheet("color:#2e7d32;")
-            try:
-                import vieb_config
-                vieb_config.set_dlc_project_path(path)
-            except Exception:
-                pass
-        else:
-            self._project_status.setText("config.yaml not found in this directory.")
-            self._project_status.setStyleSheet("color:#c62828;")
-
-    def _browse_project(self):
-        config_file, _ = QFileDialog.getOpenFileName(
-            self, "Select DLC config.yaml", str(ROOT), "DLC Config (config.yaml);;All files (*)"
-        )
-        if config_file:
-            self._path_le.setText(os.path.dirname(config_file))
-
-    def _refresh_pretrained(self):
-        self._pretrained_combo.clear()
-        try:
-            from pretrained_manager import list_available_pretrained
-            models = list_available_pretrained()
-        except Exception:
-            models = []
-        if models:
-            for m in models:
-                self._pretrained_combo.addItem(m.get("model_name", "?"))
-        else:
-            self._pretrained_combo.addItem("(no pretrained models found)")
-
-    def _use_pretrained(self):
-        name = self._pretrained_combo.currentText()
-        if not name or name.startswith("("):
-            QMessageBox.information(self, "No Model", "No pretrained models found in pretrained/.")
-            return
-        raw_dir = self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")).replace("\\", "\\\\")
-        code = (
-            "from pretrained_manager import load_pretrained_model, analyze_with_pretrained; "
-            f"load_pretrained_model({name!r}, {raw_dir!r}); "
-            f"analyze_with_pretrained({name!r}, {raw_dir!r})"
-        )
-        self._run_dlc_subprocess(["-c", code])
-
-    def _run_dlc_subprocess(self, args: list[str]):
-        if self._worker and self._worker.isRunning():
-            self._log.insertPlainText("A DLC task is already running.\n")
-            return
-        self._worker = SubprocessWorker(args)
-        self._worker.log.connect(lambda t: self._log.insertPlainText(t))
-        self._worker.done.connect(lambda ok: self._log.insertPlainText(f"\n{'OK' if ok else 'FAIL'}: {' '.join(args)}\n"))
-        self._worker.start()
-
-    def _show_labeling_guide(self):
-        QMessageBox.information(self, "Labeling Guide", _LABELING_GUIDE)
-
-    def _detect_and_show_status(self):
-        project_path = None
-        try:
-            import vieb_config
-            project_path = vieb_config.get_dlc_project_path()
-        except Exception:
-            pass
-        if not project_path:
-            dlc_dir = _find_dlc_project()
-            project_path = str(dlc_dir) if dlc_dir else None
-        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        csv_count = len(list(raw_dir.glob("*DLC*.csv"))) if raw_dir.exists() else 0
-        label_count = len(list((RESULTS / "shared").glob("*_labels.npy"))) if (RESULTS / "shared").exists() else 0
-        if not any([project_path, csv_count, label_count]):
-            return
-        parts = []
-        if project_path:
-            parts.append(f"DLC project: {project_path}")
-            self._path_le.setText(project_path)
-        if csv_count:
-            parts.append(f"{csv_count} pose CSV(s) found.")
-        if label_count:
-            parts.append(f"{label_count} state label file(s) found.")
-        self._done_lbl.setText(" | ".join(parts) + " You do not need to redo DLC unless adding videos.")
-        self._done_banner.show()
 
 
 def _thumb_from_video(path: Path | None, size=(180, 110)):
@@ -4450,6 +4274,7 @@ class MainWindow(QMainWindow):
 
         self._dlc = DLCSetupView(self.cfg)
         self._dlc.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
+        self._dlc.navigate_settings.connect(lambda: self._switch("Settings"))
         self._views["DLC Setup"] = self._dlc
         self._stack.addWidget(self._dlc)
 
@@ -4473,6 +4298,10 @@ class MainWindow(QMainWindow):
         self._sv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
         self._sv.request_clip_generation.connect(self._start_background_clip_generation)
         add("Browse States", self._sv)
+
+        self._scv = StateCharacterizationView(self.cfg)
+        self._scv.worker_running.connect(self._set_running)
+        add("State Characterization", self._scv)
 
         if _HAS_ANALYSIS_VIEW:
             self._av = _AnalysisView(self.cfg)
@@ -4607,8 +4436,10 @@ class MainWindow(QMainWindow):
             self._pv._stop_pipeline()
         if hasattr(self._av, 'stop_worker'):
             self._av.stop_worker()
+        if hasattr(self._scv, 'stop_worker'):
+            self._scv.stop_worker()
         if self._clip_worker and self._clip_worker.isRunning():
-            self._clip_worker.terminate()
+            self._clip_worker.stop()
         self._sb_stop.setEnabled(False)
 
     def _start_background_clip_generation(self, _sid: int):
@@ -4799,6 +4630,7 @@ class MainWindow(QMainWindow):
         self._sv.update_data(data)
         self._vv.update_data(data)
         self._qv.update_data(data)
+        self._scv.update_data(data)
         if self._av is not None:
             self._av.update_data(data)
         if hasattr(self._av, "refresh"):
@@ -4813,6 +4645,7 @@ class MainWindow(QMainWindow):
             self._sv.update_data(self._cached_data)
             self._vv.update_data(self._cached_data)
             self._qv.update_data(self._cached_data)
+            self._scv.update_data(self._cached_data)
             if self._av is not None:
                 self._av.update_data(self._cached_data)
             self.statusBar().showMessage("Previous session results loaded.", 3000)
@@ -4988,7 +4821,7 @@ class MainWindow(QMainWindow):
     def _propagate_cfg(self):
         """Push the freshly-loaded project config out to every subview."""
         for view in (
-            self._dlc, self._pv, self._crv, self._sv, self._av,
+            self._dlc, self._pv, self._crv, self._sv, self._scv, self._av,
             self._vv, self._qv, self._setv,
         ):
             if view is not None and hasattr(view, "cfg"):
