@@ -31,6 +31,18 @@ def _raw(): return _vc.get_raw_videos_dir()
 def _res(): return _vc.get_results_dir()
 def _meta(): return _vc.get_metadata_path()
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
+_WINDOWS_ROOT = "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB"
+
+
+def _fix_features_path(path: str) -> str:
+    """Normalize a features_path from index.json so it resolves on this machine."""
+    path = path.replace("\\", "/")
+    if "C:/" in path or path.startswith(_WINDOWS_ROOT):
+        path = path.replace(_WINDOWS_ROOT, ROOT)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # GPU detection and hardware banner
@@ -324,6 +336,146 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     print(f"\nDone. Extracted {new_count} new, skipped {skip_count} already done.")
     print(f"Total in index: {len(index)} videos")
     print(f"Feature files saved to results/features/")
+
+
+def _load_pose_for_index_entry(stem: str, entry: dict):
+    """Load (pose, conf, bodyparts) for an index.json entry, using its
+    recorded pose source (CSV/DLC or shared H5)."""
+    from pose_io import load_pose, load_pose_h5, _find_dlc_csv
+
+    if entry.get("h5_path"):
+        return load_pose_h5(
+            entry["h5_path"],
+            key=entry.get("h5_key"),
+            source_col=_vc.get_h5_source_col() or None,
+        )
+
+    pose_path = entry.get("csv_path")
+    if not pose_path or not os.path.exists(pose_path):
+        video_path = entry.get("video_path")
+        pose_path = _find_dlc_csv(video_path) if video_path else None
+    if not pose_path or not os.path.exists(pose_path):
+        return None
+    return load_pose(pose_path)
+
+
+def cmd_fix_features(fps: float = 30.0):
+    """Re-extract feature files for videos whose feature dimension does not
+    match the current config.json extraction settings (use_wavelets).
+
+    Only the mismatched videos are re-extracted — videos that already match
+    the target dimension are left untouched. Updates index["_meta"]
+    afterwards so it reflects the now-consistent settings.
+    """
+    from collections import Counter
+    from ml import PoseFeatureExtractor
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    if not os.path.exists(index_path):
+        sys.exit("No index found. Run --extract first.")
+    with open(index_path) as f:
+        index = json.load(f)
+
+    stems = sorted(k for k in index.keys() if k != "_meta")
+    if not stems:
+        sys.exit("Index is empty. Run --extract first.")
+
+    counts = Counter(index[s].get("n_features") for s in stems)
+    print(f"Feature dimensions across {len(stems)} videos: {dict(counts)}")
+    if len(counts) <= 1:
+        print("All videos already have a consistent feature dimension. Nothing to fix.")
+        return
+
+    use_wavelets = _vc.get_use_wavelets()
+    keypoint_roles, object_keypoints, bodypart_names = _load_extractor_config()
+    print(f"Re-extracting mismatched videos using config.json settings "
+          f"(use_wavelets={use_wavelets})...")
+
+    extractor = PoseFeatureExtractor(
+        fps=fps,
+        use_wavelets=use_wavelets,
+        keypoint_roles=keypoint_roles,
+        bodypart_names=bodypart_names,
+        object_keypoints=object_keypoints,
+    )
+
+    # ---- Determine the target feature dimension by extracting one video ----
+    target_n_features = None
+    target_n_keypoints = None
+    for stem in stems:
+        result = _load_pose_for_index_entry(stem, index[stem])
+        if result is None:
+            continue
+        pose, conf, _ = result
+        features_dict = extractor.extract_features(pose, confidence=conf)
+        features_flat = extractor._flatten_features(features_dict)
+        target_n_features = int(features_flat.shape[1])
+        target_n_keypoints = int(pose.shape[1])
+        if index[stem].get("n_features") != target_n_features:
+            out_path = index[stem]["features_path"]
+            np.save(out_path, features_flat.astype(np.float32))
+            index[stem]["n_features"] = target_n_features
+            index[stem]["n_keypoints"] = target_n_keypoints
+            index[stem]["n_frames"] = int(pose.shape[0])
+            print(f"  Re-extracted {stem}: {target_n_features} features")
+        break
+
+    if target_n_features is None:
+        sys.exit("Could not load pose data for any video; cannot determine target feature dimension.")
+
+    print(f"Target dimension: {target_n_features} features ({target_n_keypoints} keypoints)")
+
+    # ---- Re-extract every remaining video whose dimension doesn't match ----
+    mismatched = [s for s in stems if index[s].get("n_features") != target_n_features]
+    print(f"Re-extracting {len(mismatched)} mismatched video(s)...")
+
+    fixed_count = 0
+    skip_count = 0
+    for stem in mismatched:
+        result = _load_pose_for_index_entry(stem, index[stem])
+        if result is None:
+            print(f"  SKIP {stem}: pose data not found, cannot re-extract")
+            skip_count += 1
+            continue
+        pose, conf, _ = result
+        features_dict = extractor.extract_features(pose, confidence=conf)
+        features_flat = extractor._flatten_features(features_dict)
+        if features_flat.shape[1] != target_n_features:
+            print(f"  WARNING {stem}: re-extraction produced {features_flat.shape[1]} features "
+                  f"(expected {target_n_features}); leaving unchanged")
+            skip_count += 1
+            continue
+
+        out_path = index[stem]["features_path"]
+        np.save(out_path, features_flat.astype(np.float32))
+        index[stem]["n_features"] = int(features_flat.shape[1])
+        index[stem]["n_keypoints"] = int(pose.shape[1])
+        index[stem]["n_frames"] = int(pose.shape[0])
+        fixed_count += 1
+        print(f"  Re-extracted {stem}: {features_flat.shape[1]} features")
+
+    # ---- Update index metadata to reflect the now-consistent settings ----
+    old_meta = index.get("_meta", {})
+    new_meta = {
+        "n_keypoints": target_n_keypoints,
+        "n_features": target_n_features,
+        "use_wavelets": use_wavelets,
+        "vieb_version": old_meta.get("vieb_version", "1.0"),
+    }
+    if "pose_source" in old_meta:
+        new_meta["pose_source"] = old_meta["pose_source"]
+    index["_meta"] = new_meta
+
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    counts_after = Counter(index[s].get("n_features") for s in stems)
+    print(f"\nDone. Re-extracted {fixed_count}, skipped {skip_count}.")
+    print(f"Feature dimensions after fix: {dict(counts_after)}")
+    if len(counts_after) > 1:
+        print("WARNING: dimensions are still inconsistent. Some videos may be "
+              "missing pose data — re-run after restoring it, or re-extract "
+              "from scratch with --extract.")
 
 
 # ---------------------------------------------------------------------------
@@ -758,10 +910,21 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     boundaries = {}
     cursor = 0
     for stem in stems:
-        feat = np.load(index[stem]["features_path"].replace("\\", "/"))
+        feat_path = _fix_features_path(index[stem].get("features_path", ""))
+        if not os.path.exists(feat_path):
+            print(f"  SKIP {stem}: feature file not found at {feat_path}")
+            continue
+        feat = np.load(feat_path)
         boundaries[stem] = (cursor, cursor + len(feat))
         cursor += len(feat)
         all_features.append(feat)
+
+    if not all_features:
+        sys.exit("No feature files could be loaded. Check results/features/index.json.")
+
+    stems = [s for s in stems if s in boundaries]
+    train_stems = [s for s in train_stems if s in boundaries]
+    test_stems = [s for s in test_stems if s in boundaries]
 
     pooled = np.vstack(all_features).astype(np.float64)
     print(f"Pooled matrix: {pooled.shape[0]:,} frames × {pooled.shape[1]} features")
@@ -1749,6 +1912,10 @@ def main():
     )
     parser.add_argument("--extract", action="store_true",
                         help="Extract and save pose features from all videos")
+    parser.add_argument("--fix-features", action="store_true",
+                        help="Re-extract only videos whose feature dimension doesn't match "
+                             "the current config.json settings (resolves --extract/--no-wavelets "
+                             "mismatches without a full re-extraction)")
     parser.add_argument("--cluster", action="store_true",
                         help="Fit shared UMAP+HDBSCAN clusterer across all videos")
     parser.add_argument("--report", action="store_true",
@@ -1794,7 +1961,7 @@ def main():
                         help="Peri-event behavioral state analysis (discrete experiments only)")
     args = parser.parse_args()
 
-    if not any([args.extract, args.cluster, args.collapse, args.diagnose,
+    if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
                 args.report, args.summarize, args.quantify, args.save_run,
                 args.event_align]):
         parser.print_help()
@@ -1804,6 +1971,8 @@ def main():
 
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
+    if args.fix_features:
+        cmd_fix_features(fps=args.fps)
     if args.diagnose:
         mcs_list = None
         if args.diagnose_mcs:

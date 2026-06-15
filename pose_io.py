@@ -17,7 +17,12 @@ import pandas as pd
 
 
 def _find_dlc_csv(video_path: str) -> str | None:
-    """Return the DLC-generated CSV for a given video file, or None."""
+    """Return the DLC-generated pose file (.csv or .h5) for a given video, or None.
+
+    Prefers .csv if present, falling back to .h5. Excludes DLC's
+    "_full.h5"/"_full.pickle" sidecar files, which store raw detection
+    data rather than the tracked pose.
+    """
     stem = os.path.splitext(video_path)[0]
     video_dir = os.path.dirname(video_path)
     video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -25,10 +30,17 @@ def _find_dlc_csv(video_path: str) -> str | None:
     patterns = [
         f"{stem}*.csv",
         os.path.join(video_dir, f"{video_name}*.csv"),
+        f"{stem}*.h5",
+        os.path.join(video_dir, f"{video_name}*.h5"),
     ]
     for pattern in patterns:
         matches = glob.glob(pattern)
-        matches = [m for m in matches if "metadata" not in os.path.basename(m).lower()]
+        matches = [
+            m for m in matches
+            if "metadata" not in os.path.basename(m).lower()
+            and not os.path.basename(m).lower().endswith("_full.h5")
+            and not os.path.basename(m).lower().endswith("_full.pickle")
+        ]
         if matches:
             return matches[0]
     return None
@@ -56,9 +68,9 @@ def _pose_from_dlc_df(df: "pd.DataFrame") -> tuple[np.ndarray, np.ndarray, list[
     return pose, conf, bodyparts
 
 
-def load_pose(csv_path: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def load_pose(pose_path: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
-    Load DLC CSV output into a pose array.
+    Load DLC output (.csv or .h5) into a pose array.
 
     Returns
     -------
@@ -66,7 +78,11 @@ def load_pose(csv_path: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
     conf      : np.ndarray  shape (T, K)     — likelihood per keypoint per frame
     bodyparts : list[str]
     """
-    df = pd.read_csv(csv_path, header=[0, 1, 2], index_col=0)
+    ext = os.path.splitext(pose_path)[1].lower()
+    if ext == ".h5":
+        df = pd.read_hdf(pose_path)
+    else:
+        df = pd.read_csv(pose_path, header=[0, 1, 2], index_col=0)
     return _pose_from_dlc_df(df)
 
 
