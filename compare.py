@@ -141,11 +141,14 @@ def _load_extractor_config():
 def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
-    Iterates metadata.csv rows, resolving each row to a key inside the H5
-    file via h5_manifest.resolve_h5_key (exact/manifest/ordinal matching).
+    Handles two H5 layouts:
+    - Multi-key: one H5 key per session — iterates metadata rows and resolves
+      each to a key via h5_manifest.resolve_h5_key.
+    - Single-key concatenated: one key containing all sessions with a
+      source_file column — slices the DataFrame per unique source value.
     """
     from ml import PoseFeatureExtractor
-    from pose_io import inspect_h5, load_pose_h5
+    from pose_io import inspect_h5, load_pose_h5, _pose_from_flat_df, _pose_from_dlc_df
     from h5_manifest import load_manifest, resolve_h5_key
 
     h5_path = _vc.get_h5_path()
@@ -163,7 +166,6 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     if not h5_keys:
         sys.exit(f"No keys found in H5 file: {h5_path}")
 
-    manifest = load_manifest(_vc.get_h5_manifest_path())
     source_col = _vc.get_h5_source_col() or None
 
     os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
@@ -182,51 +184,124 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
 
     if not use_wavelets:
         print("(wavelets disabled)")
-    print(f"Extracting features from {len(meta)} metadata rows (H5 mode: {h5_path})...")
 
-    for i, (_, row) in enumerate(meta.iterrows()):
-        row_dict = row.to_dict()
-        filename = row_dict.get("filename", "")
-        stem = os.path.splitext(filename)[0] if filename else row_dict.get("animal_id", f"row{i}")
-        out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
-
-        if os.path.exists(out_path):
-            skip_count += 1
-            continue
-
+    # --- Detect single-key concatenated H5 ---
+    is_single_key_concat = False
+    if len(h5_keys) == 1 and source_col:
         try:
-            h5_key, strategy = resolve_h5_key(row_dict, h5_keys, manifest, i)
-        except ValueError as e:
-            print(f"  SKIP ({e})")
-            continue
+            with pd.HDFStore(h5_path, mode="r") as store:
+                raw_key = h5_keys[0] if h5_keys[0].startswith("/") else f"/{h5_keys[0]}"
+                sample = store.select(raw_key, start=0, stop=1)
+                if source_col in sample.columns:
+                    is_single_key_concat = True
+        except Exception:
+            pass
 
-        print(f"  {stem}  (h5_key={h5_key!r}, match={strategy})")
-        pose, conf, h5_bodyparts = load_pose_h5(h5_path, key=h5_key, source_col=source_col)
+    if is_single_key_concat:
+        # ----- Single-key concatenated path -----
+        print(f"Single-key concatenated H5 detected "
+              f"(key={h5_keys[0]!r}, source_col={source_col!r})")
+        with pd.HDFStore(h5_path, mode="r") as store:
+            raw_key = h5_keys[0] if h5_keys[0].startswith("/") else f"/{h5_keys[0]}"
+            full_df = store[raw_key]
 
-        if extractor is None:
-            extractor = PoseFeatureExtractor(
-                fps=fps,
-                use_wavelets=use_wavelets,
-                keypoint_roles=keypoint_roles,
-                bodypart_names=bodypart_names or h5_bodyparts,
-                object_keypoints=object_keypoints,
-            )
+        unique_sources = sorted(full_df[source_col].unique(), key=str)
+        print(f"Found {len(unique_sources)} sessions in {source_col!r} column")
+        print(f"Extracting features from {len(unique_sources)} sessions...")
 
-        features_dict = extractor.extract_features(pose, confidence=conf)
-        features_flat = extractor._flatten_features(features_dict)
+        for src_val in unique_sources:
+            stem = os.path.splitext(str(src_val))[0]
+            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
 
-        np.save(out_path, features_flat.astype(np.float32))
-        index[stem] = {
-            "video_path": None,
-            "csv_path": None,
-            "h5_path": h5_path,
-            "h5_key": h5_key,
-            "n_frames": int(pose.shape[0]),
-            "n_keypoints": int(pose.shape[1]),
-            "n_features": int(features_flat.shape[1]),
-            "features_path": out_path,
-        }
-        new_count += 1
+            if os.path.exists(out_path):
+                skip_count += 1
+                continue
+
+            slice_df = full_df[full_df[source_col] == src_val].copy()
+            slice_df = slice_df.drop(columns=[source_col], errors="ignore")
+            slice_df = slice_df.reset_index(drop=True)
+
+            if isinstance(slice_df.columns, pd.MultiIndex) and slice_df.columns.nlevels >= 3:
+                pose, conf, h5_bodyparts = _pose_from_dlc_df(slice_df)
+            else:
+                pose, conf, h5_bodyparts = _pose_from_flat_df(slice_df)
+
+            if extractor is None:
+                extractor = PoseFeatureExtractor(
+                    fps=fps,
+                    use_wavelets=use_wavelets,
+                    keypoint_roles=keypoint_roles,
+                    bodypart_names=bodypart_names or h5_bodyparts,
+                    object_keypoints=object_keypoints,
+                )
+
+            features_dict = extractor.extract_features(pose, confidence=conf)
+            features_flat = extractor._flatten_features(features_dict)
+
+            np.save(out_path, features_flat.astype(np.float32))
+            index[stem] = {
+                "video_path": None,
+                "csv_path": None,
+                "h5_path": h5_path,
+                "h5_key": h5_keys[0],
+                "h5_source": str(src_val),
+                "n_frames": int(pose.shape[0]),
+                "n_keypoints": int(pose.shape[1]),
+                "n_features": int(features_flat.shape[1]),
+                "features_path": out_path,
+            }
+            new_count += 1
+            print(f"  {stem}  ({pose.shape[0]} frames)")
+
+    else:
+        # ----- Multi-key path (existing logic) -----
+        manifest = load_manifest(_vc.get_h5_manifest_path())
+        print(f"Extracting features from {len(meta)} metadata rows "
+              f"(H5 mode: {h5_path})...")
+
+        for i, (_, row) in enumerate(meta.iterrows()):
+            row_dict = row.to_dict()
+            filename = row_dict.get("filename", "")
+            stem = os.path.splitext(filename)[0] if filename else row_dict.get("animal_id", f"row{i}")
+            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+
+            if os.path.exists(out_path):
+                skip_count += 1
+                continue
+
+            try:
+                h5_key, strategy = resolve_h5_key(row_dict, h5_keys, manifest, i)
+            except ValueError as e:
+                print(f"  SKIP ({e})")
+                continue
+
+            print(f"  {stem}  (h5_key={h5_key!r}, match={strategy})")
+            pose, conf, h5_bodyparts = load_pose_h5(h5_path, key=h5_key, source_col=source_col)
+
+            if extractor is None:
+                extractor = PoseFeatureExtractor(
+                    fps=fps,
+                    use_wavelets=use_wavelets,
+                    keypoint_roles=keypoint_roles,
+                    bodypart_names=bodypart_names or h5_bodyparts,
+                    object_keypoints=object_keypoints,
+                )
+
+            features_dict = extractor.extract_features(pose, confidence=conf)
+            features_flat = extractor._flatten_features(features_dict)
+
+            np.save(out_path, features_flat.astype(np.float32))
+            index[stem] = {
+                "video_path": None,
+                "csv_path": None,
+                "h5_path": h5_path,
+                "h5_key": h5_key,
+                "n_frames": int(pose.shape[0]),
+                "n_keypoints": int(pose.shape[1]),
+                "n_features": int(features_flat.shape[1]),
+                "features_path": out_path,
+            }
+            new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
     index["_meta"] = {
@@ -241,7 +316,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
         json.dump(index, f, indent=2)
 
     print(f"\nDone. Extracted {new_count} new, skipped {skip_count} already done.")
-    print(f"Total in index: {len(index)} videos")
+    print(f"Total in index: {len(index)} entries")
     print(f"Feature files saved to results/features/")
 
 
@@ -659,6 +734,22 @@ def _mark_run_saved() -> None:
     print("Run saved.")
 
 
+def _fix_features_path(path: str) -> str:
+    """Normalize a features path from index.json to the current machine.
+
+    Converts Windows backslashes and rebases absolute paths to the current
+    project's results directory so that index.json created on one OS works
+    on another.
+    """
+    path = path.replace("\\", "/")
+    marker = "results/features/"
+    idx = path.find(marker)
+    if idx >= 0:
+        tail = path[idx + len(marker):]
+        path = os.path.join(_res(), "features", tail)
+    return path
+
+
 def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10, validate: bool = False):
     import joblib
     from ml import BehaviorPreprocessor
@@ -758,7 +849,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     boundaries = {}
     cursor = 0
     for stem in stems:
-        feat = np.load(index[stem]["features_path"].replace("\\", "/"))
+        feat = np.load(_fix_features_path(index[stem]["features_path"]))
         boundaries[stem] = (cursor, cursor + len(feat))
         cursor += len(feat)
         all_features.append(feat)
