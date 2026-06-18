@@ -676,13 +676,30 @@ class BrowseStatesView(QWidget):
             self._kin_stem_combo.addItem(label, userData=stem)
         self._kin_stem_combo.blockSignals(False)
 
-    _KIN_FEATURE_INDICES = {
-        "Speed":       36,
-        "Elongation":  38,
-        "Ang Vel":     39,
-        "Entropy":     40,
-        "Rearing":     41,
+    _KIN_FEATURE_NAMES = {
+        "Speed":       "centroid_speed",
+        "Elongation":  "elongation",
+        "Ang Vel":     "angular_velocity",
+        "Entropy":     "movement_entropy",
+        "Rearing":     "rearing_score",
     }
+
+    @staticmethod
+    def _load_feature_name_index() -> dict:
+        """Return {feature_name: column_index} from index.json metadata."""
+        import json
+        from ml.feature_extraction import resolve_feature_indices
+        idx_path = RESULTS / "features" / "index.json"
+        if idx_path.exists():
+            try:
+                with open(idx_path) as f:
+                    meta = json.load(f).get("_meta", {})
+                names = meta.get("feature_names", [])
+                if names:
+                    return resolve_feature_indices(names)
+            except Exception:
+                pass
+        return {}
 
     def _compute_per_video_kinematics(self, stem: str, sid: int) -> dict | None:
         labels_path = RESULTS / "shared" / f"{stem}_labels.npy"
@@ -697,10 +714,12 @@ class BrowseStatesView(QWidget):
         if len(feats) != len(labels):
             return None
         state_feats = feats[mask]
+        feat_idx = self._load_feature_name_index()
         return {
-            name: float(np.mean(np.abs(state_feats[:, idx])))
-            for name, idx in self._KIN_FEATURE_INDICES.items()
-            if idx < state_feats.shape[1]
+            display_name: float(np.mean(np.abs(state_feats[:, idx])))
+            for display_name, feat_name in self._KIN_FEATURE_NAMES.items()
+            for idx in [feat_idx.get(feat_name)]
+            if idx is not None and idx < state_feats.shape[1]
         }
 
     def _render_kinematics(self, sid):

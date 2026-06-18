@@ -18,16 +18,30 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.signal import savgol_filter
 
 
+def resolve_feature_indices(feature_names: list) -> dict:
+    """Build a {name: index} lookup from a feature_names list.
+
+    Works with the list stored in index.json ``_meta.feature_names`` or
+    returned by ``PoseFeatureExtractor.get_feature_names()``.
+    """
+    return {name: i for i, name in enumerate(feature_names)}
+
+
 class PoseFeatureExtractor:
     """
     Extract behavioral features from pose time series.
 
-    Features include:
-    - Velocities and accelerations
-    - Inter-keypoint distances
-    - Body angles and orientations
-    - Movement statistics (speed, direction changes)
-    - Postural configurations
+    Features are organised in two layers:
+
+    **Layer 1 — Universal** (always computed, no keypoint-name assumptions):
+      per-keypoint speed, pairwise distances, centroid speed, body orientation
+      (PCA fallback), elongation (PCA), angular velocity, movement entropy,
+      temporal window statistics, Morlet wavelet amplitudes.
+
+    **Layer 2 — Semantic** (computed only when required keypoint roles exist):
+      rearing score, head angle.  Each entry in ``_SEMANTIC_FEATURES`` maps a
+      feature name to the roles it needs; if any role is unresolved the feature
+      is omitted and the vector is shorter.
     """
 
     # Semantic roles used for postural features
@@ -41,6 +55,14 @@ class PoseFeatureExtractor:
         "right_ear": 1,
         "center/centroid": 3,
         "tail_base": 6,
+    }
+
+    # Layer 2 — semantic features and the roles each one requires.
+    # To add a new semantic feature: add an entry here and a matching
+    # ``_compute_<name>`` method.  The framework handles the rest.
+    _SEMANTIC_FEATURES: dict = {
+        "rearing_score": ("nose", "tail_base", "left_ear", "right_ear"),
+        "head_angle":    ("nose", "tail_base", "left_ear", "right_ear"),
     }
 
     def __init__(
@@ -88,13 +110,21 @@ class PoseFeatureExtractor:
 
         if bodypart_names is not None:
             resolved = self._resolve_keypoint_indices(bodypart_names, keypoint_roles or {})
-            if resolved:
-                self._role_idx = resolved
-                self._roles_resolved = True
+            # When bodypart_names is explicitly provided, use only what was
+            # resolved — don't fall back to hardcoded defaults which assume
+            # the 8-point mouse model and may reference invalid indices.
+            self._role_idx = resolved
+            self._roles_resolved = bool(resolved)
             self._object_kp_indices = self._resolve_object_indices(
                 bodypart_names, object_keypoints or []
             )
             self._n_bodyparts = len(bodypart_names)
+
+        # Determine which Layer 2 (semantic) features can be computed
+        self._available_semantic: set = set()
+        for feat_name, required_roles in self._SEMANTIC_FEATURES.items():
+            if all(self._get_role_idx(r) is not None for r in required_roles):
+                self._available_semantic.add(feat_name)
 
     @classmethod
     def _resolve_keypoint_indices(
@@ -257,9 +287,11 @@ class PoseFeatureExtractor:
         features["elongation"] = self._compute_elongation(pose_smooth)
         features["angular_velocity"] = self._compute_angular_velocity(features["body_orientation"])
 
-        # --- Postural indicators ---
-        features["rearing_score"] = self._compute_rearing_score(pose_smooth)
-        features["head_angle"] = self._compute_head_angle(pose_smooth)
+        # --- Layer 2: semantic postural indicators (conditional) ---
+        if "rearing_score" in self._available_semantic:
+            features["rearing_score"] = self._compute_rearing_score(pose_smooth)
+        if "head_angle" in self._available_semantic:
+            features["head_angle"] = self._compute_head_angle(pose_smooth)
 
         # --- Temporal dynamics ---
         features["movement_entropy"] = self._compute_movement_entropy(features["speed"])
@@ -713,13 +745,17 @@ class PoseFeatureExtractor:
         centroid_speed = np.linalg.norm(features["centroid_velocity"], axis=1, keepdims=True)
         feature_arrays.append(centroid_speed)  # (T, 1)
 
-        # Postural features
+        # Layer 1: universal postural features
         feature_arrays.append(features["body_orientation"][:, None])  # (T, 1)
         feature_arrays.append(features["elongation"][:, None])  # (T, 1)
         feature_arrays.append(features["angular_velocity"][:, None])  # (T, 1)
         feature_arrays.append(features["movement_entropy"][:, None])  # (T, 1)
-        feature_arrays.append(features["rearing_score"][:, None])    # (T, 1)
-        feature_arrays.append(features["head_angle"][:, None])       # (T, 1)
+
+        # Layer 2: semantic postural features (only present when roles available)
+        if "rearing_score" in features:
+            feature_arrays.append(features["rearing_score"][:, None])    # (T, 1)
+        if "head_angle" in features:
+            feature_arrays.append(features["head_angle"][:, None])       # (T, 1)
 
         # Temporal features
         feature_arrays.append(features["temporal_features"])  # (T, M)
@@ -754,16 +790,20 @@ class PoseFeatureExtractor:
         for p in range(n_pairs):
             names.append(f"dist_pair{p}")
 
-        # Scalar features
+        # Layer 1: universal scalar features
         names.extend([
             "centroid_speed",
             "body_orientation",
             "elongation",
             "angular_velocity",
             "movement_entropy",
-            "rearing_score",
-            "head_angle",
         ])
+
+        # Layer 2: semantic scalar features (only when roles are available)
+        if "rearing_score" in self._available_semantic:
+            names.append("rearing_score")
+        if "head_angle" in self._available_semantic:
+            names.append("head_angle")
 
         # Temporal aggregation features
         names.extend([
@@ -784,3 +824,22 @@ class PoseFeatureExtractor:
                     names.append(f"wavelet_kp{k}_{int(f)}hz")
 
         return names
+
+    def feature_index(self, name: str, n_keypoints: int = None) -> Optional[int]:
+        """Return the column index of a named feature, or None if unavailable."""
+        names = self.get_feature_names(n_keypoints)
+        try:
+            return names.index(name)
+        except ValueError:
+            return None
+
+    def get_feature_meta(self, n_keypoints: int = None) -> dict:
+        """Return metadata about the feature vector for serialization in index.json."""
+        names = self.get_feature_names(n_keypoints)
+        return {
+            "feature_names": names,
+            "n_features": len(names),
+            "n_keypoints": n_keypoints or getattr(self, '_last_n_keypoints', 8),
+            "use_wavelets": self.use_wavelets,
+            "semantic_features": sorted(self._available_semantic),
+        }
