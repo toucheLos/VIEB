@@ -79,8 +79,12 @@ _NEW_PROJECT_DEFAULTS: dict = {
     "h5_path": "",
     "h5_key": "",
     "h5_manifest_path": "",
-    "h5_source_col": "",
     "manifest_path": "",
+    "h5_source_col": "",
+<<<<<<< HEAD
+    "manifest_path": "",
+=======
+>>>>>>> 81e1fbe94c256750a3bc620286ae81ebb1673e42
     "h5_frame_col": "Frame Number",
 }
 

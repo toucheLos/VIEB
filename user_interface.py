@@ -147,6 +147,7 @@ from views.state_characterization import StateCharacterizationView
 
 from views.help import HelpView
 from views.dlc_setup import DLCSetupView
+from views.add_videos import AddVideosView
 
 # ---------------------------------------------------------------------------
 # WSL2 / Linux GPU detection - cached at first use
@@ -473,6 +474,7 @@ _DEFAULT_CFG = {
 _SPINNER = ["|", "/", "-", "\\"]
 _NAV_VIEWS = [
     "Overview",
+    "Add Videos",
     "Pipeline",
     "Cluster Runs",
     "State Characterization",
@@ -483,6 +485,7 @@ _NAV_VIEWS = [
 
 _NAV_ICONS = {
     "Overview":               "⊞",
+    "Add Videos":             "➕",
     "Pipeline":               "▶",
     "Cluster Runs":           "⊙",
     "State Characterization": "▣",
@@ -4223,6 +4226,7 @@ class MainWindow(QMainWindow):
         self._load_data()
         self._start_file_watcher()
         QTimer.singleShot(200, self._maybe_onboarding)
+        QTimer.singleShot(300, self._check_dlc_setup)
 
     def _build(self):
         central = QWidget()
@@ -4242,6 +4246,14 @@ class MainWindow(QMainWindow):
         self._setup_banner_lbl.setWordWrap(True)
         self._setup_banner_lbl.setStyleSheet("color:#664d03;")
         banner_lay.addWidget(self._setup_banner_lbl, stretch=1)
+        self._setup_banner_btn = QPushButton("Run Setup")
+        self._setup_banner_btn.setStyleSheet(
+            "QPushButton{background:#664d03;color:white;padding:4px 12px;"
+            "border-radius:4px;} QPushButton:hover{background:#80640a;}"
+        )
+        self._setup_banner_btn.clicked.connect(self._run_setup_script)
+        self._setup_banner_btn.hide()
+        banner_lay.addWidget(self._setup_banner_btn)
         banner_close = QPushButton("×")
         banner_close.setFixedSize(22, 22)
         banner_close.clicked.connect(self._setup_banner.hide)
@@ -4388,6 +4400,13 @@ class MainWindow(QMainWindow):
         self._views["DLC Setup"] = self._dlc
         self._stack.addWidget(self._dlc)
 
+        self._adv = AddVideosView(self.cfg)
+        self._adv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
+        self._adv.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
+        self._adv.worker_running.connect(self._set_running)
+        self._adv.pipeline_done.connect(self._load_data)
+        add("Add Videos", self._adv)
+
         self._pv = RunPipelineView(self.cfg)
         self._pv.pipeline_done.connect(self._load_data)
         self._pv.worker_running.connect(self._set_running)
@@ -4448,6 +4467,7 @@ class MainWindow(QMainWindow):
                     "Set your raw videos directory and pose file path in "
                     "Settings, then go to Pipeline to run analysis."
                 )
+                self._setup_banner_btn.hide()
                 self._setup_banner.show()
         else:
             self._switch(self.cfg.get("last_view", "Overview"))
@@ -4817,6 +4837,68 @@ class MainWindow(QMainWindow):
             "Welcome to VIEB. To get started, go to Pipeline and press Run.",
         )
 
+    def _check_dlc_setup(self):
+        """Warn if the DeepLabCut environment (venv-dlc) hasn't been set up.
+
+        Shown as a dismissible banner with a "Run Setup" button that launches
+        vieb_setup.py in a terminal. Pose-estimation features won't work
+        without venv-dlc, but the rest of VIEB is usable, so this is advisory.
+        """
+        dlc_python = (self.cfg.get("dlc_python") or "").strip()
+        if dlc_python and os.path.isfile(dlc_python):
+            return
+        venv_dlc_dir = ROOT / "venv-dlc"
+        if venv_dlc_dir.is_dir():
+            return
+
+        self._setup_banner_lbl.setText(
+            "DeepLabCut environment not found. Pose-estimation features "
+            "(Stage 1) will not work until setup is run."
+        )
+        self._setup_banner_btn.show()
+        self._setup_banner.show()
+
+    def _run_setup_script(self):
+        """Launch vieb_setup.py in a new terminal window so the user can
+        interact with its prompts."""
+        script = str(ROOT / "vieb_setup.py")
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    ["cmd", "/k", sys.executable, script],
+                    cwd=str(ROOT),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            elif sys.platform == "darwin":
+                subprocess.Popen(
+                    [
+                        "osascript", "-e",
+                        f'tell application "Terminal" to do script '
+                        f'"cd {shlex.quote(str(ROOT))} && '
+                        f'{shlex.quote(sys.executable)} {shlex.quote(script)}"',
+                    ]
+                )
+            else:
+                for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+                    if shutil.which(term):
+                        if term == "gnome-terminal":
+                            cmd = [term, "--", sys.executable, script]
+                        else:
+                            cmd = [term, "-e", f"{sys.executable} {script}"]
+                        subprocess.Popen(cmd, cwd=str(ROOT))
+                        break
+                else:
+                    raise RuntimeError("No terminal emulator found.")
+        except Exception as exc:
+            QMessageBox.information(
+                self,
+                "Run Setup",
+                "Could not open a terminal automatically.\n\n"
+                "Please run this command manually from the project directory:\n"
+                f"  {sys.executable} {script}\n\n"
+                f"(Error: {exc})",
+            )
+
     # ── Project management ────────────────────────────────────────────────────
 
     def _init_project(self):
@@ -4997,6 +5079,7 @@ class MainWindow(QMainWindow):
                     "Set your raw videos directory and pose file path in "
                     "Settings, then go to Pipeline to run analysis."
                 )
+                self._setup_banner_btn.hide()
                 self._setup_banner.show()
 
     def closeEvent(self, e):

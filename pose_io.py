@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 
+<<<<<<< HEAD
 def _find_pose_file(video_path: str, cfg: dict | None = None) -> str | tuple[str, str] | None:
     """Return the pose data source for a given video.
 
@@ -76,6 +77,43 @@ def _find_pose_file(video_path: str, cfg: dict | None = None) -> str | tuple[str
         except ValueError:
             return None
 
+=======
+def _resolve_h5_key(video_path: str, cfg: dict) -> "str | None":
+    """Return the H5 key for video_path via manifest lookup, then cfg['h5_key']."""
+    video_stem = os.path.splitext(os.path.basename(video_path))[0]
+    manifest_path = cfg.get("manifest_path", "") or cfg.get("h5_manifest_path", "")
+
+    if manifest_path and os.path.isfile(manifest_path):
+        try:
+            from h5_manifest import load_manifest
+            mapping = load_manifest(manifest_path)
+            norm_stem = re.sub(r"[^a-z0-9]", "", video_stem.lower())
+            if norm_stem in mapping:
+                return mapping[norm_stem]
+        except Exception:
+            pass
+
+    return cfg.get("h5_key") or None
+
+
+def _find_pose_file(
+    video_path: str,
+    cfg: "dict | None" = None,
+) -> "str | tuple[str, str | None] | None":
+    """
+    Locate the pose data source for video_path.
+
+    When cfg['pose_source'] == 'h5' and cfg['h5_path'] is set, skips the
+    per-video CSV search and returns (h5_path, key) with the key resolved
+    via manifest then cfg['h5_key'].  Otherwise delegates to _find_dlc_csv.
+    """
+    if cfg:
+        pose_source = cfg.get("pose_source", "")
+        h5_path = cfg.get("h5_path", "")
+        if pose_source == "h5" and h5_path:
+            key = _resolve_h5_key(video_path, cfg)
+            return (h5_path, key)
+>>>>>>> 81e1fbe94c256750a3bc620286ae81ebb1673e42
     return _find_dlc_csv(video_path)
 
 

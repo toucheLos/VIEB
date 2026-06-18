@@ -33,17 +33,6 @@ def _meta(): return _vc.get_metadata_path()
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-_WINDOWS_ROOT = "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB"
-
-
-def _fix_features_path(path: str) -> str:
-    """Normalize a features_path from index.json so it resolves on this machine."""
-    path = path.replace("\\", "/")
-    if "C:/" in path or path.startswith(_WINDOWS_ROOT):
-        path = path.replace(_WINDOWS_ROOT, ROOT)
-    return path
-
-
 # ---------------------------------------------------------------------------
 # GPU detection and hardware banner
 # ---------------------------------------------------------------------------
@@ -1404,6 +1393,109 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
             min_cluster_size,
         )
 
+# ---------------------------------------------------------------------------
+# Step 2b: Apply the existing shared cluster model to new videos only
+# ---------------------------------------------------------------------------
+
+def cmd_apply_existing(fps: float = 30.0):
+    """
+    Apply the existing saved preprocessor/UMAP/HDBSCAN models to videos that
+    have features extracted but no labels yet. Does not refit anything, so
+    cluster IDs for previously processed videos are unchanged.
+    """
+    import joblib
+    from hdbscan import approximate_predict
+
+    shared_dir = os.path.join(_res(), "shared")
+    for fname in ("preprocessor.pkl", "umap_reducer.pkl", "clusterer.pkl", "cluster_info.json"):
+        if not os.path.exists(os.path.join(shared_dir, fname)):
+            sys.exit(f"Missing {fname} in results/shared/. Run 'compare.py --cluster' (full fit) first.")
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    if not os.path.exists(index_path):
+        sys.exit("No index found. Run --extract first.")
+    with open(index_path) as f:
+        index = json.load(f)
+
+    stems = sorted(k for k in index.keys() if k != "_meta")
+    new_stems = [s for s in stems if not os.path.exists(os.path.join(shared_dir, f"{s}_labels.npy"))]
+
+    if not new_stems:
+        print("No new videos to cluster — every video in the feature index already has labels.")
+        return
+
+    print(f"Applying existing cluster model to {len(new_stems)} new video(s):")
+    for s in new_stems:
+        print(f"  {s}")
+
+    preprocessor = joblib.load(os.path.join(shared_dir, "preprocessor.pkl"))
+    reducer = joblib.load(os.path.join(shared_dir, "umap_reducer.pkl"))
+    clusterer_model = joblib.load(os.path.join(shared_dir, "clusterer.pkl"))
+    with open(os.path.join(shared_dir, "cluster_info.json")) as f:
+        cluster_info = json.load(f)
+    n_found = int(cluster_info.get("n_clusters", 0))
+
+    boundaries = {}
+    cursor = 0
+    feats = []
+    for stem in new_stems:
+        feat_path = _fix_features_path(index[stem].get("features_path", ""))
+        if not os.path.exists(feat_path):
+            print(f"  SKIP {stem}: feature file not found at {feat_path}")
+            continue
+        feat = np.load(feat_path).astype(np.float64)
+        boundaries[stem] = (cursor, cursor + len(feat))
+        cursor += len(feat)
+        feats.append(feat)
+
+    new_stems = [s for s in new_stems if s in boundaries]
+    if not new_stems:
+        sys.exit("No feature files could be loaded for the new videos.")
+
+    pooled = np.vstack(feats)
+    pooled_scaled = preprocessor.transform(pooled)
+    pooled_umap = reducer.transform(pooled_scaled)
+    if hasattr(pooled_umap, "to_numpy"):
+        pooled_umap = pooled_umap.to_numpy()
+    elif hasattr(pooled_umap, "get"):
+        pooled_umap = pooled_umap.get()
+    pooled_umap = np.asarray(pooled_umap, dtype=np.float32)
+
+    try:
+        raw_labels, raw_probs = approximate_predict(clusterer_model, pooled_umap)
+        raw_labels = np.asarray(raw_labels, dtype=np.int32)
+        raw_probs = np.asarray(raw_probs, dtype=np.float32)
+    except Exception as e:
+        print(f"  [WARN] approximate_predict failed: {e}. Marking all new frames as noise.")
+        raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
+        raw_probs = np.zeros(len(pooled_umap), dtype=np.float32)
+
+    raw_labels_all = []
+    raw_probs_all = []
+    for stem in new_stems:
+        start, end = boundaries[stem]
+        raw_labels_all.append(raw_labels[start:end])
+        raw_probs_all.append(raw_probs[start:end])
+
+    print("\nSmoothing labels with HMM...")
+    all_raw_concat = np.concatenate(raw_labels_all)
+    valid_labels = all_raw_concat[all_raw_concat >= 0]
+    if len(valid_labels) > 0 and n_found > 1:
+        hmm_params = _fit_hmm(valid_labels, n_found)
+        smoothed_labels_all = [_smooth_with_noise(lbl, hmm_params) for lbl in raw_labels_all]
+    else:
+        smoothed_labels_all = raw_labels_all
+
+    for stem, smoothed, probs in zip(new_stems, smoothed_labels_all, raw_probs_all):
+        np.save(os.path.join(shared_dir, f"{stem}_labels.npy"), smoothed.astype(np.int32))
+        np.save(os.path.join(shared_dir, f"{stem}_probs.npy"), probs.astype(np.float32))
+        n_noise = int((smoothed < 0).sum())
+        print(f"  {stem}: {len(smoothed):,} frames, {n_noise:,} noise ({100 * n_noise / len(smoothed):.1f}%)")
+
+    print(f"\nDone. Applied existing cluster model to {len(new_stems)} video(s).")
+    print("Per-video labels → results/shared/<stem>_labels.npy")
+    print("Existing models and cluster_info.json were not modified.")
+
 
 # ---------------------------------------------------------------------------
 # Step 2.5: Collapse similar states (post-clustering merge)
@@ -2123,6 +2215,9 @@ def main():
                         help="Skip Morlet wavelet features during --extract (faster)")
     parser.add_argument("--validate", action="store_true",
                         help="With --cluster: run 80/20 train/test split validation (seed=42)")
+    parser.add_argument("--apply-existing", action="store_true",
+                        help="With --cluster: apply the existing saved model to new videos only "
+                             "(fast, does not refit preprocessor/UMAP/HDBSCAN)")
     parser.add_argument("--min-confidence", type=float, default=0.0,
                         help="With --report/--quantify: exclude frames with prob < threshold")
     parser.add_argument("--cohort", metavar="FILE", default=None,
@@ -2160,9 +2255,12 @@ def main():
             hdbscan_jobs=args.hdbscan_jobs,
         )
     if args.cluster:
-        cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
-                    min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
-                    validate=args.validate)
+        if args.apply_existing:
+            cmd_apply_existing(fps=args.fps)
+        else:
+            cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
+                        min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
+                        validate=args.validate)
         if args.save_run:
             _mark_run_saved()
     if args.save_run and not args.cluster:
