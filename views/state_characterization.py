@@ -363,10 +363,11 @@ class StateCharacterizationView(QWidget):
                 v = r.get(col, None)
                 if v is None or pd.isna(v):
                     continue
+                min_v = ss[col].min()
                 max_v = ss[col].max()
-                if pd.isna(max_v) or max_v == 0:
+                if pd.isna(min_v) or pd.isna(max_v) or max_v == min_v:
                     continue
-                metrics[display] = float(v) / float(max_v)
+                metrics[display] = (float(v) - float(min_v)) / (float(max_v) - float(min_v))
 
             if metrics:
                 norm_v = list(metrics.values())
@@ -375,7 +376,7 @@ class StateCharacterizationView(QWidget):
                 ax.set_yticks(y)
                 ax.set_yticklabels(list(metrics.keys()), fontsize=9)
                 ax.set_xlim(0, 1)
-                ax.set_xlabel("Normalized value (relative to max across states)")
+                ax.set_xlabel("Normalized value (min–max across states)")
             else:
                 ax.text(0.5, 0.5, "No kinematic data",
                         ha="center", va="center", transform=ax.transAxes, color="#999")
