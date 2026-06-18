@@ -136,7 +136,14 @@ class StateCharacterizationView(QWidget):
         self._label_input.setPlaceholderText("Free-text label")
         lbl_row.addWidget(self._label_input, stretch=1)
         self._label_combo = QComboBox()
-        self._label_combo.addItems(["Freeze", "Walk", "Groom", "Rear", "Explore", "Other"])
+        self._label_combo.addItems([
+            "Low Velocity", "High Velocity",
+            "Low Elongation", "High Elongation",
+            "Short Bouts", "Long Bouts",
+            "High Angular Vel.", "Low Angular Vel.",
+            "High Rearing", "Low Rearing",
+            "Other",
+        ])
         lbl_row.addWidget(self._label_combo)
         save_btn = QPushButton("Save")
         save_btn.setFixedWidth(56)
@@ -261,6 +268,52 @@ class StateCharacterizationView(QWidget):
             item = self._state_list.item(i)
             item.setHidden(bool(text) and text.lower() not in item.text().lower())
 
+    def _enrich_kinematic_columns(self, ss: pd.DataFrame) -> pd.DataFrame:
+        """Add kinematic columns from cluster_info centers when missing."""
+        needed = {
+            "mean_centroid_speed", "mean_angular_vel", "mean_elongation",
+            "mean_rearing_score", "mean_movement_entropy",
+        }
+        existing = {c.lower() for c in ss.columns}
+        if needed.issubset(existing):
+            return ss
+
+        ci = self._data.get("cluster_info") or {}
+        centers = ci.get("cluster_centers", [])
+        if not centers:
+            return ss
+
+        from compare import _extract_kinematic_values
+        id_col = getattr(self, "_id_col", None)
+        if id_col is None:
+            return ss
+
+        n_kp = 8
+        try:
+            import json as _json
+            idx_path = RESULTS / "features" / "index.json"
+            if idx_path.exists():
+                with open(idx_path, encoding="utf-8") as f:
+                    n_kp = _json.load(f).get("_meta", {}).get("n_keypoints", 8)
+        except Exception:
+            pass
+
+        kin_rows = []
+        for _, row in ss.iterrows():
+            sid = int(row.get(id_col, -1))
+            if 0 <= sid < len(centers):
+                vals = _extract_kinematic_values(centers[sid], n_keypoints=n_kp)
+            else:
+                vals = {}
+            vals[id_col] = sid
+            kin_rows.append(vals)
+
+        kin_df = pd.DataFrame(kin_rows)
+        for col in kin_df.columns:
+            if col != id_col and col.lower() not in existing:
+                ss[col] = kin_df[col].values
+        return ss
+
     def _on_state_selected(self, row: int) -> None:
         if row < 0 or row >= len(self._state_ids):
             return
@@ -277,6 +330,10 @@ class StateCharacterizationView(QWidget):
         )
         if id_col is None:
             return
+
+        ss = self._enrich_kinematic_columns(ss)
+        self._data["state_summary"] = ss
+
         rows = ss[ss[id_col] == sid]
         if rows.empty:
             return
@@ -288,14 +345,13 @@ class StateCharacterizationView(QWidget):
             canvas.fig.clf()
             ax = canvas.fig.add_subplot(111)
 
-            # Fixed kinematic metrics, matched case-insensitively against
-            # whatever columns state_summary.csv actually has.
             kinematic_metrics = [
-                ("centroid_speed",   "Speed"),
-                ("angular_velocity", "Angular Velocity"),
-                ("body_elongation",  "Elongation"),
-                ("rearing_score",    "Rearing Score"),
-                ("bout_duration_s",  "Bout Duration"),
+                ("mean_centroid_speed",     "Speed"),
+                ("mean_angular_vel",        "Angular Velocity"),
+                ("mean_elongation",         "Elongation"),
+                ("mean_rearing_score",      "Rearing Score"),
+                ("mean_bout_dur_sec",       "Bout Duration"),
+                ("mean_movement_entropy",   "Movement Variability"),
             ]
             cols_lower = {c.lower(): c for c in ss.columns}
 

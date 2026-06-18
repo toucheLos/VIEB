@@ -463,6 +463,11 @@ _DEFAULT_CFG = {
     "reviewer_categories": [],
     "reviewer_seed": 0,
     "pose_source": "",
+    "h5_path": "",
+    "manifest_path": "",
+    "h5_key": "/coords",
+    "h5_source_col": "source_file",
+    "h5_frame_col": "Frame Number",
 }
 
 _SPINNER = ["|", "/", "-", "\\"]
@@ -1693,6 +1698,15 @@ _STAGE_HELP_MAP: dict[int, str] = {
 }
 
 
+class _StageClickableHeader(QFrame):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class StageRow(QFrame):
     run_stage = pyqtSignal(int)
     run_from_here = pyqtSignal(int)
@@ -1702,26 +1716,44 @@ class StageRow(QFrame):
     run_subcluster = pyqtSignal(int)
     navigate_help = pyqtSignal(str)
 
+    _COLORS = {
+        "done":    ("#e8f5e9", "#a5d6a7", "#2e7d32"),
+        "running": ("#e3f2fd", "#90caf9", "#1565c0"),
+        "pending": ("#fafafa", "#e0e0e0", "#999999"),
+        "error":   ("#ffebee", "#ef9a9a", "#c62828"),
+    }
+    _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
         self.stage = stage
         self.cfg = cfg
-        self.logs = deque(maxlen=20)
+        self._dom_state_id = -1
         self._build()
 
     def _build(self):
-        self.setStyleSheet("QFrame{border:none;background:#fff;}")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        self.setObjectName("stageCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        top = QHBoxLayout()
+        header = _StageClickableHeader()
+        header.setCursor(Qt.PointingHandCursor)
+        header.setStyleSheet("background:transparent;border:none;")
+        header.clicked.connect(self._toggle)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+
         self._icon = QLabel("○")
-        self._icon.setFixedWidth(18)
-        top.addWidget(self._icon)
-        name = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
-        name.setFont(QFont("Arial", 11, QFont.Bold))
-        top.addWidget(name)
-        top.addStretch()
+        self._icon.setFixedWidth(20)
+        hl.addWidget(self._icon)
+
+        title = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
+        title.setStyleSheet(
+            "font-weight:bold;color:#333;background:transparent;border:none;"
+        )
+        hl.addWidget(title, stretch=1)
+
         _help_anchor = _STAGE_HELP_MAP.get(self.stage["id"])
         if _help_anchor:
             _hb = QToolButton()
@@ -1735,45 +1767,55 @@ class StageRow(QFrame):
                 "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
             )
             _hb.clicked.connect(lambda _, a=_help_anchor: self.navigate_help.emit(a))
-            top.addWidget(_hb)
-        self._ts = QLabel("Last run: -")
-        self._eta = QLabel("ETA: -")
-        top.addWidget(self._ts)
-        top.addWidget(QLabel("  "))
-        top.addWidget(self._eta)
-        self._expand = QToolButton()
-        self._expand.setText("▾")
-        self._expand.setCheckable(True)
-        self._expand.clicked.connect(self._toggle)
-        top.addWidget(self._expand)
-        self._done_cb = QCheckBox()
-        self._done_cb.setToolTip("Mark stage as completed")
-        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
-        top.addWidget(self._done_cb)
-        lay.addLayout(top)
+            hl.addWidget(_hb)
 
-        d = QLabel(self.stage["desc"])
-        d.setStyleSheet("color:#555;")
-        d.setWordWrap(True)
-        lay.addWidget(d)
+        self._ts = QLabel("")
+        self._ts.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._ts)
+
+        self._eta = QLabel("")
+        self._eta.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._eta)
+
+        self._arrow = QLabel("▸")
+        self._arrow.setStyleSheet(
+            "color:#999;background:transparent;border:none;"
+        )
+        hl.addWidget(self._arrow)
+
+        outer.addWidget(header)
+
+        self._desc = QLabel(self.stage["desc"])
+        self._desc.setWordWrap(True)
+        self._desc.setStyleSheet(
+            "color:#666;font-size:11px;padding:0 14px 8px 40px;"
+            "background:transparent;border:none;"
+        )
+        outer.addWidget(self._desc)
+
+        self._body = QWidget()
+        self._body.setStyleSheet("background:transparent;")
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(40, 0, 14, 14)
+        bl.setSpacing(8)
+
         self._pose_source_lbl = None
         if self.stage["id"] == 1:
             self._pose_source_lbl = QLabel("")
             self._pose_source_lbl.setWordWrap(True)
-            lay.addWidget(self._pose_source_lbl)
+            bl.addWidget(self._pose_source_lbl)
+
         self._quality_lbl = None
-        self._dom_state_id = -1
         if self.stage["id"] == 3:
             self._quality_lbl = QLabel("")
-            self._quality_lbl.setStyleSheet("color:#666;")
-            lay.addWidget(self._quality_lbl)
+            self._quality_lbl.setStyleSheet("color:#666;font-size:11px;")
+            bl.addWidget(self._quality_lbl)
 
-        self._details = QWidget()
-        dl = QVBoxLayout(self._details)
-        cmd = QLabel(f"CLI: {self.stage['cmd']}")
-        cmd.setStyleSheet("font-family:Consolas;color:#222;")
-        dl.addWidget(cmd)
-
+        has_params = False
         params = QHBoxLayout()
         if self.stage["id"] == 2:
             self._wave = QCheckBox("Use Morlet wavelets")
@@ -1782,12 +1824,13 @@ class StageRow(QFrame):
             params.addWidget(self._wave)
             params.addWidget(QLabel("  FPS"))
             self._fps_spin = QDoubleSpinBox()
-            self._fps_spin.setRange(1.0, 120.0)
+            self._fps_spin.setRange(1.0, 256.0)
             self._fps_spin.setSingleStep(1.0)
             self._fps_spin.setDecimals(1)
             self._fps_spin.setValue(float(self.cfg.get("fps", 30.0)))
             self._fps_spin.valueChanged.connect(lambda v: self.changed.emit("fps", v))
             params.addWidget(self._fps_spin)
+            has_params = True
         if self.stage["id"] == 3:
             params.addWidget(QLabel("min_cluster_size"))
             self._mcs = QSpinBox()
@@ -1811,6 +1854,7 @@ class StageRow(QFrame):
             self._validate_cb.setChecked(bool(self.cfg.get("validate", False)))
             self._validate_cb.toggled.connect(lambda v: self.changed.emit("validate", v))
             params.addWidget(self._validate_cb)
+            has_params = True
         if self.stage["id"] == 7:
             self._collapse = QCheckBox("Enable state collapsing")
             self._collapse.setChecked(bool(self.cfg.get("enable_state_collapse", False)))
@@ -1824,6 +1868,7 @@ class StageRow(QFrame):
             self._ct.setValue(float(self.cfg.get("collapse_threshold", 0.5)))
             self._ct.valueChanged.connect(lambda v: self.changed.emit("collapse_threshold", v))
             params.addWidget(self._ct)
+            has_params = True
         if self.stage["id"] == 8:
             params.addWidget(QLabel("min confidence"))
             self._mconf = QDoubleSpinBox()
@@ -1837,28 +1882,21 @@ class StageRow(QFrame):
             self._mconf.setValue(float(self.cfg.get("min_confidence", 0.7)))
             self._mconf.valueChanged.connect(lambda v: self.changed.emit("min_confidence", v))
             params.addWidget(self._mconf)
+            has_params = True
         if self.stage["id"] == 11:
             self._clips = QCheckBox("Export video clips")
             self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
             self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
             params.addWidget(self._clips)
+            has_params = True
         params.addStretch()
-        dl.addLayout(params)
+        if has_params:
+            bl.addLayout(params)
 
-        self._log = _TerminalWidget(extra_clear=self._clear_log)
-        self._log.setMinimumHeight(120)
-        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;font-size:11px;")
-        dl.addWidget(self._log)
-
-        acts = QHBoxLayout()
-        self._run_btn = QPushButton("Run")
-        self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
-        self._from_btn = QPushButton("Run from here")
-        self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
-        acts.addWidget(self._run_btn)
-        acts.addWidget(self._from_btn)
         if self.stage["id"] == 3:
+            diag_row = QHBoxLayout()
             diag_btn = QPushButton("Diagnose")
+            diag_btn.setMinimumHeight(34)
             diag_btn.clicked.connect(self.run_diagnose.emit)
             _diag_hb = QToolButton()
             _diag_hb.setText("?")
@@ -1872,6 +1910,7 @@ class StageRow(QFrame):
             )
             _diag_hb.clicked.connect(lambda: self.navigate_help.emit("diagnose"))
             split_btn = QPushButton("Split Dominant State")
+            split_btn.setMinimumHeight(34)
             split_btn.clicked.connect(lambda: self.run_subcluster.emit(self._dom_state_id))
             _split_hb = QToolButton()
             _split_hb.setText("?")
@@ -1884,39 +1923,68 @@ class StageRow(QFrame):
                 "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
             )
             _split_hb.clicked.connect(lambda: self.navigate_help.emit("split_dominant"))
-            acts.addWidget(diag_btn)
-            acts.addWidget(_diag_hb)
-            acts.addWidget(split_btn)
-            acts.addWidget(_split_hb)
-        acts.addStretch()
-        dl.addLayout(acts)
+            diag_row.addWidget(diag_btn)
+            diag_row.addWidget(_diag_hb)
+            diag_row.addWidget(split_btn)
+            diag_row.addWidget(_split_hb)
+            diag_row.addStretch()
+            bl.addLayout(diag_row)
 
-        self._details.hide()
-        lay.addWidget(self._details)
+        acts = QHBoxLayout()
+        self._run_btn = QPushButton("Run")
+        self._run_btn.setMinimumHeight(34)
+        self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
+        self._from_btn = QPushButton("Run from here")
+        self._from_btn.setMinimumHeight(34)
+        self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
+        self._done_cb = QCheckBox("Mark done")
+        self._done_cb.setToolTip("Mark stage as completed")
+        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
+        acts.addWidget(self._run_btn)
+        acts.addWidget(self._from_btn)
+        acts.addStretch()
+        acts.addWidget(self._done_cb)
+        bl.addLayout(acts)
+
+        self._body.hide()
+        self._desc.hide()
+        outer.addWidget(self._body)
+
+        self.set_status("pending")
 
     def _toggle(self):
-        self._details.setVisible(self._expand.isChecked())
-        self._expand.setText("▴" if self._expand.isChecked() else "▾")
+        expanded = not self._body.isVisible()
+        self._body.setVisible(expanded)
+        self._desc.setVisible(expanded)
+        self._arrow.setText("▾" if expanded else "▸")
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
 
     def set_status(self, status):
-        icon_map = {
-            "pending": ("○", "#888"),
-            "running": ("◔", "#e0a400"),
-            "done": ("✓", "green"),
-            "error": ("✕", "red"),
-        }
-        icon, color = icon_map.get(status, ("○", "#888"))
-        self._icon.setText(icon)
-        self._icon.setStyleSheet(f"color:{color};font-weight:bold;")
+        self._icon.setText(self._ICONS.get(status, "○"))
+        bg, border, icon_color = self._COLORS.get(status, self._COLORS["pending"])
+        self.setStyleSheet(
+            f"QFrame#stageCard{{background:{bg};border:1px solid {border};"
+            f"border-radius:6px;}}"
+        )
+        self._icon.setStyleSheet(
+            f"background:transparent;border:none;font-size:13px;"
+            f"font-weight:bold;color:{icon_color};"
+        )
+        if status == "running":
+            self._body.setVisible(True)
+            self._desc.setVisible(True)
+            self._arrow.setText("▾")
+        else:
+            self._body.setVisible(False)
+            self._desc.setVisible(False)
+            self._arrow.setText("▸")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
 
     def set_pose_source(self, pose_source: str):
-        """For Stage 1: reflect the configured pose data source."""
         if self._pose_source_lbl is None:
             return
         if pose_source == "csv":
@@ -1942,7 +2010,7 @@ class StageRow(QFrame):
             self._pose_source_lbl.setText("")
 
     def set_last_run(self, ts):
-        self._ts.setText(f"Last run: {_fmt_ts(ts)}")
+        self._ts.setText(f"Last run: {_fmt_ts(ts)}" if ts else "")
 
     def set_cluster_quality(self, dom_frac: float, dom_state_id: int):
         self._dom_state_id = int(dom_state_id)
@@ -1953,16 +2021,6 @@ class StageRow(QFrame):
         )
         color = "#b71c1c" if dom_frac >= 0.5 else "#555"
         self._quality_lbl.setStyleSheet(f"color:{color};")
-
-    def append_log(self, line):
-        self.logs.append(line.rstrip("\n"))
-        self._log.setPlainText("\n".join(self.logs))
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _clear_log(self):
-        self.logs.clear()
-        self._log.clear()
 
     def set_enabled(self, enabled):
         self._run_btn.setEnabled(enabled)
@@ -1996,14 +2054,6 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
-        self._expand_all_btn = QPushButton("Expand All")
-        self._expand_all_btn.setFixedHeight(28)
-        self._expand_all_btn.clicked.connect(lambda: self._set_all_expanded(True))
-        top.addWidget(self._expand_all_btn)
-        self._collapse_all_btn = QPushButton("Collapse All")
-        self._collapse_all_btn.setFixedHeight(28)
-        self._collapse_all_btn.clicked.connect(lambda: self._set_all_expanded(False))
-        top.addWidget(self._collapse_all_btn)
         self._dlc_btn = QPushButton("DLC Setup")
         self._dlc_btn.clicked.connect(self.navigate_dlc.emit)
         top.addWidget(self._dlc_btn)
@@ -2068,13 +2118,22 @@ class RunPipelineView(QWidget):
         scroll.setWidget(holder)
         lay.addWidget(scroll)
 
-        log_label = QLabel("Pipeline Output")
-        log_label.setStyleSheet("font-weight:bold;color:#444;")
-        lay.addWidget(log_label)
         self._global_log = _TerminalWidget()
-        self._global_log.setMinimumHeight(120)
-        self._global_log.setMaximumHeight(300)
-        self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;")
+        self._global_log.setFixedHeight(180)
+        self._global_log.setStyleSheet(
+            "background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;"
+        )
+        self._global_log.hide()
+
+        log_hdr = QHBoxLayout()
+        self._log_toggle = QPushButton("Show log  ▾")
+        self._log_toggle.setFlat(True)
+        self._log_toggle.setStyleSheet("color:#555;font-size:11px;")
+        self._log_toggle.setCursor(Qt.PointingHandCursor)
+        self._log_toggle.clicked.connect(self._toggle_log)
+        log_hdr.addWidget(self._log_toggle)
+        log_hdr.addStretch()
+        lay.addLayout(log_hdr)
         lay.addWidget(self._global_log)
 
     def _probe_gpu_async(self):
@@ -2216,17 +2275,18 @@ class RunPipelineView(QWidget):
         if 1 in self._rows:
             self._rows[1].set_pose_source(self.cfg.get("pose_source", ""))
 
+    def _toggle_log(self):
+        visible = not self._global_log.isVisible()
+        self._global_log.setVisible(visible)
+        self._log_toggle.setText("Hide log  ▴" if visible else "Show log  ▾")
+
     def _append_log(self, line):
+        if not self._global_log.isVisible():
+            self._global_log.show()
+            self._log_toggle.setText("Hide log  ▴")
         self._global_log.insertPlainText(line)
         sb = self._global_log.verticalScrollBar()
         sb.setValue(sb.maximum())
-        for sid in self._active_stages:
-            self._rows[sid].append_log(line)
-
-    def _set_all_expanded(self, expand: bool):
-        for row in self._rows.values():
-            row._expand.setChecked(expand)
-            row._toggle()
 
     def _stop_pipeline(self):
         if self._worker and self._worker.isRunning():

@@ -334,14 +334,31 @@ _STAGE_HELP: dict[int, str] = {
 }
 
 
+class _ClickableHeader(QFrame):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class StageRow(QFrame):
     run_stage = pyqtSignal(int)
     run_from_here = pyqtSignal(int)
     mark_completed = pyqtSignal(int, bool)
     changed = pyqtSignal(str, object)
     run_diagnose = pyqtSignal()
-    run_subcluster = pyqtSignal(int)   # payload: dominant state id
+    run_subcluster = pyqtSignal(int)
     navigate_help = pyqtSignal(str)
+
+    _COLORS = {
+        "done":    ("#e8f5e9", "#a5d6a7", "#2e7d32"),
+        "running": ("#e3f2fd", "#90caf9", "#1565c0"),
+        "pending": ("#fafafa", "#e0e0e0", "#999999"),
+        "error":   ("#ffebee", "#ef9a9a", "#c62828"),
+    }
+    _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -351,18 +368,28 @@ class StageRow(QFrame):
         self._build()
 
     def _build(self):
-        self.setStyleSheet("QFrame{border:none;background:#fff;}")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        self.setObjectName("stageCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        top = QHBoxLayout()
+        header = _ClickableHeader()
+        header.setCursor(Qt.PointingHandCursor)
+        header.setStyleSheet("background:transparent;border:none;")
+        header.clicked.connect(self._toggle)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+
         self._icon = QLabel("○")
-        self._icon.setFixedWidth(18)
-        top.addWidget(self._icon)
-        name = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
-        name.setFont(QFont("Arial", 11, QFont.Bold))
-        top.addWidget(name)
-        top.addStretch()
+        self._icon.setFixedWidth(20)
+        hl.addWidget(self._icon)
+
+        title = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
+        title.setStyleSheet(
+            "font-weight:bold;color:#333;background:transparent;border:none;"
+        )
+        hl.addWidget(title, stretch=1)
+
         _help_anchor = _STAGE_HELP.get(self.stage["id"])
         if _help_anchor:
             _hb = QToolButton()
@@ -376,44 +403,56 @@ class StageRow(QFrame):
                 "QToolButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
             )
             _hb.clicked.connect(lambda _, a=_help_anchor: self.navigate_help.emit(a))
-            top.addWidget(_hb)
-        self._ts = QLabel("Last run: -")
-        self._eta = QLabel("ETA: -")
-        top.addWidget(self._ts)
-        top.addWidget(QLabel("  "))
-        top.addWidget(self._eta)
-        self._expand = QToolButton()
-        self._expand.setText("▾")
-        self._expand.setCheckable(True)
-        self._expand.clicked.connect(self._toggle)
-        top.addWidget(self._expand)
-        self._done_cb = QCheckBox()
-        self._done_cb.setToolTip("Mark stage as completed")
-        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
-        top.addWidget(self._done_cb)
-        lay.addLayout(top)
+            hl.addWidget(_hb)
 
-        d = QLabel(self.stage["desc"])
-        d.setStyleSheet("color:#555;")
-        lay.addWidget(d)
+        self._ts = QLabel("")
+        self._ts.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._ts)
+
+        self._eta = QLabel("")
+        self._eta.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._eta)
+
+        self._arrow = QLabel("▸")
+        self._arrow.setStyleSheet(
+            "color:#999;background:transparent;border:none;"
+        )
+        hl.addWidget(self._arrow)
+
+        outer.addWidget(header)
+
+        self._desc = QLabel(self.stage["desc"])
+        self._desc.setWordWrap(True)
+        self._desc.setStyleSheet(
+            "color:#666;font-size:11px;padding:0 14px 8px 40px;"
+            "background:transparent;border:none;"
+        )
+        outer.addWidget(self._desc)
+
+        self._body = QWidget()
+        self._body.setStyleSheet("background:transparent;")
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(40, 0, 14, 14)
+        bl.setSpacing(8)
+
         if self.stage["id"] in (3, 4, 5, 6):
-            note = QLabel("Runs stages 3-6 together.")
-            note.setStyleSheet("color:#0b57d0;")
-            lay.addWidget(note)
+            note = QLabel("Runs stages 3–6 together.")
+            note.setStyleSheet("color:#0b57d0;font-size:11px;")
+            bl.addWidget(note)
+
         if self.stage["id"] == 5:
             self._quality_badge = QLabel("Cluster Quality: —")
             self._quality_badge.setStyleSheet(
                 "background:#f5f5f5;border:1px solid #ddd;border-radius:4px;"
                 "padding:3px 8px;color:#555;font-size:12px;"
             )
-            lay.addWidget(self._quality_badge)
+            bl.addWidget(self._quality_badge)
 
-        self._details = QWidget()
-        dl = QVBoxLayout(self._details)
-        cmd = QLabel(f"CLI: {self.stage['cmd']}")
-        cmd.setStyleSheet("font-family:Consolas;color:#222;")
-        dl.addWidget(cmd)
-
+        has_params = False
         params = QHBoxLayout()
         if self.stage["id"] in (2, 3):
             self._mcs = QSlider(Qt.Horizontal)
@@ -426,16 +465,19 @@ class StageRow(QFrame):
             params.addWidget(QLabel("min_cluster_size"))
             params.addWidget(self._mcs)
             params.addWidget(self._wave)
+            has_params = True
         if self.stage["id"] == 7:
             self._collapse = QCheckBox("Enable state collapsing")
             self._collapse.setChecked(bool(self.cfg.get("enable_state_collapse", False)))
             self._collapse.toggled.connect(lambda v: self.changed.emit("enable_state_collapse", v))
             params.addWidget(self._collapse)
+            has_params = True
         if self.stage["id"] == 11:
             self._clips = QCheckBox("Export video clips")
             self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
             self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
             params.addWidget(self._clips)
+            has_params = True
         if self.stage["id"] == 5:
             self._diagnose_btn = QPushButton("Diagnose")
             self._diagnose_btn.setFixedHeight(26)
@@ -480,48 +522,69 @@ class StageRow(QFrame):
             params.addWidget(_diag_help)
             params.addWidget(self._fix_btn)
             params.addWidget(_fix_help)
+            has_params = True
         params.addStretch()
-        dl.addLayout(params)
+        if has_params:
+            bl.addLayout(params)
 
         acts = QHBoxLayout()
         self._run_btn = QPushButton("Run")
+        self._run_btn.setMinimumHeight(34)
         self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
         self._from_btn = QPushButton("Run from here")
+        self._from_btn.setMinimumHeight(34)
         self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
+        self._done_cb = QCheckBox("Mark done")
+        self._done_cb.setToolTip("Mark stage as completed")
+        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
         acts.addWidget(self._run_btn)
         acts.addWidget(self._from_btn)
         acts.addStretch()
-        dl.addLayout(acts)
+        acts.addWidget(self._done_cb)
+        bl.addLayout(acts)
 
-        self._details.hide()
-        lay.addWidget(self._details)
+        self._body.hide()
+        self._desc.hide()
+        outer.addWidget(self._body)
+
+        self.set_status("pending")
 
     def _toggle(self):
-        self._details.setVisible(self._expand.isChecked())
-        self._expand.setText("▴" if self._expand.isChecked() else "▾")
+        expanded = not self._body.isVisible()
+        self._body.setVisible(expanded)
+        self._desc.setVisible(expanded)
+        self._arrow.setText("▾" if expanded else "▸")
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
 
     def set_status(self, status):
-        icon_map = {
-            "pending": ("○", "#888"),
-            "running": ("◔", "#e0a400"),
-            "done": ("✓", "green"),
-            "error": ("✕", "red"),
-        }
-        icon, color = icon_map.get(status, ("○", "#888"))
-        self._icon.setText(icon)
-        self._icon.setStyleSheet(f"color:{color};font-weight:bold;")
+        self._icon.setText(self._ICONS.get(status, "○"))
+        bg, border, icon_color = self._COLORS.get(status, self._COLORS["pending"])
+        self.setStyleSheet(
+            f"QFrame#stageCard{{background:{bg};border:1px solid {border};"
+            f"border-radius:6px;}}"
+        )
+        self._icon.setStyleSheet(
+            f"background:transparent;border:none;font-size:13px;"
+            f"font-weight:bold;color:{icon_color};"
+        )
+        if status == "running":
+            self._body.setVisible(True)
+            self._desc.setVisible(True)
+            self._arrow.setText("▾")
+        else:
+            self._body.setVisible(False)
+            self._desc.setVisible(False)
+            self._arrow.setText("▸")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
 
     def set_last_run(self, ts):
-        self._ts.setText(f"Last run: {_fmt_ts(ts)}")
+        self._ts.setText(f"Last run: {_fmt_ts(ts)}" if ts else "")
 
     def set_cluster_quality(self, dominant_frac: float, dom_state_id: int):
-        """Update the cluster quality badge (stage 5 only)."""
         if self.stage["id"] != 5:
             return
         self._dom_state_id = dom_state_id

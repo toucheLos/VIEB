@@ -134,21 +134,33 @@ class RunPipelineView(QWidget):
         scroll.setWidget(holder)
         lay.addWidget(scroll)
 
-        log_header = QHBoxLayout()
-        log_header.addStretch()
-        self._copy_log_btn = QPushButton("Copy Output")
-        self._copy_log_btn.setFixedHeight(24)
-        self._copy_log_btn.setToolTip("Copy all pipeline output to clipboard")
-        self._copy_log_btn.clicked.connect(
-            lambda: QApplication.clipboard().setText(self._global_log.toPlainText())
-        )
-        log_header.addWidget(self._copy_log_btn)
-        lay.addLayout(log_header)
-
         self._global_log = QTextEdit()
         self._global_log.setReadOnly(True)
-        self._global_log.setMaximumHeight(180)
-        self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;")
+        self._global_log.setFixedHeight(180)
+        self._global_log.setStyleSheet(
+            "background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;"
+        )
+        self._global_log.hide()
+
+        log_hdr = QHBoxLayout()
+        self._log_toggle = QPushButton("Show log  ▾")
+        self._log_toggle.setFlat(True)
+        self._log_toggle.setStyleSheet("color:#555;font-size:11px;")
+        self._log_toggle.setCursor(Qt.PointingHandCursor)
+        self._log_toggle.clicked.connect(self._toggle_log)
+        log_hdr.addWidget(self._log_toggle)
+        log_hdr.addStretch()
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFlat(True)
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._global_log.toPlainText())
+        )
+        log_hdr.addWidget(copy_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFlat(True)
+        clear_btn.clicked.connect(self._global_log.clear)
+        log_hdr.addWidget(clear_btn)
+        lay.addLayout(log_hdr)
         lay.addWidget(self._global_log)
 
     def update_stage0_status(self, dlc_path: str | None):
@@ -270,7 +282,15 @@ class RunPipelineView(QWidget):
             row.set_status(ss.get(_state_key(sid), "pending"))
             row.set_last_run(ts.get(_state_key(sid)))
 
+    def _toggle_log(self):
+        visible = not self._global_log.isVisible()
+        self._global_log.setVisible(visible)
+        self._log_toggle.setText("Hide log  ▴" if visible else "Show log  ▾")
+
     def _append_log(self, line):
+        if not self._global_log.isVisible():
+            self._global_log.show()
+            self._log_toggle.setText("Hide log  ▴")
         self._global_log.insertPlainText(line)
         sb = self._global_log.verticalScrollBar()
         sb.setValue(sb.maximum())

@@ -752,61 +752,96 @@ class OverviewView(QWidget):
             self._run_lbl.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
 
 
+class _GuiClickableHeader(QFrame):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class StageRow(QFrame):
     run_stage = pyqtSignal(int)
     run_from_here = pyqtSignal(int)
     mark_completed = pyqtSignal(int, bool)
     changed = pyqtSignal(str, object)
 
+    _COLORS = {
+        "done":    ("#e8f5e9", "#a5d6a7", "#2e7d32"),
+        "running": ("#e3f2fd", "#90caf9", "#1565c0"),
+        "pending": ("#fafafa", "#e0e0e0", "#999999"),
+        "error":   ("#ffebee", "#ef9a9a", "#c62828"),
+    }
+    _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
         self.stage = stage
         self.cfg = cfg
-        self.logs = deque(maxlen=20)
         self._build()
 
     def _build(self):
-        self.setStyleSheet("QFrame{border:none;background:#fff;}")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        self.setObjectName("stageCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        top = QHBoxLayout()
+        header = _GuiClickableHeader()
+        header.setCursor(Qt.PointingHandCursor)
+        header.setStyleSheet("background:transparent;border:none;")
+        header.clicked.connect(self._toggle)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+
         self._icon = QLabel("○")
-        self._icon.setFixedWidth(18)
-        top.addWidget(self._icon)
-        name = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
-        name.setFont(QFont("Arial", 11, QFont.Bold))
-        top.addWidget(name)
-        top.addStretch()
-        self._ts = QLabel("Last run: -")
-        self._eta = QLabel("ETA: -")
-        top.addWidget(self._ts)
-        top.addWidget(QLabel("  "))
-        top.addWidget(self._eta)
-        self._expand = QToolButton()
-        self._expand.setText("▾")
-        self._expand.setCheckable(True)
-        self._expand.clicked.connect(self._toggle)
-        top.addWidget(self._expand)
-        self._done_cb = QCheckBox()
-        self._done_cb.setToolTip("Mark stage as completed")
-        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
-        top.addWidget(self._done_cb)
-        lay.addLayout(top)
+        self._icon.setFixedWidth(20)
+        hl.addWidget(self._icon)
+
+        title = QLabel(f"Stage {self.stage['id']}: {self.stage['name']}")
+        title.setStyleSheet(
+            "font-weight:bold;color:#333;background:transparent;border:none;"
+        )
+        hl.addWidget(title, stretch=1)
+
+        self._ts = QLabel("")
+        self._ts.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._ts)
+
+        self._eta = QLabel("")
+        self._eta.setStyleSheet(
+            "color:#888;font-size:11px;background:transparent;border:none;"
+        )
+        hl.addWidget(self._eta)
+
+        self._arrow = QLabel("▸")
+        self._arrow.setStyleSheet(
+            "color:#999;background:transparent;border:none;"
+        )
+        hl.addWidget(self._arrow)
+
+        outer.addWidget(header)
 
         desc_text = self.stage["desc"]
         if self.stage.get("optional"):
             desc_text += "  (optional)"
-        d = QLabel(desc_text)
-        d.setStyleSheet("color:#555;")
-        lay.addWidget(d)
+        self._desc = QLabel(desc_text)
+        self._desc.setWordWrap(True)
+        self._desc.setStyleSheet(
+            "color:#666;font-size:11px;padding:0 14px 8px 40px;"
+            "background:transparent;border:none;"
+        )
+        outer.addWidget(self._desc)
 
-        self._details = QWidget()
-        dl = QVBoxLayout(self._details)
-        cmd = QLabel(f"CLI: {self.stage['cmd']}")
-        cmd.setStyleSheet("font-family:Consolas;color:#222;")
-        dl.addWidget(cmd)
+        self._body = QWidget()
+        self._body.setStyleSheet("background:transparent;")
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(40, 0, 14, 14)
+        bl.setSpacing(8)
 
+        has_params = False
         params = QHBoxLayout()
         sid = self.stage["id"]
         if sid == 1:
@@ -818,6 +853,7 @@ class StageRow(QFrame):
             params.addWidget(QLabel("Cohort input:"))
             params.addWidget(self._cohort_input)
             params.addWidget(browse)
+            has_params = True
         if sid == 4:
             self._mcs = QSpinBox()
             self._mcs.setRange(50, 10000)
@@ -830,11 +866,13 @@ class StageRow(QFrame):
             params.addWidget(QLabel("min_cluster_size:"))
             params.addWidget(self._mcs)
             params.addWidget(self._wave)
+            has_params = True
         if sid == 6:
             self._clips = QCheckBox("Export video clips")
             self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
             self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
             params.addWidget(self._clips)
+            has_params = True
         if sid == 10:
             self._jess_input = QLineEdit(self.cfg.get("jess_file", ""))
             self._jess_input.setPlaceholderText("Path to Jess protein Excel/CSV… (optional)")
@@ -844,27 +882,32 @@ class StageRow(QFrame):
             params.addWidget(QLabel("Jess file:"))
             params.addWidget(self._jess_input)
             params.addWidget(browse_j)
+            has_params = True
         params.addStretch()
-        dl.addLayout(params)
-
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMinimumHeight(120)
-        self._log.setStyleSheet("background:#181818;color:#d4d4d4;font-family:Consolas;")
-        dl.addWidget(self._log)
+        if has_params:
+            bl.addLayout(params)
 
         acts = QHBoxLayout()
         self._run_btn = QPushButton("Run")
+        self._run_btn.setMinimumHeight(34)
         self._run_btn.clicked.connect(lambda: self.run_stage.emit(self.stage["id"]))
         self._from_btn = QPushButton("Run from here")
+        self._from_btn.setMinimumHeight(34)
         self._from_btn.clicked.connect(lambda: self.run_from_here.emit(self.stage["id"]))
+        self._done_cb = QCheckBox("Mark done")
+        self._done_cb.setToolTip("Mark stage as completed")
+        self._done_cb.toggled.connect(lambda v: self.mark_completed.emit(self.stage["id"], v))
         acts.addWidget(self._run_btn)
         acts.addWidget(self._from_btn)
         acts.addStretch()
-        dl.addLayout(acts)
+        acts.addWidget(self._done_cb)
+        bl.addLayout(acts)
 
-        self._details.hide()
-        lay.addWidget(self._details)
+        self._body.hide()
+        self._desc.hide()
+        outer.addWidget(self._body)
+
+        self.set_status("pending")
 
     def _browse_cohort_input(self):
         f, _ = QFileDialog.getOpenFileName(self, "Select cohort file", "", "Spreadsheets (*.xlsx *.xls *.csv)")
@@ -877,34 +920,39 @@ class StageRow(QFrame):
             self._jess_input.setText(f)
 
     def _toggle(self):
-        self._details.setVisible(self._expand.isChecked())
-        self._expand.setText("▴" if self._expand.isChecked() else "▾")
+        expanded = not self._body.isVisible()
+        self._body.setVisible(expanded)
+        self._desc.setVisible(expanded)
+        self._arrow.setText("▾" if expanded else "▸")
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
 
     def set_status(self, status):
-        icon_map = {
-            "pending": ("○", "#888"),
-            "running": ("◔", "#e0a400"),
-            "done": ("✓", "green"),
-            "error": ("✕", "red"),
-        }
-        icon, color = icon_map.get(status, ("○", "#888"))
-        self._icon.setText(icon)
-        self._icon.setStyleSheet(f"color:{color};font-weight:bold;")
+        self._icon.setText(self._ICONS.get(status, "○"))
+        bg, border, icon_color = self._COLORS.get(status, self._COLORS["pending"])
+        self.setStyleSheet(
+            f"QFrame#stageCard{{background:{bg};border:1px solid {border};"
+            f"border-radius:6px;}}"
+        )
+        self._icon.setStyleSheet(
+            f"background:transparent;border:none;font-size:13px;"
+            f"font-weight:bold;color:{icon_color};"
+        )
+        if status == "running":
+            self._body.setVisible(True)
+            self._desc.setVisible(True)
+            self._arrow.setText("▾")
+        else:
+            self._body.setVisible(False)
+            self._desc.setVisible(False)
+            self._arrow.setText("▸")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
 
     def set_last_run(self, ts):
-        self._ts.setText(f"Last run: {_fmt_ts(ts)}")
-
-    def append_log(self, line):
-        self.logs.append(line.rstrip("\n"))
-        self._log.setPlainText("\n".join(self.logs))
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._ts.setText(f"Last run: {_fmt_ts(ts)}" if ts else "")
 
     def set_enabled(self, enabled):
         self._run_btn.setEnabled(enabled)
@@ -975,8 +1023,31 @@ class RunPipelineView(QWidget):
 
         self._global_log = QTextEdit()
         self._global_log.setReadOnly(True)
-        self._global_log.setMaximumHeight(180)
-        self._global_log.setStyleSheet("background:#151515;color:#cfd8dc;font-family:Consolas;")
+        self._global_log.setFixedHeight(180)
+        self._global_log.setStyleSheet(
+            "background:#151515;color:#cfd8dc;font-family:Consolas;font-size:11px;"
+        )
+        self._global_log.hide()
+
+        log_hdr = QHBoxLayout()
+        self._log_toggle = QPushButton("Show log  ▾")
+        self._log_toggle.setFlat(True)
+        self._log_toggle.setStyleSheet("color:#555;font-size:11px;")
+        self._log_toggle.setCursor(Qt.PointingHandCursor)
+        self._log_toggle.clicked.connect(self._toggle_log)
+        log_hdr.addWidget(self._log_toggle)
+        log_hdr.addStretch()
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFlat(True)
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._global_log.toPlainText())
+        )
+        log_hdr.addWidget(copy_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFlat(True)
+        clear_btn.clicked.connect(self._global_log.clear)
+        log_hdr.addWidget(clear_btn)
+        lay.addLayout(log_hdr)
         lay.addWidget(self._global_log)
 
     def _param_changed(self, key, value):
@@ -1020,12 +1091,18 @@ class RunPipelineView(QWidget):
             row.set_status(ss.get(_state_key(sid), "pending"))
             row.set_last_run(ts.get(_state_key(sid)))
 
+    def _toggle_log(self):
+        visible = not self._global_log.isVisible()
+        self._global_log.setVisible(visible)
+        self._log_toggle.setText("Hide log  ▴" if visible else "Show log  ▾")
+
     def _append_log(self, line):
+        if not self._global_log.isVisible():
+            self._global_log.show()
+            self._log_toggle.setText("Hide log  ▴")
         self._global_log.insertPlainText(line)
         sb = self._global_log.verticalScrollBar()
         sb.setValue(sb.maximum())
-        for sid in self._active_stages:
-            self._rows[sid].append_log(line)
 
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)

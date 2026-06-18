@@ -80,6 +80,8 @@ _NEW_PROJECT_DEFAULTS: dict = {
     "h5_key": "",
     "h5_manifest_path": "",
     "h5_source_col": "",
+    "manifest_path": "",
+    "h5_frame_col": "Frame Number",
 }
 
 

@@ -16,6 +16,69 @@ import numpy as np
 import pandas as pd
 
 
+def _find_pose_file(video_path: str, cfg: dict | None = None) -> str | tuple[str, str] | None:
+    """Return the pose data source for a given video.
+
+    When cfg["pose_source"] == "h5" and cfg["h5_path"] is set, resolves the
+    video stem to an H5 key and returns an (h5_path, h5_key) tuple.
+    Otherwise falls through to _find_dlc_csv() for per-video CSV/H5 lookup.
+
+    Parameters
+    ----------
+    video_path : path to the .mp4 video file (used to derive the stem)
+    cfg        : config dict with at least pose_source, h5_path, and optionally
+                 manifest_path / h5_key.  If None, reads from vieb_config.
+
+    Returns
+    -------
+    str                  — path to a per-video CSV/H5 file
+    (h5_path, h5_key)    — tuple when routing to a shared H5 file
+    None                 — no pose data found
+    """
+    if cfg is None:
+        try:
+            import vieb_config as _vc
+            cfg = {
+                "pose_source": _vc.get_pose_source(),
+                "h5_path": _vc.get_h5_path(),
+                "h5_key": _vc.get_h5_key(),
+                "h5_manifest_path": _vc.get_h5_manifest_path(),
+                "h5_source_col": _vc.get_h5_source_col(),
+            }
+        except Exception:
+            cfg = {}
+
+    if cfg.get("pose_source") == "h5" and cfg.get("h5_path"):
+        h5_path = cfg["h5_path"]
+        if not os.path.exists(h5_path):
+            return None
+
+        video_stem = os.path.splitext(os.path.basename(video_path))[0]
+
+        info = inspect_h5(h5_path)
+        h5_keys = info.get("keys", [])
+        if not h5_keys:
+            return None
+
+        # Try manifest-based resolution first
+        manifest_path = cfg.get("manifest_path") or cfg.get("h5_manifest_path", "")
+        manifest: dict[str, str] = {}
+        if manifest_path and os.path.exists(manifest_path):
+            from h5_manifest import load_manifest
+            manifest = load_manifest(manifest_path)
+
+        # Try resolve_h5_key (exact/manifest/ordinal matching)
+        from h5_manifest import resolve_h5_key
+        row_dict = {"filename": os.path.basename(video_path), "animal_id": video_stem}
+        try:
+            h5_key, _strategy = resolve_h5_key(row_dict, h5_keys, manifest, ordinal_index=0)
+            return (h5_path, h5_key)
+        except ValueError:
+            return None
+
+    return _find_dlc_csv(video_path)
+
+
 def _find_dlc_csv(video_path: str) -> str | None:
     """Return the DLC-generated pose file (.csv or .h5) for a given video, or None.
 

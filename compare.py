@@ -120,6 +120,119 @@ def _print_hardware_banner():
 
 
 
+# ---------------------------------------------------------------------------
+# Kinematic label generation — derives descriptive state names from data
+# ---------------------------------------------------------------------------
+
+# Feature indices for key scalar kinematic features (8 keypoints → first 36
+# are per-keypoint speeds + pairwise distances).
+_KIN_FEATURES = {
+    36: "velocity",
+    38: "elongation",
+    39: "angular velocity",
+    40: "movement variability",
+    41: "rearing",
+}
+
+
+def _generate_kinematic_labels(
+    cluster_centers: list[list[float]],
+    bout_stats: dict[int, dict],
+    n_keypoints: int = 8,
+) -> dict[int, str]:
+    """Derive descriptive heuristic labels from cluster center kinematics.
+
+    For each state, finds the 2 most distinctive features (by z-score relative
+    to the population of states) and produces labels like "high velocity, low
+    elongation" or "short bouts, high rearing".
+    """
+    centers = np.array(cluster_centers, dtype=np.float64)
+    n_states, n_feat = centers.shape
+
+    # Adjust feature indices based on actual keypoint count
+    n_speeds = n_keypoints
+    n_dists = n_keypoints * (n_keypoints - 1) // 2
+    base = n_speeds + n_dists
+    kin_features = {
+        base + 0: "velocity",
+        base + 2: "elongation",
+        base + 3: "angular velocity",
+        base + 4: "movement variability",
+        base + 5: "rearing",
+    }
+
+    labels: dict[int, str] = {}
+    for k in range(n_states):
+        descriptors: list[tuple[float, float, str]] = []
+
+        for feat_idx, name in kin_features.items():
+            if feat_idx >= n_feat:
+                continue
+            values = centers[:, feat_idx]
+            std = values.std()
+            if std < 1e-8:
+                continue
+            z = (centers[k, feat_idx] - values.mean()) / std
+            descriptors.append((abs(z), z, name))
+
+        # Bout duration
+        dur = bout_stats.get(k, {}).get("mean_dur")
+        if dur is not None:
+            all_durs = [v["mean_dur"] for v in bout_stats.values()
+                        if v.get("mean_dur") is not None]
+            if len(all_durs) > 1:
+                dur_std = np.std(all_durs)
+                if dur_std > 1e-8:
+                    z = (dur - np.mean(all_durs)) / dur_std
+                    descriptors.append((abs(z), z, "bout duration"))
+
+        descriptors.sort(key=lambda x: x[0], reverse=True)
+
+        parts: list[str] = []
+        for _, z, name in descriptors[:2]:
+            if name == "bout duration":
+                if z > 0.5:
+                    parts.append("long bouts")
+                elif z < -0.5:
+                    parts.append("short bouts")
+            else:
+                if z > 0.5:
+                    parts.append(f"high {name}")
+                elif z < -0.5:
+                    parts.append(f"low {name}")
+
+        labels[k] = ", ".join(parts) if parts else f"State {k}"
+
+    return labels
+
+
+def _extract_kinematic_values(
+    center: list[float],
+    n_keypoints: int = 8,
+) -> dict[str, float]:
+    """Extract key kinematic feature values from a single cluster center."""
+    arr = np.array(center, dtype=np.float64)
+    n_speeds = n_keypoints
+    n_dists = n_keypoints * (n_keypoints - 1) // 2
+    base = n_speeds + n_dists
+
+    mapping = {
+        "mean_centroid_speed": base + 0,
+        "mean_elongation": base + 2,
+        "mean_angular_vel": base + 3,
+        "mean_movement_entropy": base + 4,
+        "mean_rearing_score": base + 5,
+        "mean_head_angle": base + 6,
+    }
+    result: dict[str, float] = {}
+    for col_name, idx in mapping.items():
+        if idx < len(arr):
+            result[col_name] = float(arr[idx])
+        else:
+            result[col_name] = float("nan")
+    return result
+
+
 # Step 1: Feature extraction
 
 def _load_extractor_config():
@@ -1653,18 +1766,6 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     bouts_df.to_csv(os.path.join(char_dir, "bouts.csv"), index=False)
     print(f"Bouts saved: results/characterization/bouts.csv  ({len(bouts_df)} bouts)")
 
-    # Preserve existing heuristic_labels if cluster size unchanged
-    existing_labels = {}
-    ss_path = os.path.join(char_dir, "state_summary.csv")
-    if os.path.exists(ss_path):
-        try:
-            old_ss = pd.read_csv(ss_path)
-            _id = next((c for c in ("state", "state_id", "cluster_id") if c in old_ss.columns), None)
-            if _id and len(old_ss) == n_clusters and "heuristic_label" in old_ss.columns:
-                existing_labels = dict(zip(old_ss[_id].astype(int), old_ss["heuristic_label"]))
-        except Exception:
-            pass
-
     # Per-state context fractions from summary_table
     ctx_fracs: dict[int, dict[str, float]] = {}
     if "context" in df.columns:
@@ -1674,18 +1775,33 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
                 if col in grp.columns:
                     ctx_fracs.setdefault(k, {})[str(ctx)] = float(grp[col].mean())
 
+    # Compute bout stats and kinematic labels from cluster centers
+    n_kp = index.get("_meta", {}).get("n_keypoints", 8)
+    centers = cluster_info.get("cluster_centers", [])
+    bout_stats: dict[int, dict] = {}
     ss_rows = []
+    for k in range(n_clusters):
+        grp_b = bouts_df[bouts_df["state"] == k] if not bouts_df.empty else pd.DataFrame()
+        mean_dur = float(grp_b["duration_sec"].mean()) if not grp_b.empty else float("nan")
+        bout_stats[k] = {"mean_dur": mean_dur if not np.isnan(mean_dur) else None}
+
+    kin_labels = _generate_kinematic_labels(centers, bout_stats, n_keypoints=n_kp)
+
     for k in range(n_clusters):
         grp_b = bouts_df[bouts_df["state"] == k] if not bouts_df.empty else pd.DataFrame()
         row_s = {
             "state": k,
-            "heuristic_label": existing_labels.get(k, f"State {k}"),
+            "heuristic_label": kin_labels.get(k, f"State {k}"),
             "mean_bout_dur_sec": float(grp_b["duration_sec"].mean()) if not grp_b.empty else float("nan"),
             "median_bout_dur_sec": float(grp_b["duration_sec"].median()) if not grp_b.empty else float("nan"),
             "n_bouts": len(grp_b),
         }
+        if k < len(centers):
+            row_s.update(_extract_kinematic_values(centers[k], n_keypoints=n_kp))
         row_s.update({f"context_{ctx}_frac": v for ctx, v in ctx_fracs.get(k, {}).items()})
         ss_rows.append(row_s)
+
+    ss_path = os.path.join(char_dir, "state_summary.csv")
     pd.DataFrame(ss_rows).to_csv(ss_path, index=False)
     print(f"State summary saved: results/characterization/state_summary.csv  ({n_clusters} states)")
 
