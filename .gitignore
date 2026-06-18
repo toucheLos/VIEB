@@ -41,8 +41,9 @@ videos/
 # Project data
 projects/
 
-# App state
+# Config files state
 app_config.json
+config.json
 
 # Windows path artifact
 C:\Users\
@@ -51,3 +52,6 @@ C:\Users\
 push_log.txt
 outputs.txt
 results/
+
+# Projects
+projects/*

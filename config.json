@@ -39,7 +39,11 @@
   "umap_sweep": false,
   "hdbscan_jobs": 1,
   "current_run_saved": false,
+<<<<<<< HEAD
   "current_run_id": "run_022_20260616_0906_mcs2000_umap3",
+=======
+  "current_run_id": "run_001_20260618_1554_mcs2_umap2",
+>>>>>>> 1f5a6e4 (h5 formatting for spence and add failsafe to compare in case HDB task is too large (300k frames default)
   "cohort_input_file": "C:/Users/playtoe/Programs/neuron/luna_lab/VIEB/design_and_cohorts/Luna Wildtype Behavior Checklis.xlsx",
   "cohort_file": "cohort_normalized.csv",
   "jess_file": "",

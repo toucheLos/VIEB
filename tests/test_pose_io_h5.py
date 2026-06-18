@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pose_io  # noqa: E402
-from h5_manifest import load_manifest, resolve_h5_key  # noqa: E402
+from h5_manifest import detect_concatenated_table, load_manifest, resolve_h5_key  # noqa: E402
 
 BODYPARTS = ["nose", "left_ear", "right_ear"]
 SCORER = "synthetic"
@@ -35,6 +35,16 @@ def _make_dlc_df(n_frames: int, seed: int) -> pd.DataFrame:
     return pd.DataFrame(data, columns=cols)
 
 
+def _make_flat_pose_df(n_frames: int, seed: int, source_file: str) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    data: dict[str, np.ndarray] = {"source_file": np.array([source_file] * n_frames)}
+    for bp in BODYPARTS:
+        data[f"{bp}_x"] = rng.random(n_frames)
+        data[f"{bp}_y"] = rng.random(n_frames)
+        data[f"{bp}_likelihood"] = rng.random(n_frames)
+    return pd.DataFrame(data)
+
+
 @pytest.fixture()
 def synthetic_h5(tmp_path):
     h5_path = tmp_path / "synthetic_pose.h5"
@@ -43,6 +53,24 @@ def synthetic_h5(tmp_path):
         for i, (key, n_frames) in enumerate(keys.items()):
             store.put(key, _make_dlc_df(n_frames, seed=i), format="table")
     return str(h5_path), keys
+
+
+@pytest.fixture()
+def synthetic_concat_h5(tmp_path):
+    h5_path = tmp_path / "synthetic_concat_pose.h5"
+    sessions = {
+        "Coord_3D.rat142.baseline.2020-02-26_14_01_48.csv": 18,
+        "Coord_3D.rat143.baseline.2020-02-26_14_11_48.csv": 21,
+        "Coord_3D.rat144.baseline.2020-02-26_14_21_48.csv": 16,
+    }
+    frames = [
+        _make_flat_pose_df(n_frames, seed=i, source_file=source_file)
+        for i, (source_file, n_frames) in enumerate(sessions.items())
+    ]
+    df = pd.concat(frames, ignore_index=True)
+    with pd.HDFStore(h5_path, mode="w") as store:
+        store.put("coords", df, format="table")
+    return str(h5_path), sessions
 
 
 def test_inspect_h5(synthetic_h5):
@@ -112,6 +140,52 @@ def test_resolve_h5_key_no_match_raises(synthetic_h5):
         resolve_h5_key(row, h5_keys, manifest=None, ordinal_index=99)
 
 
+def test_detect_concatenated_h5(synthetic_concat_h5):
+    h5_path, _ = synthetic_concat_h5
+    info = pose_io.inspect_h5(h5_path)
+    assert detect_concatenated_table(info, h5_source_col="source_file") == "coords"
+
+
+def test_load_pose_h5_concatenated_source_file(synthetic_concat_h5):
+    h5_path, sessions = synthetic_concat_h5
+    for source_file, n_frames in sessions.items():
+        pose, conf, bodyparts = pose_io.load_pose_h5(
+            h5_path,
+            key=source_file,
+            source_col="source_file",
+        )
+        assert pose.shape == (n_frames, len(BODYPARTS), 2)
+        assert conf.shape == (n_frames, len(BODYPARTS))
+        assert bodyparts == BODYPARTS
+
+
+def test_resolve_h5_key_concatenated_manifest(tmp_path, synthetic_concat_h5):
+    h5_path, sessions = synthetic_concat_h5
+    source_file = next(iter(sessions))
+
+    manifest_path = tmp_path / "concat_manifest.csv"
+    pd.DataFrame(
+        {
+            "animal_id": ["rat142"],
+            "filename": ["rat142.mp4"],
+            "source_file": [source_file],
+        }
+    ).to_csv(manifest_path, index=False)
+    manifest = load_manifest(str(manifest_path), value_col="source_file")
+
+    row = {"filename": "rat142.mp4", "animal_id": "rat142"}
+    key, strategy = resolve_h5_key(
+        row,
+        ["coords"],
+        manifest=manifest,
+        ordinal_index=0,
+        concatenated_key="coords",
+        h5_source_col="source_file",
+    )
+    assert key == source_file
+    assert strategy == "manifest"
+
+
 def test_extract_h5_mode_end_to_end(tmp_path, synthetic_h5, monkeypatch):
     """End-to-end: compare.py --extract with pose_source='h5' against a
     synthetic project produces index.json entries with video_path=None."""
@@ -169,6 +243,83 @@ def test_extract_h5_mode_end_to_end(tmp_path, synthetic_h5, monkeypatch):
         entry = index[stem]
         assert entry["video_path"] is None
         assert entry["h5_path"] == h5_path
+        assert entry["n_keypoints"] == len(BODYPARTS)
+        features_path = results_dir / "features" / f"{stem}_features.npy"
+        assert features_path.exists()
+        arr = np.load(features_path)
+        assert arr.shape[1] == entry["n_features"]
+
+
+def test_extract_h5_mode_concatenated_extracts_all_sessions(
+    tmp_path,
+    synthetic_concat_h5,
+    monkeypatch,
+):
+    h5_path, sessions = synthetic_concat_h5
+
+    project_dir = tmp_path / "project_concat"
+    results_dir = project_dir / "results"
+    project_dir.mkdir()
+
+    source_files = list(sessions.keys())
+    meta_df = pd.DataFrame(
+        {
+            "filename": ["rat142.mp4", "rat143.mp4"],
+            "date": ["20250101", "20250101"],
+            "box": [1, 1],
+            "experiment": ["CFC", "CFC"],
+            "day": [0, 0],
+            "context": ["A", "A"],
+            "no_shock": ["no", "no"],
+            "animal_id": ["142", "143"],
+            "fear": ["", ""],
+            "source_file": source_files[:2],
+        }
+    )
+    meta_path = project_dir / "metadata.csv"
+    meta_df.to_csv(meta_path, index=False)
+
+    config = {
+        "pose_source": "h5",
+        "h5_path": h5_path,
+        "h5_manifest_path": "",
+        "h5_source_col": "source_file",
+        "results_dir": str(results_dir),
+        "raw_videos_dir": str(project_dir / "raw_videos"),
+        "metadata_csv_path": str(meta_path),
+    }
+    (project_dir / "config.json").write_text(json.dumps(config))
+
+    app_config = {"active_project": str(project_dir)}
+    app_config_path = tmp_path / "app_config_concat.json"
+    app_config_path.write_text(json.dumps(app_config))
+
+    import vieb_config as vc
+    monkeypatch.setattr(vc, "_APP_CONFIG_PATH", str(app_config_path))
+    monkeypatch.setattr(vc, "_CONFIG_PATH", str(project_dir / "config.json"))
+
+    import compare
+    compare.cmd_extract(fps=30.0, use_wavelets=False)
+
+    index_path = results_dir / "features" / "index.json"
+    assert index_path.exists()
+    with open(index_path) as f:
+        index = json.load(f)
+
+    assert index["_meta"]["pose_source"] == "h5"
+    extracted_stems = {
+        os.path.splitext(os.path.basename(source_file))[0]
+        for source_file in source_files
+    }
+    assert extracted_stems.issubset(index.keys())
+
+    for source_file, n_frames in sessions.items():
+        stem = os.path.splitext(os.path.basename(source_file))[0]
+        entry = index[stem]
+        assert entry["video_path"] is None
+        assert entry["h5_path"] == h5_path
+        assert entry["h5_key"] == source_file
+        assert entry["n_frames"] == n_frames
         assert entry["n_keypoints"] == len(BODYPARTS)
         features_path = results_dir / "features" / f"{stem}_features.npy"
         assert features_path.exists()

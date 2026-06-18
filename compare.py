@@ -33,6 +33,35 @@ def _meta(): return _vc.get_metadata_path()
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+
+def _fix_features_path(path: str) -> str:
+    """Normalize stored feature paths across machines.
+
+    Older index files may contain absolute Windows paths from another machine.
+    Prefer remapping any embedded `results/features/...` suffix onto this
+    machine's project ROOT, then fall back to the current results/features
+    directory using the filename.
+    """
+    if not path:
+        return path
+    if os.path.exists(path):
+        return path
+
+    normalized = path.replace("\\", os.sep)
+    if os.path.exists(normalized):
+        return normalized
+
+    marker = f"results{os.sep}features{os.sep}"
+    lower_normalized = normalized.lower()
+    marker_idx = lower_normalized.rfind(marker)
+    if marker_idx >= 0:
+        root_relative = normalized[marker_idx:]
+        root_path = os.path.join(ROOT, root_relative)
+        if os.path.exists(root_path):
+            return root_path
+
+    return os.path.join(_res(), "features", os.path.basename(normalized))
+
 # ---------------------------------------------------------------------------
 # GPU detection and hardware banner
 # ---------------------------------------------------------------------------
@@ -255,12 +284,13 @@ def _load_extractor_config():
 def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
-    Iterates metadata.csv rows, resolving each row to a key inside the H5
-    file via h5_manifest.resolve_h5_key (exact/manifest/ordinal matching).
+    For standard multi-key H5 files, iterates metadata.csv rows and resolves
+    each row to a key inside the H5 file. For concatenated-table H5 files,
+    iterates the unique session/source values directly from the H5.
     """
     from ml import PoseFeatureExtractor
     from pose_io import inspect_h5, load_pose_h5
-    from h5_manifest import load_manifest, resolve_h5_key
+    from h5_manifest import detect_concatenated_table, load_manifest, resolve_h5_key
 
     h5_path = _vc.get_h5_path()
     if not h5_path or not os.path.exists(h5_path):
@@ -277,8 +307,14 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     if not h5_keys:
         sys.exit(f"No keys found in H5 file: {h5_path}")
 
-    manifest = load_manifest(_vc.get_h5_manifest_path())
-    source_col = _vc.get_h5_source_col() or None
+    configured_source_col = _vc.get_h5_source_col() or None
+    session_source_col = configured_source_col or "source_file"
+    concatenated_key = detect_concatenated_table(
+        h5_info,
+        h5_source_col=session_source_col,
+    )
+    manifest_value_col = session_source_col if concatenated_key is not None else "h5_key"
+    manifest = load_manifest(_vc.get_h5_manifest_path(), value_col=manifest_value_col)
 
     os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
 
@@ -296,51 +332,126 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
 
     if not use_wavelets:
         print("(wavelets disabled)")
-    print(f"Extracting features from {len(meta)} metadata rows (H5 mode: {h5_path})...")
+    if concatenated_key is not None:
+        with pd.HDFStore(h5_path, mode="r") as store:
+            raw_key = (
+                concatenated_key if concatenated_key.startswith("/")
+                else f"/{concatenated_key}"
+            )
+            df = store[raw_key]
+        if session_source_col not in df.columns:
+            sys.exit(
+                f"Concatenated H5 key '{concatenated_key}' does not contain "
+                f"column {session_source_col!r}"
+            )
+        source_values = [
+            str(v)
+            for v in df[session_source_col].dropna().astype(str).unique().tolist()
+            if str(v)
+        ]
+        print(
+            f"Extracting features from {len(source_values)} H5 sessions "
+            f"(concatenated mode: {h5_path}, key={concatenated_key})..."
+        )
+        from pose_io import _pose_from_dlc_df, _pose_from_flat_df
 
-    for i, (_, row) in enumerate(meta.iterrows()):
-        row_dict = row.to_dict()
-        filename = row_dict.get("filename", "")
-        stem = os.path.splitext(filename)[0] if filename else row_dict.get("animal_id", f"row{i}")
-        out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+        for source_value in source_values:
+            stem = os.path.splitext(os.path.basename(source_value))[0]
+            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
 
-        if os.path.exists(out_path):
-            skip_count += 1
-            continue
+            if os.path.exists(out_path):
+                skip_count += 1
+                continue
 
-        try:
-            h5_key, strategy = resolve_h5_key(row_dict, h5_keys, manifest, i)
-        except ValueError as e:
-            print(f"  SKIP ({e})")
-            continue
+            session_df = df[df[session_source_col] == source_value]
+            if session_df.empty:
+                print(
+                    f"  SKIP (no rows found for {session_source_col}={source_value!r})"
+                )
+                continue
 
-        print(f"  {stem}  (h5_key={h5_key!r}, match={strategy})")
-        pose, conf, h5_bodyparts = load_pose_h5(h5_path, key=h5_key, source_col=source_col)
+            print(f"  {stem}  ({session_source_col}={source_value!r})")
+            if isinstance(session_df.columns, pd.MultiIndex) and session_df.columns.nlevels >= 3:
+                pose, conf, h5_bodyparts = _pose_from_dlc_df(session_df)
+            else:
+                pose, conf, h5_bodyparts = _pose_from_flat_df(session_df)
 
-        if extractor is None:
-            extractor = PoseFeatureExtractor(
-                fps=fps,
-                use_wavelets=use_wavelets,
-                keypoint_roles=keypoint_roles,
-                bodypart_names=bodypart_names or h5_bodyparts,
-                object_keypoints=object_keypoints,
+            if extractor is None:
+                extractor = PoseFeatureExtractor(
+                    fps=fps,
+                    use_wavelets=use_wavelets,
+                    keypoint_roles=keypoint_roles,
+                    bodypart_names=bodypart_names or h5_bodyparts,
+                    object_keypoints=object_keypoints,
+                )
+
+            features_dict = extractor.extract_features(pose, confidence=conf)
+            features_flat = extractor._flatten_features(features_dict)
+
+            np.save(out_path, features_flat.astype(np.float32))
+            index[stem] = {
+                "video_path": None,
+                "csv_path": None,
+                "h5_path": h5_path,
+                "h5_key": source_value,
+                "n_frames": int(pose.shape[0]),
+                "n_keypoints": int(pose.shape[1]),
+                "n_features": int(features_flat.shape[1]),
+                "features_path": out_path,
+            }
+            new_count += 1
+    else:
+        print(f"Extracting features from {len(meta)} metadata rows (H5 mode: {h5_path})...")
+        for i, (_, row) in enumerate(meta.iterrows()):
+            row_dict = row.to_dict()
+            filename = row_dict.get("filename", "")
+            stem = (
+                os.path.splitext(filename)[0]
+                if filename else row_dict.get("animal_id", f"row{i}")
+            )
+            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+
+            if os.path.exists(out_path):
+                skip_count += 1
+                continue
+
+            try:
+                h5_key, strategy = resolve_h5_key(row_dict, h5_keys, manifest, i)
+            except ValueError as e:
+                print(f"  SKIP ({e})")
+                continue
+
+            print(f"  {stem}  (h5_key={h5_key!r}, match={strategy})")
+            pose, conf, h5_bodyparts = load_pose_h5(
+                h5_path,
+                key=h5_key,
+                source_col=configured_source_col,
             )
 
-        features_dict = extractor.extract_features(pose, confidence=conf)
-        features_flat = extractor._flatten_features(features_dict)
+            if extractor is None:
+                extractor = PoseFeatureExtractor(
+                    fps=fps,
+                    use_wavelets=use_wavelets,
+                    keypoint_roles=keypoint_roles,
+                    bodypart_names=bodypart_names or h5_bodyparts,
+                    object_keypoints=object_keypoints,
+                )
 
-        np.save(out_path, features_flat.astype(np.float32))
-        index[stem] = {
-            "video_path": None,
-            "csv_path": None,
-            "h5_path": h5_path,
-            "h5_key": h5_key,
-            "n_frames": int(pose.shape[0]),
-            "n_keypoints": int(pose.shape[1]),
-            "n_features": int(features_flat.shape[1]),
-            "features_path": out_path,
-        }
-        new_count += 1
+            features_dict = extractor.extract_features(pose, confidence=conf)
+            features_flat = extractor._flatten_features(features_dict)
+
+            np.save(out_path, features_flat.astype(np.float32))
+            index[stem] = {
+                "video_path": None,
+                "csv_path": None,
+                "h5_path": h5_path,
+                "h5_key": h5_key,
+                "n_frames": int(pose.shape[0]),
+                "n_keypoints": int(pose.shape[1]),
+                "n_features": int(features_flat.shape[1]),
+                "features_path": out_path,
+            }
+            new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
     if extractor is not None:
@@ -831,6 +942,10 @@ def _auto_save_previous_run() -> str | None:
 
     prev_mcs = existing_manifest.get("min_cluster_size", ci.get("min_cluster_size", 50))
     prev_umap = existing_manifest.get("umap_dims", ci.get("umap_dims", 10))
+    prev_hdbscan_sample = existing_manifest.get(
+        "hdbscan_sample",
+        ci.get("hdbscan_sample", 0),
+    )
 
     runs_dir = os.path.join(_res(), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -866,6 +981,7 @@ def _auto_save_previous_run() -> str | None:
         "min_cluster_size": int(prev_mcs),
         "umap_dims": int(prev_umap),
         "hdbscan_min_samples": int(existing_manifest.get("hdbscan_min_samples", 0)),
+        "hdbscan_sample": int(prev_hdbscan_sample),
         "n_clusters": int(ci.get("n_clusters", 0)),
         "mean_confidence": float(ci.get("mean_confidence", 0.0)),
         "low_confidence_frac": float(ci.get("low_confidence_frac", 0.0)),
@@ -883,6 +999,7 @@ def _write_current_run_manifest(
     min_cluster_size: int,
     umap_dims: int,
     effective_min_samples: int,
+    hdbscan_sample: int,
     n_found: int,
     mean_conf: float,
     low_conf_frac: float,
@@ -903,6 +1020,7 @@ def _write_current_run_manifest(
         "min_cluster_size": min_cluster_size,
         "umap_dims": umap_dims,
         "hdbscan_min_samples": effective_min_samples,
+        "hdbscan_sample": hdbscan_sample,
         "n_clusters": n_found,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
@@ -926,6 +1044,71 @@ def _write_current_run_manifest(
         json.dump(cfg_data, f, indent=2)
 
     return run_id
+
+
+def _extract_hdbscan_outputs(clusterer_model) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize HDBSCAN label/probability outputs across CPU/GPU backends."""
+    labels = clusterer_model.labels_
+    if hasattr(labels, "to_numpy"):
+        labels = labels.to_numpy()
+    elif hasattr(labels, "get"):
+        labels = labels.get()
+    labels = np.asarray(labels, dtype=np.int32)
+
+    probs = getattr(clusterer_model, "probabilities_", None)
+    if probs is not None:
+        if hasattr(probs, "to_numpy"):
+            probs = probs.to_numpy()
+        elif hasattr(probs, "get"):
+            probs = probs.get()
+        probs = np.asarray(probs, dtype=np.float32)
+    else:
+        probs = np.where(labels >= 0, 1.0, 0.0).astype(np.float32)
+
+    return labels, probs
+
+
+def _fit_cpu_hdbscan_with_assignment(
+    HDBSCANClass,
+    pooled_umap: np.ndarray,
+    fit_indices: np.ndarray,
+    predict_indices: np.ndarray,
+    min_cluster_size: int,
+    effective_min_samples: int,
+) -> tuple[object, np.ndarray, np.ndarray]:
+    """
+    Fit CPU HDBSCAN on `fit_indices`, then assign any remaining frames.
+
+    UMAP already uses a fitting sample for memory reasons. HDBSCAN needs its
+    own sampling control because clustering the full embedding can still blow
+    up on multi-million-frame datasets. On CPU, `approximate_predict()` lets
+    us fit on a manageable subset while reconstructing labels for every frame.
+    """
+    from hdbscan import approximate_predict
+
+    clusterer_model = HDBSCANClass(
+        min_cluster_size=min_cluster_size,
+        min_samples=effective_min_samples,
+        cluster_selection_method="eom",
+        prediction_data=True,
+    )
+    clusterer_model.fit(pooled_umap[fit_indices])
+    fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
+
+    all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
+    all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
+    all_raw_labels[fit_indices] = fit_labels
+    all_probs[fit_indices] = fit_probs
+
+    if len(predict_indices) > 0:
+        pred_labels, pred_probs = approximate_predict(
+            clusterer_model,
+            pooled_umap[predict_indices],
+        )
+        all_raw_labels[predict_indices] = np.asarray(pred_labels, dtype=np.int32)
+        all_probs[predict_indices] = np.asarray(pred_probs, dtype=np.float32)
+
+    return clusterer_model, all_raw_labels, all_probs
 
 
 def _mark_run_saved() -> None:
@@ -954,9 +1137,19 @@ def _mark_run_saved() -> None:
     print("Run saved.")
 
 
-def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int = 50, min_samples: int = None, umap_dims: int = 10, validate: bool = False):
+def cmd_cluster(
+    fps: float = 30.0,
+    n_clusters: int = None,
+    min_cluster_size: int = 50,
+    min_samples: int = None,
+    umap_dims: int = 10,
+    validate: bool = False,
+    hdbscan_sample: int = 300000,
+):
     import joblib
     from ml import BehaviorPreprocessor
+
+    hdbscan_sample = max(1, int(hdbscan_sample))
 
     if _detect_gpu():
         use_gpu = True
@@ -1179,138 +1372,169 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
     print(f"  UMAP embedding: {pooled_umap.shape}")
 
     # ---- HDBSCAN clustering ----
+    # UMAP and HDBSCAN need separate sampling controls: UMAP can fit on a
+    # subset and transform everything cheaply, but HDBSCAN still builds its
+    # clustering structure on the embedding it is fit on.
     effective_min_samples = min_samples if min_samples is not None else min_cluster_size
     if use_gpu and effective_min_samples > 1023:
         print(f"  [info] cuML HDBSCAN requires min_samples <= 1023; clamping {effective_min_samples} -> 1023.")
         effective_min_samples = 1023
-    print(f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={effective_min_samples})...")
+    print(
+        f"\nFitting HDBSCAN (min_cluster_size={min_cluster_size}, "
+        f"min_samples={effective_min_samples}, hdbscan_sample={hdbscan_sample})..."
+    )
 
     if validate:
-        # Fit HDBSCAN on train frames only
-        train_umap = pooled_umap[train_indices]
-        clusterer_model = HDBSCANClass(
-            min_cluster_size=min_cluster_size,
-            min_samples=effective_min_samples,
-            cluster_selection_method="eom",
-        )
-        try:
-            clusterer_model.fit(train_umap)
-        except Exception as _gpu_err:
-            if use_gpu:
-                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
-                import hdbscan as _hdbscan_lib
-                use_gpu = False
-                HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model = HDBSCANClass(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=effective_min_samples,
-                    cluster_selection_method="eom",
-                    prediction_data=True,
-                )
-                clusterer_model.fit(train_umap)
-            else:
-                raise
-        train_raw_labels = clusterer_model.labels_
-        if hasattr(train_raw_labels, "to_numpy"):
-            train_raw_labels = train_raw_labels.to_numpy()
-        elif hasattr(train_raw_labels, "get"):
-            train_raw_labels = train_raw_labels.get()
-        train_raw_labels = np.asarray(train_raw_labels, dtype=np.int32)
-
-        # Assign test frames using approximate_predict (CPU) or transform (GPU)
+        # Validation still fits only on the train partition; if needed, we
+        # subsample within that train partition before HDBSCAN fitting.
+        train_fit_indices = np.asarray(train_indices, dtype=np.int64)
         test_indices = np.concatenate([
             np.arange(boundaries[s][0], boundaries[s][1]) for s in test_stems
         ]) if test_stems else np.array([], dtype=np.int64)
-
-        if len(test_indices) > 0:
-            test_umap = pooled_umap[test_indices]
-            if use_gpu:
-                try:
-                    test_result = clusterer_model.transform(test_umap)
-                    if hasattr(test_result, "to_numpy"):
-                        test_result = test_result.to_numpy()
-                    elif hasattr(test_result, "get"):
-                        test_result = test_result.get()
-                    test_raw_labels = np.asarray(test_result[:, 0] if test_result.ndim > 1 else test_result, dtype=np.int32)
-                    test_probs = np.ones(len(test_raw_labels), dtype=np.float32)
-                    test_probs[test_raw_labels < 0] = 0.0
-                except Exception:
-                    test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
-                    test_probs = np.zeros(len(test_indices), dtype=np.float32)
-            else:
-                try:
-                    from hdbscan import approximate_predict
-                    test_raw_labels, test_probs = approximate_predict(clusterer_model, test_umap)
-                    test_raw_labels = np.asarray(test_raw_labels, dtype=np.int32)
-                    test_probs = np.asarray(test_probs, dtype=np.float32)
-                except Exception as e:
-                    print(f"  [WARN] approximate_predict failed: {e}. Using noise labels for test.")
-                    test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
-                    test_probs = np.zeros(len(test_indices), dtype=np.float32)
+        if len(train_fit_indices) > hdbscan_sample:
+            rng = np.random.default_rng(42)
+            sampled_pos = np.sort(
+                rng.choice(len(train_fit_indices), hdbscan_sample, replace=False)
+            )
+            fit_indices = train_fit_indices[sampled_pos]
+            print(
+                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame train sample, "
+                f"then assigning remaining train/test frames..."
+            )
         else:
-            test_raw_labels = np.array([], dtype=np.int32)
-            test_probs = np.array([], dtype=np.float32)
+            fit_indices = train_fit_indices
+            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} train frames...")
+        actual_hdbscan_sample = int(len(fit_indices))
 
-        # Build pooled labels array combining train and test
-        all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
-        all_raw_labels[train_indices] = train_raw_labels
-        if len(test_indices) > 0:
-            all_raw_labels[test_indices] = test_raw_labels
+        predict_mask = np.ones(len(pooled_umap), dtype=bool)
+        predict_mask[fit_indices] = False
+        predict_indices = np.flatnonzero(predict_mask)
 
-        # Train probabilities from clusterer
-        train_probs_raw = getattr(clusterer_model, "probabilities_", None)
-        if train_probs_raw is not None:
-            if hasattr(train_probs_raw, "to_numpy"):
-                train_probs_raw = train_probs_raw.to_numpy()
-            elif hasattr(train_probs_raw, "get"):
-                train_probs_raw = train_probs_raw.get()
-            train_probs_raw = np.asarray(train_probs_raw, dtype=np.float32)
-        else:
-            train_probs_raw = np.where(train_raw_labels >= 0, 1.0, 0.0).astype(np.float32)
+        if use_gpu and len(train_fit_indices) > hdbscan_sample:
+            # cuML HDBSCAN has no approximate_predict equivalent, so when we
+            # subsample the fit set we fall back to CPU HDBSCAN for full-frame
+            # assignment. This preserves downstream outputs and avoids OOM.
+            print("  cuML HDBSCAN sampling requires CPU fallback for full-frame assignment...")
+            import hdbscan as _hdbscan_lib
+            use_gpu = False
+            HDBSCANClass = _hdbscan_lib.HDBSCAN
 
-        all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
-        all_probs[train_indices] = train_probs_raw
-        if len(test_indices) > 0:
-            all_probs[test_indices] = test_probs
-
-    else:
-        clusterer_model = HDBSCANClass(
-            min_cluster_size=min_cluster_size,
-            min_samples=effective_min_samples,
-            cluster_selection_method="eom",
-        )
-        try:
-            clusterer_model.fit(pooled_umap)
-        except Exception as _gpu_err:
-            if use_gpu:
+        if use_gpu:
+            clusterer_model = HDBSCANClass(
+                min_cluster_size=min_cluster_size,
+                min_samples=effective_min_samples,
+                cluster_selection_method="eom",
+            )
+            try:
+                clusterer_model.fit(pooled_umap[fit_indices])
+            except Exception as _gpu_err:
                 print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
                 import hdbscan as _hdbscan_lib
                 use_gpu = False
                 HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model = HDBSCANClass(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=effective_min_samples,
-                    cluster_selection_method="eom",
+                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+                    HDBSCANClass,
+                    pooled_umap,
+                    fit_indices,
+                    predict_indices,
+                    min_cluster_size,
+                    effective_min_samples,
                 )
-                clusterer_model.fit(pooled_umap)
             else:
-                raise
-        raw_labels = clusterer_model.labels_
-        if hasattr(raw_labels, "to_numpy"):
-            raw_labels = raw_labels.to_numpy()
-        elif hasattr(raw_labels, "get"):
-            raw_labels = raw_labels.get()
-        all_raw_labels = np.asarray(raw_labels, dtype=np.int32)
-
-        raw_probs = getattr(clusterer_model, "probabilities_", None)
-        if raw_probs is not None:
-            if hasattr(raw_probs, "to_numpy"):
-                raw_probs = raw_probs.to_numpy()
-            elif hasattr(raw_probs, "get"):
-                raw_probs = raw_probs.get()
-            all_probs = np.asarray(raw_probs, dtype=np.float32)
+                fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
+                all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
+                all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
+                all_raw_labels[fit_indices] = fit_labels
+                all_probs[fit_indices] = fit_probs
+                if len(test_indices) > 0:
+                    try:
+                        test_result = clusterer_model.transform(pooled_umap[test_indices])
+                        if hasattr(test_result, "to_numpy"):
+                            test_result = test_result.to_numpy()
+                        elif hasattr(test_result, "get"):
+                            test_result = test_result.get()
+                        test_raw_labels = np.asarray(
+                            test_result[:, 0] if test_result.ndim > 1 else test_result,
+                            dtype=np.int32,
+                        )
+                        test_probs = np.ones(len(test_raw_labels), dtype=np.float32)
+                        test_probs[test_raw_labels < 0] = 0.0
+                    except Exception:
+                        test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
+                        test_probs = np.zeros(len(test_indices), dtype=np.float32)
+                    all_raw_labels[test_indices] = test_raw_labels
+                    all_probs[test_indices] = test_probs
         else:
-            all_probs = np.where(all_raw_labels >= 0, 1.0, 0.0).astype(np.float32)
+            clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+                HDBSCANClass,
+                pooled_umap,
+                fit_indices,
+                predict_indices,
+                min_cluster_size,
+                effective_min_samples,
+            )
+
+    else:
+        all_indices = np.arange(len(pooled_umap), dtype=np.int64)
+        if len(all_indices) > hdbscan_sample:
+            rng = np.random.default_rng(42)
+            sampled_pos = np.sort(
+                rng.choice(len(all_indices), hdbscan_sample, replace=False)
+            )
+            fit_indices = all_indices[sampled_pos]
+            print(
+                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame embedding sample, "
+                f"then assigning remaining frames..."
+            )
+        else:
+            fit_indices = all_indices
+            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} embedded frames...")
+        actual_hdbscan_sample = int(len(fit_indices))
+
+        predict_mask = np.ones(len(pooled_umap), dtype=bool)
+        predict_mask[fit_indices] = False
+        predict_indices = np.flatnonzero(predict_mask)
+
+        if use_gpu and len(all_indices) > hdbscan_sample:
+            # cuML can fit the sample, but it cannot assign every withheld
+            # frame without a CPU-style approximate_predict path.
+            print("  cuML HDBSCAN sampling requires CPU fallback for full-frame assignment...")
+            import hdbscan as _hdbscan_lib
+            use_gpu = False
+            HDBSCANClass = _hdbscan_lib.HDBSCAN
+
+        if use_gpu:
+            clusterer_model = HDBSCANClass(
+                min_cluster_size=min_cluster_size,
+                min_samples=effective_min_samples,
+                cluster_selection_method="eom",
+            )
+            try:
+                clusterer_model.fit(pooled_umap[fit_indices])
+            except Exception as _gpu_err:
+                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
+                import hdbscan as _hdbscan_lib
+                use_gpu = False
+                HDBSCANClass = _hdbscan_lib.HDBSCAN
+                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+                    HDBSCANClass,
+                    pooled_umap,
+                    fit_indices,
+                    predict_indices,
+                    min_cluster_size,
+                    effective_min_samples,
+                )
+            else:
+                all_raw_labels, all_probs = _extract_hdbscan_outputs(clusterer_model)
+        else:
+            clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+                HDBSCANClass,
+                pooled_umap,
+                fit_indices,
+                predict_indices,
+                min_cluster_size,
+                effective_min_samples,
+            )
 
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
@@ -1346,11 +1570,18 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         "cluster_centers": cluster_centers,
         "method": "umap+hdbscan",
         "min_cluster_size": min_cluster_size,
+        "hdbscan_sample": actual_hdbscan_sample,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
     }
     with open(os.path.join(_res(), "shared", "cluster_info.json"), "w") as f:
         json.dump(cluster_info, f, indent=2)
+
+    meta_info = dict(index.get("_meta", {}))
+    meta_info["hdbscan_sample"] = actual_hdbscan_sample
+    index["_meta"] = meta_info
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
 
     # ---- Per-video labels (slice from pooled HDBSCAN result) ----
     print(f"\nSlicing per-video labels ({len(stems)} videos)...")
@@ -1397,6 +1628,7 @@ def cmd_cluster(fps: float = 30.0, n_clusters: int = None, min_cluster_size: int
         min_cluster_size=min_cluster_size,
         umap_dims=umap_dims,
         effective_min_samples=effective_min_samples,
+        hdbscan_sample=actual_hdbscan_sample,
         n_found=n_found,
         mean_conf=mean_conf,
         low_conf_frac=low_conf_frac,
@@ -2228,6 +2460,9 @@ def main():
                         help="HDBSCAN min_cluster_size (default: 50)")
     parser.add_argument("--hdbscan-min-samples", type=int, default=None,
                         help="HDBSCAN min_samples. Defaults to min_cluster_size if not set.")
+    parser.add_argument("--hdbscan-sample", type=int, default=300000,
+                        help="Max frames used to fit HDBSCAN before assigning remaining frames "
+                             "(default: 300000)")
     parser.add_argument("--umap-dims", type=int, default=10,
                         help="UMAP n_components (default: 10). Try 3 for better HDBSCAN performance.")
     parser.add_argument("--no-wavelets", action="store_true",
@@ -2279,7 +2514,7 @@ def main():
         else:
             cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
                         min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
-                        validate=args.validate)
+                        validate=args.validate, hdbscan_sample=args.hdbscan_sample)
         if args.save_run:
             _mark_run_saved()
     if args.save_run and not args.cluster:

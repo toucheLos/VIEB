@@ -23,31 +23,60 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def load_manifest(manifest_path: str) -> dict[str, str]:
+def detect_concatenated_table(
+    h5_info: dict,
+    h5_source_col: str = "source_file",
+) -> str | None:
     """
-    Load a manifest CSV mapping animal_id/filename -> h5_key.
+    Return the single top-level H5 key when the file is a concatenated table.
 
-    Expects columns including an `h5_key` column and at least one of
+    A concatenated table is defined as an H5 file with exactly one top-level
+    key whose stored DataFrame contains the source/session identifier column.
+    """
+    keys = h5_info.get("keys", [])
+    if len(keys) != 1:
+        return None
+
+    only_key = keys[0]
+    details = h5_info.get("details", {}).get(only_key, {})
+    columns = details.get("columns", []) or []
+    if h5_source_col in columns:
+        return only_key
+    return None
+
+
+def load_manifest(
+    manifest_path: str,
+    value_col: str = "h5_key",
+) -> dict[str, str]:
+    """
+    Load a manifest CSV mapping animal_id/filename -> a target H5 selector.
+
+    Expects columns including `value_col` and at least one of
     `animal_id` or `filename`. Returns a dict keyed by the normalized
-    animal_id and/or filename stem, mapping to the raw h5_key string.
+    animal_id, filename stem, and exact selector value, mapping to the raw
+    selector string.
     """
     if not manifest_path or not os.path.exists(manifest_path):
         return {}
 
     df = pd.read_csv(manifest_path, dtype=str).fillna("")
-    if "h5_key" not in df.columns:
-        raise ValueError(f"Manifest {manifest_path} must contain an 'h5_key' column")
+    if value_col not in df.columns:
+        raise ValueError(
+            f"Manifest {manifest_path} must contain a '{value_col}' column"
+        )
 
     mapping: dict[str, str] = {}
     for _, row in df.iterrows():
-        h5_key = row["h5_key"]
-        if not h5_key:
+        value = row[value_col]
+        if not value:
             continue
         if "animal_id" in df.columns and row.get("animal_id"):
-            mapping[_normalize(row["animal_id"])] = h5_key
+            mapping[_normalize(row["animal_id"])] = value
         if "filename" in df.columns and row.get("filename"):
             stem = os.path.splitext(row["filename"])[0]
-            mapping[_normalize(stem)] = h5_key
+            mapping[_normalize(stem)] = value
+        mapping[_normalize(value)] = value
     return mapping
 
 
@@ -56,6 +85,9 @@ def resolve_h5_key(
     h5_keys: list[str],
     manifest: dict[str, str] | None,
     ordinal_index: int,
+    *,
+    concatenated_key: str | None = None,
+    h5_source_col: str = "source_file",
 ) -> tuple[str, str]:
     """
     Resolve the H5 key for one metadata row.
@@ -71,11 +103,35 @@ def resolve_h5_key(
     Returns
     -------
     (h5_key, strategy) where strategy is one of "exact", "manifest", "ordinal".
+    For concatenated-table H5 files, returns the per-session source value
+    instead of a top-level H5 key.
 
     Raises
     ------
     ValueError if no strategy can resolve a key (e.g. ordinal_index out of range).
     """
+    if concatenated_key is not None:
+        source_value = str(row.get(h5_source_col, "") or "").strip()
+        if source_value:
+            return source_value, "source_file"
+
+        if manifest:
+            candidates = []
+            filename = row.get("filename")
+            if filename:
+                candidates.append(_normalize(os.path.splitext(str(filename))[0]))
+            animal_id = row.get("animal_id")
+            if animal_id:
+                candidates.append(_normalize(animal_id))
+            for cand in candidates:
+                if cand and cand in manifest:
+                    return manifest[cand], "manifest"
+
+        raise ValueError(
+            f"Could not resolve a concatenated H5 row for metadata row {ordinal_index} "
+            f"using column {h5_source_col!r}"
+        )
+
     norm_keys = {_normalize(k): k for k in h5_keys}
 
     # Strategy 1: exact/substring match on filename stem or animal_id

@@ -20,11 +20,23 @@ def _resolve_h5_key(video_path: str, cfg: dict) -> "str | None":
     """Return the H5 key for video_path via manifest lookup, then cfg['h5_key']."""
     video_stem = os.path.splitext(os.path.basename(video_path))[0]
     manifest_path = cfg.get("manifest_path", "") or cfg.get("h5_manifest_path", "")
+    h5_path = cfg.get("h5_path", "")
+    source_col = cfg.get("h5_source_col", "") or "source_file"
+    manifest_value_col = "h5_key"
+
+    if h5_path and os.path.isfile(h5_path):
+        try:
+            from h5_manifest import detect_concatenated_table
+            h5_info = inspect_h5(h5_path)
+            if detect_concatenated_table(h5_info, h5_source_col=source_col):
+                manifest_value_col = source_col
+        except Exception:
+            pass
 
     if manifest_path and os.path.isfile(manifest_path):
         try:
             from h5_manifest import load_manifest
-            mapping = load_manifest(manifest_path)
+            mapping = load_manifest(manifest_path, value_col=manifest_value_col)
             norm_stem = re.sub(r"[^a-z0-9]", "", video_stem.lower())
             if norm_stem in mapping:
                 return mapping[norm_stem]
@@ -234,6 +246,53 @@ def inspect_h5(h5_path: str) -> dict:
     return info
 
 
+def _load_h5_slice(
+    h5_path: str,
+    key: str,
+    h5_info: dict,
+    source_col: str | None = None,
+) -> pd.DataFrame:
+    """
+    Load one session's DataFrame from a shared H5 file.
+
+    Supports both:
+      - multi-key H5 files, where `key` is a top-level H5 key
+      - concatenated-table H5 files, where `key` is the source/session value
+        to match within the single table's `source_col`
+    """
+    from h5_manifest import detect_concatenated_table
+
+    session_col = source_col or "source_file"
+    concatenated_key = detect_concatenated_table(h5_info, h5_source_col=session_col)
+
+    with pd.HDFStore(h5_path, mode="r") as store:
+        if concatenated_key is not None:
+            raw_key = (
+                concatenated_key
+                if concatenated_key.startswith("/")
+                else f"/{concatenated_key}"
+            )
+            df = store[raw_key]
+            if session_col not in df.columns:
+                raise ValueError(
+                    f"Concatenated H5 key '{concatenated_key}' does not contain "
+                    f"column {session_col!r}"
+                )
+            sliced = df[df[session_col] == key]
+            if sliced.empty:
+                raise ValueError(
+                    f"No rows found in concatenated H5 table for {session_col}={key!r}"
+                )
+            return sliced
+
+        if key not in h5_info["keys"]:
+            raise ValueError(
+                f"Key '{key}' not found in {h5_path}. Available keys: {h5_info['keys']}"
+            )
+        raw_key = key if key.startswith("/") else f"/{key}"
+        return store[raw_key]
+
+
 def load_pose_h5(
     h5_path: str,
     key: str | None = None,
@@ -245,10 +304,12 @@ def load_pose_h5(
     Parameters
     ----------
     h5_path    : path to the .h5 file
-    key        : top-level key/group identifying the animal/trial. Required
-                 unless the file contains exactly one key.
-    source_col : for raw h5py group layouts, the dataset name within the
-                 group holding a (T, K, 2 or 3) coordinate array.
+    key        : top-level key/group identifying the animal/trial. For
+                 concatenated-table H5 files, this is the per-session value
+                 from `source_col`. Required unless the file contains exactly
+                 one non-concatenated key.
+    source_col : source/session column name for concatenated pandas tables,
+                 or dataset name for raw h5py group layouts.
 
     Returns
     -------
@@ -259,7 +320,18 @@ def load_pose_h5(
     if not keys:
         raise ValueError(f"No keys found in H5 file: {h5_path}")
 
+    from h5_manifest import detect_concatenated_table
+
+    session_col = source_col or "source_file"
+    concatenated_key = detect_concatenated_table(info, h5_source_col=session_col)
+    is_concatenated = concatenated_key is not None
+
     if key is None:
+        if is_concatenated:
+            raise ValueError(
+                f"H5 file {h5_path} is a concatenated table; specify a "
+                f"{session_col!r} value via `key`."
+            )
         if len(keys) == 1:
             key = keys[0]
         else:
@@ -267,16 +339,13 @@ def load_pose_h5(
                 f"H5 file {h5_path} contains multiple keys; specify `key`. "
                 f"Available keys: {keys}"
             )
-    if key not in keys:
-        raise ValueError(f"Key '{key}' not found in {h5_path}. Available keys: {keys}")
 
-    details = info["details"].get(key, {})
+    details_key = concatenated_key if is_concatenated else key
+    details = info["details"].get(details_key, {})
 
     # Pandas-stored frame (DLC-style MultiIndex or flat columns)
     if "columns" in details:
-        with pd.HDFStore(h5_path, mode="r") as store:
-            raw_key = key if key.startswith("/") else f"/{key}"
-            df = store[raw_key]
+        df = _load_h5_slice(h5_path, key, info, source_col=source_col)
         if isinstance(df.columns, pd.MultiIndex) and df.columns.nlevels >= 3:
             return _pose_from_dlc_df(df)
         return _pose_from_flat_df(df)
@@ -285,6 +354,10 @@ def load_pose_h5(
     import h5py
 
     with h5py.File(h5_path, "r") as f:
+        if key not in keys:
+            raise ValueError(
+                f"Key '{key}' not found in {h5_path}. Available keys: {keys}"
+            )
         item = f[key]
         if isinstance(item, h5py.Dataset):
             arr = np.asarray(item)
