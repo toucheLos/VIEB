@@ -43,19 +43,23 @@ def _meta(): return _vc.get_metadata_path()
 
 
 # ---------------------------------------------------------------------------
-# Feature index constants (from ml/feature_extraction.py _flatten_features)
-# [0:8]  speeds  [8:36]  pairwise dists  [36] centroid_spd
-# [37] orientation  [38] elongation  [39] angular_vel  [40] entropy
-# [41:49] temporal window features
+# Feature index lookup — resolved dynamically from index.json metadata
 # ---------------------------------------------------------------------------
-IDX_SPEEDS       = slice(0, 8)
-IDX_DISTS        = slice(8, 36)
-IDX_CENTROID_SPD = 36
-IDX_ELONGATION   = 38
-IDX_ANGULAR_VEL  = 39
-IDX_ENTROPY      = 40
-# nose(2)→tail_base(6): pair rank = 7+6+3 = 16, so feature col = 8+16 = 24
-IDX_BODY_LENGTH  = 24
+
+def _load_feature_index() -> dict:
+    """Return {feature_name: column_index} from index.json metadata."""
+    from ml.feature_extraction import resolve_feature_indices
+    idx_path = os.path.join(_res(), "features", "index.json")
+    if os.path.exists(idx_path):
+        try:
+            with open(idx_path) as f:
+                meta = json.load(f).get("_meta", {})
+            names = meta.get("feature_names", [])
+            if names:
+                return resolve_feature_indices(names)
+        except Exception:
+            pass
+    return {}
 
 SMOOTH_FRAMES = 15   # 0.5 s at 30 fps
 MIN_BOUT_FRAMES = 6  # 0.2 s

@@ -27,15 +27,17 @@ HDBSCAN_MIN_SAMPLES = 5
 RANDOM_SEED = 42
 
 # ---------------------------------------------------------------------------
-# Feature name constants (from PoseFeatureExtractor.get_feature_names())
-# K=8 keypoints, 28 pairwise distances, then scalar + temporal features
+# Feature name constants — loaded from index.json when available, with
+# hardcoded K=8 fallbacks for backward compatibility.
 # ---------------------------------------------------------------------------
 SPEED_KP = [f"speed_kp{i}" for i in range(8)]
 DIST_PAIRS = [f"dist_pair{i}" for i in range(28)]
-SCALAR_FEATS = [
+UNIVERSAL_SCALAR_FEATS = [
     "centroid_speed", "body_orientation", "elongation", "angular_velocity",
-    "movement_entropy", "rearing_score", "head_angle",
+    "movement_entropy",
 ]
+SEMANTIC_SCALAR_FEATS = ["rearing_score", "head_angle"]
+SCALAR_FEATS = UNIVERSAL_SCALAR_FEATS + SEMANTIC_SCALAR_FEATS
 # Temporal window features (indices after scalars in the flat array)
 TEMPORAL_FEATS = [
     "speed_mean_window", "speed_std_window", "speed_max_window", "speed_p90_window",
@@ -47,6 +49,20 @@ ALL_NAMES_51 = SPEED_KP + DIST_PAIRS + SCALAR_FEATS + TEMPORAL_FEATS
 # Wavelet names (40 = 8 kp × 5 freqs) — appended if use_wavelets=True
 WAVELET_NAMES = [f"wavelet_kp{k}_f{f}" for k in range(8) for f in range(5)]
 ALL_NAMES_91 = ALL_NAMES_51 + WAVELET_NAMES
+
+
+def _load_feature_names_from_index():
+    """Load authoritative feature names from index.json if available."""
+    idx_path = os.path.join(FEATURES_DIR, "index.json")
+    if not os.path.exists(idx_path):
+        return None
+    try:
+        with open(idx_path) as f:
+            meta = json.load(f).get("_meta", {})
+        names = meta.get("feature_names", [])
+        return names if names else None
+    except Exception:
+        return None
 
 
 def _name_to_idx(names_in_subset, all_names):
@@ -91,7 +107,11 @@ def load_sample(n=N_SAMPLE):
 
 def build_subsets(n_feats):
     """Return list of (name, indices) pairs for each feature subset."""
-    all_names = ALL_NAMES_91 if n_feats >= 91 else ALL_NAMES_51
+    index_names = _load_feature_names_from_index()
+    if index_names and len(index_names) == n_feats:
+        all_names = index_names
+    else:
+        all_names = ALL_NAMES_91 if n_feats >= 91 else ALL_NAMES_51
 
     subset_1_names = ["centroid_speed", "elongation", "angular_velocity", "rearing_score"]
     subset_2_names = subset_1_names + [

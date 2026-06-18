@@ -343,10 +343,24 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
         new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
+    if extractor is not None:
+        feat_meta = extractor.get_feature_meta(
+            int(first_entry.get("n_keypoints", 8))
+        )
+    else:
+        feat_meta = {
+            "n_keypoints": int(first_entry.get("n_keypoints", 8)),
+            "n_features": int(first_entry.get("n_features", 91)),
+            "use_wavelets": use_wavelets,
+            "feature_names": [],
+            "semantic_features": [],
+        }
     index["_meta"] = {
-        "n_keypoints": int(first_entry.get("n_keypoints", 8)),
-        "n_features": int(first_entry.get("n_features", 91)),
-        "use_wavelets": use_wavelets,
+        "n_keypoints": feat_meta["n_keypoints"],
+        "n_features": feat_meta["n_features"],
+        "use_wavelets": feat_meta["use_wavelets"],
+        "feature_names": feat_meta["feature_names"],
+        "semantic_features": feat_meta["semantic_features"],
         "vieb_version": "1.0",
         "pose_source": "h5",
     }
@@ -447,10 +461,15 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
+    feat_meta = extractor.get_feature_meta(
+        int(first_entry.get("n_keypoints", 8))
+    )
     index["_meta"] = {
-        "n_keypoints": int(first_entry.get("n_keypoints", 8)),
-        "n_features": int(first_entry.get("n_features", 91)),
-        "use_wavelets": use_wavelets,
+        "n_keypoints": feat_meta["n_keypoints"],
+        "n_features": feat_meta["n_features"],
+        "use_wavelets": feat_meta["use_wavelets"],
+        "feature_names": feat_meta["feature_names"],
+        "semantic_features": feat_meta["semantic_features"],
         "vieb_version": "1.0",
     }
 

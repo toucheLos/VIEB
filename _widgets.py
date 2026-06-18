@@ -180,10 +180,7 @@ class KinematicsPanel(QWidget):
     If features are unavailable the panel hides itself silently.
     """
 
-    # Feature column indices in the 51/91-feature array
-    _FEAT_SPEED   = 36   # centroid_speed
-    _FEAT_ANGVEL  = 39   # angular_velocity
-    _FEAT_REARING = 41   # rearing_score
+    _FEAT_NAMES = ("centroid_speed", "angular_velocity", "rearing_score")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -209,6 +206,23 @@ class KinematicsPanel(QWidget):
             self._ax = None
             lay.addWidget(QLabel("Install matplotlib for kinematic overlay."))
 
+    @staticmethod
+    def _resolve_feat_indices() -> dict:
+        """Load feature_names from index.json and return {name: index} mapping."""
+        import json
+        from ml.feature_extraction import resolve_feature_indices
+        idx_path = os.path.join("results", "features", "index.json")
+        if os.path.exists(idx_path):
+            try:
+                with open(idx_path) as f:
+                    meta = json.load(f).get("_meta", {})
+                names = meta.get("feature_names", [])
+                if names:
+                    return resolve_feature_indices(names)
+            except Exception:
+                pass
+        return {}
+
     def load_clip(self, features_path: str, start_frame: int, end_frame: int):
         """Load feature slice for a clip and draw the time series."""
         self._features = None
@@ -227,9 +241,11 @@ class KinematicsPanel(QWidget):
             e = max(s + 1, min(end_frame, n_total))
             feat_slice = arr[s:e]
 
+            feat_indices = self._resolve_feat_indices()
             cols = []
-            for idx in (self._FEAT_SPEED, self._FEAT_ANGVEL, self._FEAT_REARING):
-                if idx < arr.shape[1]:
+            for name in self._FEAT_NAMES:
+                idx = feat_indices.get(name)
+                if idx is not None and idx < arr.shape[1]:
                     raw = feat_slice[:, idx].astype(float)
                     lo, hi = raw.min(), raw.max()
                     normed = (raw - lo) / (hi - lo + 1e-9)

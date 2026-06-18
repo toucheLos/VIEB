@@ -9,13 +9,14 @@ Main components:
 - analysis: High-level analysis and visualization
 """
 
-from .feature_extraction import PoseFeatureExtractor
+from .feature_extraction import PoseFeatureExtractor, resolve_feature_indices
 from .preprocessing import BehaviorPreprocessor
 from .clustering import BehaviorClusterer
 from .analysis import BehaviorAnalyzer
 
 __all__ = [
     "PoseFeatureExtractor",
+    "resolve_feature_indices",
     "BehaviorPreprocessor",
     "BehaviorClusterer",
     "AnomalyDetector",

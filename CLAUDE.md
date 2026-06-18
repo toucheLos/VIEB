@@ -81,7 +81,7 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 
 | Module | Class | Role |
 |--------|-------|------|
-| `feature_extraction.py` | `PoseFeatureExtractor` | Pose → kinematic/spatial/postural + Morlet wavelet features `(T, 91)` |
+| `feature_extraction.py` | `PoseFeatureExtractor` | Two-layer feature extraction: Layer 1 (universal) + Layer 2 (semantic, conditional on keypoint roles). Feature count depends on available roles; 51/91 for standard 8-keypoint mouse model. |
 | `preprocessing.py` | `BehaviorPreprocessor` | Standardize only (`use_pca=False` in `compare.py`); has `fit()` / `transform()` |
 | `clustering.py` | `BehaviorClusterer` | K-Means/GMM; used only in per-video `main.py` now |
 | `anomaly_detection.py` | `AnomalyDetector` | PyTorch autoencoder; flags unusual frames |
@@ -150,7 +150,7 @@ Requires `results/characterization/bouts.csv` (or builds it on the fly) and `res
 - `AnomalyDetector.trained` must be `True` before calling `compute_reconstruction_error()`. The flag is set before `_compute_threshold()` is called.
 - `BehaviorAnalyzer.generate_report()` writes UTF-8 — open with `encoding='utf-8'` or the `→` character will crash on Windows cp1252.
 - `analysis.py`'s `export_results()` must convert numpy types to Python before `json.dump()`.
-- `PoseFeatureExtractor` now accepts `use_wavelets=True` (default). Feature vector is 91D with wavelets, 51D without. All downstream code that loads `_features.npy` must use the same setting used during `--extract`.
+- `PoseFeatureExtractor` uses a two-layer architecture: Layer 1 (universal, always computed: speeds, distances, PCA elongation, centroid speed, angular velocity, temporal stats, wavelets) and Layer 2 (semantic, conditional: rearing_score, head_angle — only computed when required keypoint roles are resolved). Feature vector length depends on available roles and wavelet setting; for the standard 8-keypoint mouse model: 51D without wavelets, 91D with. When keypoints are missing, semantic features are omitted entirely (not filled with zeros) and the vector is shorter. `index.json` `_meta.feature_names` stores the authoritative feature name list; use `resolve_feature_indices(names)` to look up column positions by name instead of hardcoding indices. `_meta.semantic_features` lists which Layer 2 features were included.
 - `_labels.npy` files contain `int32` with `-1` meaning noise (HDBSCAN). All downstream code must skip `-1` frames (e.g., `labels[labels >= 0]`). State fractions in `summary_table.csv` do NOT sum to 1 when noise is present — that is correct.
 - `cluster_info.json` now includes `"method": "umap+hdbscan"`, `"min_cluster_size"`, `"mean_confidence"`, and `"low_confidence_frac"`. `cluster_centers` are in standardized (51D or 91D) feature space.
 - `_probs.npy` files (float32) contain HDBSCAN soft assignment probabilities (0–1) parallel to `_labels.npy`. Noise frames have prob=0. Use `valid = (labels >= 0) & (probs >= threshold)` for confidence-filtered fractions.
