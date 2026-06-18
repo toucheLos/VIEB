@@ -387,7 +387,7 @@ class PoseFeatureExtractor:
         """
         if self._roles_resolved:
             center_idx = self._get_role_idx("center/centroid")
-            if center_idx is not None:
+            if center_idx is not None and center_idx < pose.shape[1]:
                 return pose[:, center_idx, :]
         mask = self._body_kp_mask
         if mask is not None and mask.shape[0] == pose.shape[1]:
@@ -410,7 +410,9 @@ class PoseFeatureExtractor:
         if self._roles_resolved:
             nose_idx      = self._get_role_idx("nose")
             tail_base_idx = self._get_role_idx("tail_base")
-            if nose_idx is not None and tail_base_idx is not None:
+            K = pose.shape[1]
+            if (nose_idx is not None and tail_base_idx is not None
+                    and nose_idx < K and tail_base_idx < K):
                 body_vec = pose[:, nose_idx, :] - pose[:, tail_base_idx, :]
                 return np.arctan2(body_vec[:, 1], body_vec[:, 0])
 
@@ -493,7 +495,11 @@ class PoseFeatureExtractor:
         left_ear_idx  = self._get_role_idx("left_ear")
         right_ear_idx = self._get_role_idx("right_ear")
 
-        if any(idx is None for idx in [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]):
+        indices = [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]
+        if any(idx is None for idx in indices):
+            return np.zeros(len(pose))
+        K = pose.shape[1]
+        if any(idx >= K for idx in indices):
             return np.zeros(len(pose))
 
         nose      = pose[:, nose_idx, :]
@@ -531,7 +537,11 @@ class PoseFeatureExtractor:
         left_ear_idx  = self._get_role_idx("left_ear")
         right_ear_idx = self._get_role_idx("right_ear")
 
-        if any(idx is None for idx in [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]):
+        indices = [nose_idx, tail_base_idx, left_ear_idx, right_ear_idx]
+        if any(idx is None for idx in indices):
+            return np.zeros(len(pose))
+        K = pose.shape[1]
+        if any(idx >= K for idx in indices):
             return np.zeros(len(pose))
 
         nose      = pose[:, nose_idx, :]
