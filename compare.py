@@ -1068,21 +1068,53 @@ def _extract_hdbscan_outputs(clusterer_model) -> tuple[np.ndarray, np.ndarray]:
     return labels, probs
 
 
-def _batched_approximate_predict(clusterer_model, points, batch_size=500_000):
-    """Batch approximate_predict to avoid OOM on multi-million-frame datasets."""
+def _batched_approximate_predict(clusterer_model, points, batch_size=25_000):
+    """Batch approximate_predict to avoid OOM on multi-million-frame datasets.
+
+    HDBSCAN's prediction path allocates temporary nearest-neighbor heaps whose
+    size scales with both batch size and `2 * min_samples`. Conservative,
+    adaptive batching keeps assignment feasible after sampled HDBSCAN fitting.
+    """
     from hdbscan import approximate_predict
 
     if len(points) <= batch_size:
         return approximate_predict(clusterer_model, points)
     all_labels = np.empty(len(points), dtype=np.int32)
     all_probs = np.empty(len(points), dtype=np.float32)
-    for start in range(0, len(points), batch_size):
-        end = min(start + batch_size, len(points))
-        batch_labels, batch_probs = approximate_predict(
-            clusterer_model, points[start:end],
-        )
+    start = 0
+    current_batch_size = int(max(1, batch_size))
+    while start < len(points):
+        end = min(start + current_batch_size, len(points))
+        try:
+            batch_labels, batch_probs = approximate_predict(
+                clusterer_model,
+                points[start:end],
+            )
+        except MemoryError:
+            if current_batch_size <= 1_000:
+                raise
+            current_batch_size = max(1_000, current_batch_size // 2)
+            print(
+                f"  [hdbscan] approximate_predict OOM at batch size "
+                f"{end - start:,}; retrying with {current_batch_size:,}..."
+            )
+            continue
+        except Exception as e:
+            if (
+                "Unable to allocate" in str(e)
+                or e.__class__.__name__ == "_ArrayMemoryError"
+            ) and current_batch_size > 1_000:
+                current_batch_size = max(1_000, current_batch_size // 2)
+                print(
+                    f"  [hdbscan] approximate_predict memory pressure at batch size "
+                    f"{end - start:,}; retrying with {current_batch_size:,}..."
+                )
+                continue
+            raise
+
         all_labels[start:end] = np.asarray(batch_labels, dtype=np.int32)
         all_probs[start:end] = np.asarray(batch_probs, dtype=np.float32)
+        start = end
     return all_labels, all_probs
 
 
