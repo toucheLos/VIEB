@@ -38,6 +38,8 @@ else:
 
 
 class VideoPlayer(QWidget):
+    video_finished = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cap = None
@@ -132,6 +134,7 @@ class VideoPlayer(QWidget):
                 nxt = 0
             else:
                 self.pause()
+                self.video_finished.emit()
                 return
         self._show(nxt)
 

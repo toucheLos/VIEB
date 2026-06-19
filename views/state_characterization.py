@@ -9,8 +9,8 @@ import pandas as pd
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
-    QSplitter, QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QPushButton, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 
 import vieb_config as _vc
@@ -21,6 +21,30 @@ from views.analysis import TerminalBox, _placeholder, _section_title
 if _MPL:
     from _widgets import MplCanvas
 
+_BEHAVIORAL_CATEGORIES = [
+    "Freezing", "Walking", "Grooming", "Rearing",
+    "Running", "Exploring", "Other",
+]
+_TECHNICAL_CATEGORIES = [
+    "Low Velocity", "High Velocity",
+    "Low Elongation", "High Elongation",
+    "Short Bouts", "Long Bouts",
+    "High Angular Vel.", "Low Angular Vel.",
+    "High Rearing", "Low Rearing",
+]
+
+_CHIP_STYLE = (
+    "QPushButton{background:#f0f0f0;border:1px solid #ccc;border-radius:12px;"
+    "padding:4px 10px;font-size:11px;}"
+    "QPushButton:checked{background:#4E79A7;color:white;border-color:#4E79A7;}"
+    "QPushButton:hover:!checked{background:#e0e8f0;}"
+)
+_TECH_CHIP_STYLE = (
+    "QPushButton{background:#f5f5f5;border:1px solid #ddd;border-radius:12px;"
+    "padding:3px 8px;font-size:10px;color:#666;}"
+    "QPushButton:checked{background:#76B7B2;color:white;border-color:#76B7B2;}"
+    "QPushButton:hover:!checked{background:#e8f0f0;}"
+)
 
 # ---------------------------------------------------------------------------
 # StateCharacterizationView
@@ -130,36 +154,79 @@ class StateCharacterizationView(QWidget):
         else:
             self._kin_canvas = None
 
-        lbl_row = QHBoxLayout()
-        lbl_row.addWidget(QLabel("Label:"))
-        self._label_input = QLineEdit()
-        self._label_input.setPlaceholderText("Free-text label")
-        lbl_row.addWidget(self._label_input, stretch=1)
-        self._label_combo = QComboBox()
-        self._label_combo.addItems([
-            "Low Velocity", "High Velocity",
-            "Low Elongation", "High Elongation",
-            "Short Bouts", "Long Bouts",
-            "High Angular Vel.", "Low Angular Vel.",
-            "High Rearing", "Low Rearing",
-            "Other",
-        ])
-        lbl_row.addWidget(self._label_combo)
-        save_btn = QPushButton("Save")
-        save_btn.setFixedWidth(56)
-        save_btn.clicked.connect(self._save_state_label)
-        lbl_row.addWidget(save_btn)
-        rl.addLayout(lbl_row)
-
+        # ── Clip controls ──
         clip_row = QHBoxLayout()
         self._load_clip_btn = QPushButton("Load Clip")
         self._load_clip_btn.setEnabled(False)
         self._load_clip_btn.clicked.connect(self._load_clip)
         clip_row.addWidget(self._load_clip_btn)
+        self._autoplay_cb = QCheckBox("Autoplay")
+        self._autoplay_cb.setChecked(True)
+        self._autoplay_cb.setToolTip("Automatically play clips when loaded")
+        clip_row.addWidget(self._autoplay_cb)
         self._clip_status = QLabel("")
         self._clip_status.setStyleSheet("color:#888; font-size:11px;")
         clip_row.addWidget(self._clip_status, stretch=1)
         rl.addLayout(clip_row)
+
+        # ── Label section ──
+        lbl_title = QLabel("Label this state:")
+        lbl_title.setStyleSheet("font-weight:bold; font-size:12px; color:#333;")
+        rl.addWidget(lbl_title)
+
+        input_row = QHBoxLayout()
+        self._label_input = QLineEdit()
+        self._label_input.setPlaceholderText("Free-text label (e.g. 'fast locomotion')")
+        input_row.addWidget(self._label_input, stretch=1)
+        save_btn = QPushButton("Save")
+        save_btn.setFixedWidth(56)
+        save_btn.clicked.connect(self._save_state_label)
+        input_row.addWidget(save_btn)
+        self._save_next_btn = QPushButton("Save && Next")
+        self._save_next_btn.setFixedWidth(90)
+        self._save_next_btn.setToolTip("Save label and advance to next state")
+        self._save_next_btn.clicked.connect(self._save_and_next)
+        input_row.addWidget(self._save_next_btn)
+        rl.addLayout(input_row)
+
+        # Category chips
+        self._cat_group = QButtonGroup(self)
+        self._cat_group.setExclusive(True)
+        self._cat_buttons: dict[str, QPushButton] = {}
+
+        cat_row = QHBoxLayout()
+        cat_row.setSpacing(4)
+        cat_row.addWidget(QLabel("Category:"))
+        for name in _BEHAVIORAL_CATEGORIES:
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setStyleSheet(_CHIP_STYLE)
+            self._cat_group.addButton(btn)
+            cat_row.addWidget(btn)
+            self._cat_buttons[name] = btn
+        self._more_btn = QToolButton()
+        self._more_btn.setText("More ▸")
+        self._more_btn.setCheckable(True)
+        self._more_btn.setStyleSheet("font-size:11px; color:#666; border:none;")
+        self._more_btn.toggled.connect(self._toggle_technical_cats)
+        cat_row.addWidget(self._more_btn)
+        cat_row.addStretch()
+        rl.addLayout(cat_row)
+
+        self._tech_row_widget = QWidget()
+        tech_inner = QHBoxLayout(self._tech_row_widget)
+        tech_inner.setContentsMargins(0, 0, 0, 0)
+        tech_inner.setSpacing(4)
+        for name in _TECHNICAL_CATEGORIES:
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setStyleSheet(_TECH_CHIP_STYLE)
+            self._cat_group.addButton(btn)
+            tech_inner.addWidget(btn)
+            self._cat_buttons[name] = btn
+        tech_inner.addStretch()
+        self._tech_row_widget.hide()
+        rl.addWidget(self._tech_row_widget)
 
         try:
             from _widgets import VideoPlayer
@@ -256,7 +323,7 @@ class StateCharacterizationView(QWidget):
                 f"  spd={speed:.3f}" if speed is not None and not pd.isna(speed) else ""
             )
             badge = f"  [{enrich}]" if enrich else ""
-            self._state_list.addItem(f"S{sid}: {label}{speed_str}{badge}")
+            self._state_list.addItem(label, )
             self._state_ids.append(sid)
 
     def _on_sort_changed(self, _=None) -> None:
@@ -388,10 +455,14 @@ class StateCharacterizationView(QWidget):
         saved = self._load_saved_state_labels().get(sid, {})
         self._label_input.setText(saved.get("label", ""))
         cat = saved.get("category", "")
-        if cat:
-            idx = self._label_combo.findText(cat)
-            if idx >= 0:
-                self._label_combo.setCurrentIndex(idx)
+        self._cat_group.setExclusive(False)
+        for btn in self._cat_buttons.values():
+            btn.setChecked(False)
+        self._cat_group.setExclusive(True)
+        if cat and cat in self._cat_buttons:
+            self._cat_buttons[cat].setChecked(True)
+            if cat in _TECHNICAL_CATEGORIES:
+                self._more_btn.setChecked(True)
 
     def _load_saved_state_labels(self) -> dict[int, dict]:
         p = RESULTS / "validation" / "state_labels.csv"
@@ -415,9 +486,10 @@ class StateCharacterizationView(QWidget):
             return
         sid = self._state_ids[row]
         existing = self._load_saved_state_labels()
+        checked = self._cat_group.checkedButton()
         existing[sid] = {
             "label": self._label_input.text().strip(),
-            "category": self._label_combo.currentText(),
+            "category": checked.text() if checked else "",
         }
         p = RESULTS / "validation" / "state_labels.csv"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -446,8 +518,28 @@ class StateCharacterizationView(QWidget):
         if self._player:
             try:
                 self._player.load(str(chosen))
+                if self._autoplay_cb.isChecked():
+                    self._player.play()
             except Exception:
                 self._clip_status.setText(f"Error loading {chosen.name}")
+
+    def _toggle_technical_cats(self, expanded: bool) -> None:
+        self._tech_row_widget.setVisible(expanded)
+        self._more_btn.setText("More ▾" if expanded else "More ▸")
+
+    def _save_and_next(self) -> None:
+        self._save_state_label()
+        current_row = self._state_list.currentRow()
+        next_row = current_row + 1
+        while next_row < self._state_list.count():
+            if not self._state_list.item(next_row).isHidden():
+                break
+            next_row += 1
+        if next_row >= self._state_list.count():
+            self._clip_status.setText("All states labeled!")
+            return
+        self._state_list.setCurrentRow(next_row)
+        self._load_clip()
 
     # ─────────────────────────────────────── Command runner ──
 

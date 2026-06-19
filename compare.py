@@ -1068,6 +1068,24 @@ def _extract_hdbscan_outputs(clusterer_model) -> tuple[np.ndarray, np.ndarray]:
     return labels, probs
 
 
+def _batched_approximate_predict(clusterer_model, points, batch_size=500_000):
+    """Batch approximate_predict to avoid OOM on multi-million-frame datasets."""
+    from hdbscan import approximate_predict
+
+    if len(points) <= batch_size:
+        return approximate_predict(clusterer_model, points)
+    all_labels = np.empty(len(points), dtype=np.int32)
+    all_probs = np.empty(len(points), dtype=np.float32)
+    for start in range(0, len(points), batch_size):
+        end = min(start + batch_size, len(points))
+        batch_labels, batch_probs = approximate_predict(
+            clusterer_model, points[start:end],
+        )
+        all_labels[start:end] = np.asarray(batch_labels, dtype=np.int32)
+        all_probs[start:end] = np.asarray(batch_probs, dtype=np.float32)
+    return all_labels, all_probs
+
+
 def _fit_cpu_hdbscan_with_assignment(
     HDBSCANClass,
     pooled_umap: np.ndarray,
@@ -1084,8 +1102,6 @@ def _fit_cpu_hdbscan_with_assignment(
     up on multi-million-frame datasets. On CPU, `approximate_predict()` lets
     us fit on a manageable subset while reconstructing labels for every frame.
     """
-    from hdbscan import approximate_predict
-
     clusterer_model = HDBSCANClass(
         min_cluster_size=min_cluster_size,
         min_samples=effective_min_samples,
@@ -1101,7 +1117,7 @@ def _fit_cpu_hdbscan_with_assignment(
     all_probs[fit_indices] = fit_probs
 
     if len(predict_indices) > 0:
-        pred_labels, pred_probs = approximate_predict(
+        pred_labels, pred_probs = _batched_approximate_predict(
             clusterer_model,
             pooled_umap[predict_indices],
         )
@@ -1655,7 +1671,6 @@ def cmd_apply_existing(fps: float = 30.0):
     cluster IDs for previously processed videos are unchanged.
     """
     import joblib
-    from hdbscan import approximate_predict
 
     shared_dir = os.path.join(_res(), "shared")
     for fname in ("preprocessor.pkl", "umap_reducer.pkl", "clusterer.pkl", "cluster_info.json"):
@@ -1713,7 +1728,7 @@ def cmd_apply_existing(fps: float = 30.0):
     pooled_umap = np.asarray(pooled_umap, dtype=np.float32)
 
     try:
-        raw_labels, raw_probs = approximate_predict(clusterer_model, pooled_umap)
+        raw_labels, raw_probs = _batched_approximate_predict(clusterer_model, pooled_umap)
         raw_labels = np.asarray(raw_labels, dtype=np.int32)
         raw_probs = np.asarray(raw_probs, dtype=np.float32)
     except Exception as e:
