@@ -883,7 +883,9 @@ class PipelineRunner(QThread):
                         if not ok:
                             raise RuntimeError("Per-animal scalar computation failed.")
                     elif sid == 10:
-                        self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
+                        ok = self._run_subprocess(["compare.py", "--motifs"])
+                        if not ok:
+                            raise RuntimeError("Motif discovery failed.")
                     elif sid == 11:
                         char_args = ["characterize.py", "--fps", str(fps)]
                         if export_clips:

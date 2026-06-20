@@ -281,6 +281,26 @@ def _load_extractor_config():
     return keypoint_roles, object_keypoints, bodypart_names
 
 
+def _print_feature_availability_report(extractor) -> None:
+    """Print a one-time summary of resolved keypoint groups and skipped features."""
+    report = extractor.get_feature_availability_report()
+    print("Keypoint group availability:")
+    for group, info in report["groups"].items():
+        status = "resolved" if info["resolved"] else "missing"
+        if info["resolved"]:
+            print(
+                f"  {group}: {status} "
+                f"(keypoints={info['keypoints']}, indices={info['indices']})"
+            )
+        else:
+            print(f"  {group}: {status}")
+    print(f"Available semantic features: {report['available_features']}")
+    if report["skipped_features"]:
+        print("Skipped semantic features:")
+        for feat_name, reason in report["skipped_features"].items():
+            print(f"  {feat_name}: {reason}")
+
+
 def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
@@ -384,6 +404,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
                     bodypart_names=bodypart_names or h5_bodyparts,
                     object_keypoints=object_keypoints,
                 )
+                _print_feature_availability_report(extractor)
 
             features_dict = extractor.extract_features(pose, confidence=conf)
             features_flat = extractor._flatten_features(features_dict)
@@ -436,6 +457,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
                     bodypart_names=bodypart_names or h5_bodyparts,
                     object_keypoints=object_keypoints,
                 )
+                _print_feature_availability_report(extractor)
 
             features_dict = extractor.extract_features(pose, confidence=conf)
             features_flat = extractor._flatten_features(features_dict)
@@ -465,6 +487,8 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             "use_wavelets": use_wavelets,
             "feature_names": [],
             "semantic_features": [],
+            "keypoint_groups": {},
+            "feature_availability": {},
         }
     index["_meta"] = {
         "n_keypoints": feat_meta["n_keypoints"],
@@ -472,6 +496,8 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
         "use_wavelets": feat_meta["use_wavelets"],
         "feature_names": feat_meta["feature_names"],
         "semantic_features": feat_meta["semantic_features"],
+        "keypoint_groups": feat_meta["keypoint_groups"],
+        "feature_availability": feat_meta["feature_availability"],
         "vieb_version": "1.0",
         "pose_source": "h5",
     }
@@ -536,6 +562,7 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         bodypart_names=bodypart_names,
         object_keypoints=object_keypoints,
     )
+    _print_feature_availability_report(extractor)
     new_count = 0
     skip_count = 0
 
@@ -581,6 +608,8 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         "use_wavelets": feat_meta["use_wavelets"],
         "feature_names": feat_meta["feature_names"],
         "semantic_features": feat_meta["semantic_features"],
+        "keypoint_groups": feat_meta["keypoint_groups"],
+        "feature_availability": feat_meta["feature_availability"],
         "vieb_version": "1.0",
     }
 
@@ -716,6 +745,14 @@ def cmd_fix_features(fps: float = 30.0):
         "use_wavelets": use_wavelets,
         "vieb_version": old_meta.get("vieb_version", "1.0"),
     }
+    if "feature_names" in old_meta:
+        new_meta["feature_names"] = old_meta["feature_names"]
+    if "semantic_features" in old_meta:
+        new_meta["semantic_features"] = old_meta["semantic_features"]
+    if "keypoint_groups" in old_meta:
+        new_meta["keypoint_groups"] = old_meta["keypoint_groups"]
+    if "feature_availability" in old_meta:
+        new_meta["feature_availability"] = old_meta["feature_availability"]
     if "pose_source" in old_meta:
         new_meta["pose_source"] = old_meta["pose_source"]
     index["_meta"] = new_meta
@@ -2378,6 +2415,233 @@ def cmd_event_align(min_confidence: float = 0.0):
                   f"  {info['dominant_state_A']}       {info['dominant_state_B']}")
 
 
+def cmd_motifs():
+    """Compute bigram/trigram motif enrichment across contexts."""
+    from scipy import stats
+
+    print("Extracting motifs...")
+
+    cluster_info_path = os.path.join(_res(), "shared", "cluster_info.json")
+    bouts_path = os.path.join(_res(), "characterization", "bouts.csv")
+    if not os.path.exists(cluster_info_path):
+        sys.exit("Missing results/shared/cluster_info.json. Run --cluster first.")
+    if not os.path.exists(bouts_path):
+        sys.exit("Missing results/characterization/bouts.csv. Run --report first.")
+
+    bouts = pd.read_csv(bouts_path)
+    if bouts.empty:
+        sys.exit("bouts.csv is empty. Run --report after clustering to generate bouts.")
+
+    meta = pd.read_csv(_meta()) if os.path.exists(_meta()) else pd.DataFrame()
+    if not meta.empty:
+        meta = _vc.normalize_metadata_columns(meta)
+        if "filename" in meta.columns:
+            meta["stem"] = meta["filename"].astype(str).str.replace(r"\.mp4$", "", regex=True)
+
+    bouts = bouts.copy()
+    bouts["state"] = bouts["state"].astype(int)
+    bouts = bouts[bouts["state"] >= 0].copy()
+    bouts = bouts.sort_values(["stem", "start_frame"]).reset_index(drop=True)
+
+    if not meta.empty and "stem" in meta.columns:
+        keep_cols = [
+            c for c in ["stem", "context", "animal_id", "day", "experiment"]
+            if c in meta.columns
+        ]
+        if keep_cols:
+            meta_small = meta[keep_cols].drop_duplicates("stem")
+            for col in keep_cols:
+                if col == "stem":
+                    continue
+                if col not in bouts.columns:
+                    bouts[col] = np.nan
+            bouts = bouts.merge(
+                meta_small,
+                on="stem",
+                how="left",
+                suffixes=("", "_meta"),
+            )
+            for col in keep_cols:
+                if col == "stem":
+                    continue
+                meta_col = f"{col}_meta"
+                if meta_col in bouts.columns:
+                    bouts[col] = bouts[col].fillna(bouts[meta_col])
+                    bouts = bouts.drop(columns=[meta_col])
+
+    bouts["prev_state"] = bouts.groupby("stem")["state"].shift(1)
+    bouts["next_state"] = bouts.groupby("stem")["state"].shift(-1)
+
+    motifs_dir = os.path.join(_res(), "motifs")
+    comparison_dir = os.path.join(_res(), "comparison")
+    os.makedirs(motifs_dir, exist_ok=True)
+    os.makedirs(comparison_dir, exist_ok=True)
+
+    motif_rows: list[dict] = []
+    for stem, grp in bouts.groupby("stem", sort=False):
+        grp = grp.sort_values("start_frame").reset_index(drop=True)
+        states_seq = grp["state"].astype(int).tolist()
+        context = grp["context"].iloc[0] if "context" in grp.columns and len(grp) > 0 else ""
+        animal_id = grp["animal_id"].iloc[0] if "animal_id" in grp.columns and len(grp) > 0 else ""
+        for n, motif_type in ((2, "bigram"), (3, "trigram")):
+            if len(states_seq) < n:
+                continue
+            for pos in range(len(states_seq) - n + 1):
+                motif = tuple(states_seq[pos:pos + n])
+                motif_rows.append(
+                    {
+                        "stem": stem,
+                        "type": motif_type,
+                        "motif": str(motif),
+                        "position": pos,
+                        "context": context,
+                        "animal_id": animal_id,
+                    }
+                )
+
+    motif_sequences = pd.DataFrame(
+        motif_rows,
+        columns=["stem", "type", "motif", "position", "context", "animal_id"],
+    )
+
+    bouts.to_csv(os.path.join(motifs_dir, "bouts.csv"), index=False)
+    motif_sequences.to_csv(os.path.join(motifs_dir, "motif_sequences.csv"), index=False)
+
+    if motif_sequences.empty:
+        empty_cols = [
+            "type", "motif", "enrichment_ratio", "flagged",
+            "enriched_context", "p_value", "count_total",
+        ]
+        pd.DataFrame(columns=empty_cols).to_csv(
+            os.path.join(comparison_dir, "motifs.csv"),
+            index=False,
+        )
+        pd.DataFrame(columns=["type", "motif", "count_total"]).to_csv(
+            os.path.join(motifs_dir, "motif_summary.csv"),
+            index=False,
+        )
+        pd.DataFrame(
+            columns=[
+                "type", "motif", "context", "count_in_context", "count_total",
+                "total_in_context", "total_global", "enrichment_ratio", "p_value",
+                "flagged",
+            ]
+        ).to_csv(os.path.join(motifs_dir, "motif_context_enrichment.csv"), index=False)
+        print("Motifs → results/comparison/motifs.csv")
+        return
+
+    motif_summary = (
+        motif_sequences.groupby(["type", "motif"], as_index=False)
+        .size()
+        .rename(columns={"size": "count_total"})
+        .sort_values(["type", "count_total", "motif"], ascending=[True, False, True])
+    )
+    motif_summary.to_csv(os.path.join(motifs_dir, "motif_summary.csv"), index=False)
+
+    has_context = "context" in motif_sequences.columns and motif_sequences["context"].notna().any()
+    n_contexts = motif_sequences["context"].dropna().astype(str).nunique() if has_context else 0
+    if not has_context or n_contexts <= 1:
+        print("[warn] Motif enrichment skipped: need at least two non-empty context values.")
+
+    enrichment_rows: list[dict] = []
+    for motif_type, type_df in motif_sequences.groupby("type"):
+        total_global = int(len(type_df))
+        global_counts = type_df.groupby("motif").size().to_dict()
+        contexts = (
+            sorted(type_df["context"].dropna().astype(str).unique().tolist())
+            if has_context else []
+        )
+        total_by_context = (
+            type_df.groupby(type_df["context"].astype(str)).size().to_dict()
+            if has_context else {}
+        )
+        for motif, count_total in global_counts.items():
+            if not contexts or n_contexts <= 1:
+                enrichment_rows.append(
+                    {
+                        "type": motif_type,
+                        "motif": motif,
+                        "context": "",
+                        "count_in_context": int(count_total),
+                        "count_total": int(count_total),
+                        "total_in_context": int(total_global),
+                        "total_global": int(total_global),
+                        "enrichment_ratio": 1.0,
+                        "p_value": 1.0,
+                        "flagged": False,
+                    }
+                )
+                continue
+
+            for context in contexts:
+                ctx_mask = type_df["context"].astype(str) == context
+                freq_ctx = int(((type_df["motif"] == motif) & ctx_mask).sum())
+                total_ctx = int(total_by_context.get(context, 0))
+                freq_out = int(count_total - freq_ctx)
+                total_out = int(total_global - total_ctx)
+
+                if total_ctx == 0 or total_global == 0 or count_total == 0 or total_out < 0:
+                    ratio = 1.0
+                    p_value = 1.0
+                else:
+                    ratio = (
+                        (freq_ctx / total_ctx) /
+                        max(count_total / total_global, 1e-12)
+                    )
+                    contingency = [
+                        [freq_ctx, max(total_ctx - freq_ctx, 0)],
+                        [freq_out, max(total_out - freq_out, 0)],
+                    ]
+                    _, p_value = stats.fisher_exact(contingency, alternative="greater")
+
+                enrichment_rows.append(
+                    {
+                        "type": motif_type,
+                        "motif": motif,
+                        "context": context,
+                        "count_in_context": freq_ctx,
+                        "count_total": int(count_total),
+                        "total_in_context": total_ctx,
+                        "total_global": int(total_global),
+                        "enrichment_ratio": float(ratio),
+                        "p_value": float(p_value),
+                        "flagged": bool(ratio > 1.5 and p_value < 0.05),
+                    }
+                )
+
+    motif_context_enrichment = pd.DataFrame(enrichment_rows)
+    motif_context_enrichment.to_csv(
+        os.path.join(motifs_dir, "motif_context_enrichment.csv"),
+        index=False,
+    )
+
+    motifs_primary_rows: list[dict] = []
+    for (motif_type, motif), grp in motif_context_enrichment.groupby(["type", "motif"], sort=False):
+        best = grp.sort_values(
+            ["flagged", "enrichment_ratio", "count_total"],
+            ascending=[False, False, False],
+        ).iloc[0]
+        motifs_primary_rows.append(
+            {
+                "type": motif_type,
+                "motif": motif,
+                "enrichment_ratio": float(best["enrichment_ratio"]),
+                "flagged": bool(best["flagged"]),
+                "enriched_context": str(best["context"]),
+                "p_value": float(best["p_value"]),
+                "count_total": int(best["count_total"]),
+            }
+        )
+
+    motifs_primary = pd.DataFrame(motifs_primary_rows).sort_values(
+        ["type", "flagged", "enrichment_ratio", "count_total"],
+        ascending=[True, False, False, False],
+    )
+    motifs_primary.to_csv(os.path.join(comparison_dir, "motifs.csv"), index=False)
+
+    print(f"Motifs → {os.path.join(comparison_dir, 'motifs.csv')}")
+
+
 def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     """Build master_table.csv via quantify.py."""
     try:
@@ -2482,6 +2746,8 @@ def main():
                         help="Fit shared UMAP+HDBSCAN clusterer across all videos")
     parser.add_argument("--report", action="store_true",
                         help="Generate comparison plots using metadata.csv")
+    parser.add_argument("--motifs", action="store_true",
+                        help="Compute enriched bigram/trigram motifs across contexts")
     parser.add_argument("--summarize", action="store_true",
                         help="[deprecated] Use --quantify instead")
     parser.add_argument("--quantify", action="store_true",
@@ -2530,6 +2796,7 @@ def main():
     args = parser.parse_args()
 
     if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
+                args.motifs,
                 args.report, args.summarize, args.quantify, args.save_run,
                 args.event_align]):
         parser.print_help()
@@ -2570,6 +2837,8 @@ def main():
         cmd_collapse(threshold=args.collapse_threshold)
     if args.report:
         cmd_report(fps=args.fps, min_confidence=args.min_confidence)
+    if args.motifs:
+        cmd_motifs()
     if args.summarize:
         cmd_summarize()
     if args.quantify:
