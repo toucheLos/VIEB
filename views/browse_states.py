@@ -907,7 +907,7 @@ class BrowseStatesView(QWidget):
             )
             if has_frames:
                 self._gen_clips_btn.show()
-                msg = "Clips not yet generated.\nRun:  python characterize.py --clips"
+                msg = "Clips not yet generated.\nRun:  python generate_clips.py"
             else:
                 self._gen_clips_btn.hide()
                 msg = "No frames assigned to this state in any video."

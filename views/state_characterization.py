@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 )
 
 import vieb_config as _vc
-from _utils import RESULTS, _MPL
+from _utils import RESULTS, _MPL, _save_cfg
 from _workers import SubprocessWorker
 from views.analysis import TerminalBox, _placeholder, _section_title
 
@@ -62,6 +62,9 @@ class StateCharacterizationView(QWidget):
         self._data: dict = {}
         self._worker = None
         self._state_ids: list[int] = []
+        self._heuristic_labels: dict[int, str] = {}
+        self._kin_metrics: dict[str, float] = {}
+        self._ref_width = 900
         self._build()
 
     # ─────────────────────────────────────────────────────────── build ──
@@ -98,13 +101,37 @@ class StateCharacterizationView(QWidget):
         )
         lay.addWidget(hdr)
 
-        splitter = QSplitter(Qt.Horizontal)
+        self._splitter = QSplitter(Qt.Horizontal)
+        splitter = self._splitter
 
-        # Left: state list
+        # Left: state list panel (expanded + collapsed views)
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 8, 0)
         ll.setSpacing(4)
+
+        # Collapse / expand toggle row
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(0, 0, 0, 0)
+        self._panel_title = QLabel("States")
+        self._panel_title.setStyleSheet(
+            "font-weight:bold; font-size:12px; color:#1A1A1A;"
+        )
+        toggle_row.addWidget(self._panel_title)
+        toggle_row.addStretch()
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setFixedSize(22, 22)
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setToolTip("Collapse state list")
+        self._collapse_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#9B9B9B;border:none;font-size:13px;}"
+            "QPushButton:hover{color:#1A1A1A;background:rgba(0,0,0,0.05);border-radius:4px;}"
+        )
+        self._collapse_btn.clicked.connect(self._toggle_state_panel)
+        toggle_row.addWidget(self._collapse_btn)
+        ll.addLayout(toggle_row)
+
+        # Expanded controls (hidden when collapsed)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search states…")
         self._search.textChanged.connect(self._on_search)
@@ -112,9 +139,9 @@ class StateCharacterizationView(QWidget):
 
         sort_row = QHBoxLayout()
         sort_row.setSpacing(4)
-        sort_lbl = QLabel("Sort:")
-        sort_lbl.setStyleSheet("font-size:11px; color:#666;")
-        sort_row.addWidget(sort_lbl)
+        self._sort_lbl = QLabel("Sort:")
+        self._sort_lbl.setStyleSheet("font-size:11px; color:#666;")
+        sort_row.addWidget(self._sort_lbl)
         self._sort_combo = QComboBox()
         self._sort_combo.addItems(["State ID", "Speed", "Elongation", "Bout Duration", "Angular Velocity"])
         self._sort_combo.setStyleSheet("font-size:11px;")
@@ -128,12 +155,32 @@ class StateCharacterizationView(QWidget):
         self._sort_asc.setFixedWidth(26)
         self._sort_asc.toggled.connect(self._on_sort_changed)
         sort_row.addWidget(self._sort_asc)
-        ll.addLayout(sort_row)
+        self._sort_row_widget = QWidget()
+        self._sort_row_widget.setLayout(sort_row)
+        ll.addWidget(self._sort_row_widget)
 
         self._state_list = QListWidget()
         self._state_list.currentRowChanged.connect(self._on_state_selected)
         ll.addWidget(self._state_list, stretch=1)
-        left.setFixedWidth(240)
+
+        # Collapsed view: narrow column with just state numbers
+        self._collapsed_list = QListWidget()
+        self._collapsed_list.setStyleSheet(
+            "QListWidget{border:none; font-size:11px; font-weight:bold;}"
+            "QListWidget::item{padding:2px 4px; text-align:center;}"
+            "QListWidget::item:selected{background:#4E79A7; color:white;"
+            "border-radius:3px;}"
+        )
+        self._collapsed_list.setFixedWidth(40)
+        self._collapsed_list.currentRowChanged.connect(self._on_collapsed_selected)
+        self._collapsed_list.hide()
+        ll.addWidget(self._collapsed_list, stretch=1)
+
+        self._left_panel = left
+        self._panel_collapsed = False
+        self._left_expanded_width = 240
+        self._collapse_threshold = 100
+        left.setMinimumWidth(56)
         splitter.addWidget(left)
 
         # Right: detail
@@ -146,13 +193,14 @@ class StateCharacterizationView(QWidget):
         rl.addWidget(self._detail_placeholder)
 
         if _MPL:
-            rl.addWidget(_section_title("Kinematic Profile"))
+            self._kin_title = _section_title("Kinematic Profile")
+            rl.addWidget(self._kin_title)
             self._kin_canvas = MplCanvas(figsize=(6, 2.5))
-            self._kin_canvas.setMaximumHeight(200)
             self._kin_canvas.hide()
             rl.addWidget(self._kin_canvas)
         else:
             self._kin_canvas = None
+            self._kin_title = None
 
         # ── Clip controls ──
         clip_row = QHBoxLayout()
@@ -170,20 +218,22 @@ class StateCharacterizationView(QWidget):
         rl.addLayout(clip_row)
 
         # ── Label section ──
-        lbl_title = QLabel("Label this state:")
-        lbl_title.setStyleSheet("font-weight:bold; font-size:12px; color:#333;")
-        rl.addWidget(lbl_title)
+        self._lbl_title = QLabel("Label this state:")
+        self._lbl_title.setStyleSheet("font-weight:bold; font-size:12px; color:#333;")
+        rl.addWidget(self._lbl_title)
 
         input_row = QHBoxLayout()
         self._label_input = QLineEdit()
-        self._label_input.setPlaceholderText("Free-text label (e.g. 'fast locomotion')")
+        self._label_input.setPlaceholderText("Free-text label, or select a category below")
         input_row.addWidget(self._label_input, stretch=1)
-        save_btn = QPushButton("Save")
-        save_btn.setFixedWidth(56)
-        save_btn.clicked.connect(self._save_state_label)
-        input_row.addWidget(save_btn)
+        self._save_btn = QPushButton("Save")
+        self._save_btn.clicked.connect(self._save_state_label)
+        input_row.addWidget(self._save_btn)
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setToolTip("Go back to previous state")
+        self._back_btn.clicked.connect(self._go_back)
+        input_row.addWidget(self._back_btn)
         self._save_next_btn = QPushButton("Save && Next")
-        self._save_next_btn.setFixedWidth(90)
         self._save_next_btn.setToolTip("Save label and advance to next state")
         self._save_next_btn.clicked.connect(self._save_and_next)
         input_row.addWidget(self._save_next_btn)
@@ -196,7 +246,8 @@ class StateCharacterizationView(QWidget):
 
         cat_row = QHBoxLayout()
         cat_row.setSpacing(4)
-        cat_row.addWidget(QLabel("Category:"))
+        self._cat_label = QLabel("Category:")
+        cat_row.addWidget(self._cat_label)
         for name in _BEHAVIORAL_CATEGORIES:
             btn = QPushButton(name)
             btn.setCheckable(True)
@@ -228,6 +279,24 @@ class StateCharacterizationView(QWidget):
         self._tech_row_widget.hide()
         rl.addWidget(self._tech_row_widget)
 
+        # Custom category row
+        self._custom_cat_row = QHBoxLayout()
+        self._custom_cat_row.setSpacing(4)
+        self._custom_cat_chips_layout = self._custom_cat_row
+        self._cat_input = QLineEdit()
+        self._cat_input.setPlaceholderText("New category…")
+        self._cat_input.setMaximumWidth(160)
+        self._cat_input.returnPressed.connect(self._add_custom_category)
+        self._custom_cat_row.addWidget(self._cat_input)
+        add_cat_btn = QPushButton("+")
+        add_cat_btn.setFixedWidth(28)
+        add_cat_btn.setToolTip("Add custom category")
+        add_cat_btn.clicked.connect(self._add_custom_category)
+        self._custom_cat_row.addWidget(add_cat_btn)
+        self._custom_cat_row.addStretch()
+        rl.addLayout(self._custom_cat_row)
+        self._restore_custom_categories()
+
         try:
             from _widgets import VideoPlayer
             self._player = VideoPlayer()
@@ -239,6 +308,8 @@ class StateCharacterizationView(QWidget):
             ))
 
         splitter.addWidget(right)
+        splitter.setSizes([self._left_expanded_width, 660])
+        splitter.splitterMoved.connect(self._on_splitter_moved)
         lay.addWidget(splitter, stretch=1)
 
     # ────────────────────────────────────────────────── Data loading ──
@@ -284,7 +355,39 @@ class StateCharacterizationView(QWidget):
 
         self._id_col = id_col
         self._ctx_enrich = ctx_enrich
+        self._compute_heuristic_labels(ss, id_col)
         self._populate_list()
+
+    def _compute_heuristic_labels(self, ss: pd.DataFrame, id_col: str) -> None:
+        self._heuristic_labels = {}
+        ci = self._data.get("cluster_info") or {}
+        centers = ci.get("cluster_centers", [])
+        if not centers:
+            return
+        try:
+            from compare import _generate_kinematic_labels
+        except ImportError:
+            return
+        n_kp = 8
+        try:
+            import json as _json
+            idx_path = RESULTS / "features" / "index.json"
+            if idx_path.exists():
+                with open(idx_path, encoding="utf-8") as f:
+                    n_kp = _json.load(f).get("_meta", {}).get("n_keypoints", 8)
+        except Exception:
+            pass
+        bout_stats: dict[int, dict] = {}
+        for _, row in ss.iterrows():
+            sid = int(row.get(id_col, -1))
+            dur = row.get("mean_bout_dur_sec")
+            if dur is not None and not pd.isna(dur):
+                bout_stats[sid] = {"mean_dur": float(dur)}
+            else:
+                bout_stats[sid] = {"mean_dur": None}
+        self._heuristic_labels = _generate_kinematic_labels(
+            centers, bout_stats, n_keypoints=n_kp,
+        )
 
     _SORT_COLS = [
         None,                    # State ID
@@ -301,8 +404,6 @@ class StateCharacterizationView(QWidget):
         id_col = getattr(self, "_id_col", None)
         if id_col is None:
             return
-        ctx_enrich = getattr(self, "_ctx_enrich", {})
-
         sort_idx = self._sort_combo.currentIndex()
         sort_col = self._SORT_COLS[sort_idx]
         ascending = self._sort_asc.isChecked()
@@ -316,15 +417,16 @@ class StateCharacterizationView(QWidget):
         self._state_ids = []
         for _, row in df.iterrows():
             sid = int(row.get(id_col, -1))
-            label = str(row.get("heuristic_label", f"State {sid}"))
-            speed = row.get("mean_centroid_speed", None)
-            enrich = ctx_enrich.get(sid, "")
-            speed_str = (
-                f"  spd={speed:.3f}" if speed is not None and not pd.isna(speed) else ""
-            )
-            badge = f"  [{enrich}]" if enrich else ""
-            self._state_list.addItem(label, )
+            base = f"State {sid}"
+            trait = self._heuristic_labels.get(sid, "")
+            if trait and trait != base:
+                label = f"{base}  —  {trait}"
+            else:
+                label = base
+            self._state_list.addItem(label)
             self._state_ids.append(sid)
+        if self._panel_collapsed:
+            self._sync_collapsed_list()
 
     def _on_sort_changed(self, _=None) -> None:
         self._sort_asc.setText("↑" if self._sort_asc.isChecked() else "↓")
@@ -407,11 +509,6 @@ class StateCharacterizationView(QWidget):
         r = rows.iloc[0]
 
         if _MPL and self._kin_canvas:
-            self._kin_canvas.show()
-            canvas = self._kin_canvas
-            canvas.fig.clf()
-            ax = canvas.fig.add_subplot(111)
-
             kinematic_metrics = [
                 ("mean_centroid_speed",     "Speed"),
                 ("mean_angular_vel",        "Angular Velocity"),
@@ -436,21 +533,8 @@ class StateCharacterizationView(QWidget):
                     continue
                 metrics[display] = (float(v) - float(min_v)) / (float(max_v) - float(min_v))
 
-            if metrics:
-                norm_v = list(metrics.values())
-                y = np.arange(len(metrics))
-                ax.barh(y, norm_v, color="#4E79A7", alpha=0.85)
-                ax.set_yticks(y)
-                ax.set_yticklabels(list(metrics.keys()), fontsize=9)
-                ax.set_xlim(0, 1)
-                ax.set_xlabel("Normalized value (min–max across states)")
-            else:
-                ax.text(0.5, 0.5, "No kinematic data",
-                        ha="center", va="center", transform=ax.transAxes, color="#999")
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            canvas.fig.tight_layout()
-            canvas.draw()
+            self._kin_metrics = metrics
+            self._draw_kinematic_chart()
 
         saved = self._load_saved_state_labels().get(sid, {})
         self._label_input.setText(saved.get("label", ""))
@@ -463,6 +547,154 @@ class StateCharacterizationView(QWidget):
             self._cat_buttons[cat].setChecked(True)
             if cat in _TECHNICAL_CATEGORIES:
                 self._more_btn.setChecked(True)
+
+    # ───────────────────────────── Responsive scaling ──
+
+    def _scale_factor(self) -> float:
+        return max(0.6, min(1.6, self.width() / self._ref_width))
+
+    def _draw_kinematic_chart(self) -> None:
+        if not (_MPL and self._kin_canvas):
+            return
+        self._kin_canvas.show()
+        canvas = self._kin_canvas
+        canvas.fig.clf()
+        ax = canvas.fig.add_subplot(111)
+        s = self._scale_factor()
+        metrics = self._kin_metrics
+
+        if metrics:
+            norm_v = list(metrics.values())
+            y = np.arange(len(metrics))
+            ax.barh(y, norm_v, color="#4E79A7", alpha=0.85)
+            ax.set_yticks(y)
+            ax.set_yticklabels(list(metrics.keys()), fontsize=max(7, int(9 * s)))
+            ax.set_xlim(0, 1)
+            ax.set_xlabel(
+                "Normalized value (min–max across states)",
+                fontsize=max(7, int(9 * s)),
+            )
+            ax.tick_params(axis="x", labelsize=max(6, int(8 * s)))
+        else:
+            ax.text(
+                0.5, 0.5, "No kinematic data",
+                ha="center", va="center", transform=ax.transAxes, color="#999",
+                fontsize=max(8, int(10 * s)),
+            )
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        canvas.fig.tight_layout()
+        canvas.draw()
+
+    def _apply_scaled_styles(self) -> None:
+        s = self._scale_factor()
+        chip_fs = max(8, int(11 * s))
+        chip_pad_h = max(3, int(4 * s))
+        chip_pad_w = max(6, int(10 * s))
+        chip_r = max(8, int(12 * s))
+        chip_style = (
+            f"QPushButton{{background:#f0f0f0;border:1px solid #ccc;"
+            f"border-radius:{chip_r}px;padding:{chip_pad_h}px {chip_pad_w}px;"
+            f"font-size:{chip_fs}px;}}"
+            f"QPushButton:checked{{background:#4E79A7;color:white;border-color:#4E79A7;}}"
+            f"QPushButton:hover:!checked{{background:#e0e8f0;}}"
+        )
+        tech_fs = max(7, int(10 * s))
+        tech_pad_h = max(2, int(3 * s))
+        tech_pad_w = max(5, int(8 * s))
+        tech_style = (
+            f"QPushButton{{background:#f5f5f5;border:1px solid #ddd;"
+            f"border-radius:{chip_r}px;padding:{tech_pad_h}px {tech_pad_w}px;"
+            f"font-size:{tech_fs}px;color:#666;}}"
+            f"QPushButton:checked{{background:#76B7B2;color:white;border-color:#76B7B2;}}"
+            f"QPushButton:hover:!checked{{background:#e8f0f0;}}"
+        )
+        for name, btn in self._cat_buttons.items():
+            if name in _BEHAVIORAL_CATEGORIES:
+                btn.setStyleSheet(chip_style)
+            elif name in _TECHNICAL_CATEGORIES:
+                btn.setStyleSheet(tech_style)
+            else:
+                btn.setStyleSheet(chip_style)
+        lbl_fs = max(9, int(12 * s))
+        self._lbl_title.setStyleSheet(
+            f"font-weight:bold; font-size:{lbl_fs}px; color:#333;"
+        )
+        cat_fs = max(9, int(11 * s))
+        self._cat_label.setStyleSheet(f"font-size:{cat_fs}px;")
+        more_fs = max(8, int(11 * s))
+        self._more_btn.setStyleSheet(
+            f"font-size:{more_fs}px; color:#666; border:none;"
+        )
+        btn_fs = max(9, int(12 * s))
+        btn_style = f"font-size:{btn_fs}px;"
+        self._save_btn.setStyleSheet(btn_style)
+        self._save_next_btn.setStyleSheet(btn_style)
+        self._back_btn.setStyleSheet(btn_style)
+        if self._kin_title:
+            title_fs = max(9, int(11 * s))
+            self._kin_title.setFont(QFont("Arial", title_fs, QFont.Bold))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_scaled_styles()
+        if self._kin_metrics:
+            self._draw_kinematic_chart()
+
+    # ──────────────────────────── State panel collapse ──
+
+    def _toggle_state_panel(self) -> None:
+        self._set_collapsed(not self._panel_collapsed)
+
+    def _set_collapsed(self, collapsed: bool) -> None:
+        if collapsed == self._panel_collapsed:
+            return
+        self._panel_collapsed = collapsed
+
+        self._search.setVisible(not collapsed)
+        self._sort_row_widget.setVisible(not collapsed)
+        self._state_list.setVisible(not collapsed)
+        self._panel_title.setVisible(not collapsed)
+        self._collapsed_list.setVisible(collapsed)
+
+        if collapsed:
+            self._collapse_btn.setText("»")
+            self._collapse_btn.setToolTip("Expand state list")
+            sizes = self._splitter.sizes()
+            total = sum(sizes)
+            self._splitter.setSizes([56, total - 56])
+            self._sync_collapsed_list()
+        else:
+            self._collapse_btn.setText("«")
+            self._collapse_btn.setToolTip("Collapse state list")
+            sizes = self._splitter.sizes()
+            total = sum(sizes)
+            self._splitter.setSizes([self._left_expanded_width,
+                                     total - self._left_expanded_width])
+            row = self._collapsed_list.currentRow()
+            if 0 <= row < self._state_list.count():
+                self._state_list.setCurrentRow(row)
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        left_width = self._splitter.sizes()[0]
+        if left_width < self._collapse_threshold and not self._panel_collapsed:
+            self._set_collapsed(True)
+        elif left_width >= self._collapse_threshold and self._panel_collapsed:
+            self._set_collapsed(False)
+
+    def _sync_collapsed_list(self) -> None:
+        self._collapsed_list.clear()
+        for sid in self._state_ids:
+            self._collapsed_list.addItem(str(sid))
+        row = self._state_list.currentRow()
+        if 0 <= row < self._collapsed_list.count():
+            self._collapsed_list.blockSignals(True)
+            self._collapsed_list.setCurrentRow(row)
+            self._collapsed_list.blockSignals(False)
+
+    def _on_collapsed_selected(self, row: int) -> None:
+        if 0 <= row < self._state_list.count():
+            self._state_list.setCurrentRow(row)
 
     def _load_saved_state_labels(self) -> dict[int, dict]:
         p = RESULTS / "validation" / "state_labels.csv"
@@ -487,10 +719,11 @@ class StateCharacterizationView(QWidget):
         sid = self._state_ids[row]
         existing = self._load_saved_state_labels()
         checked = self._cat_group.checkedButton()
-        existing[sid] = {
-            "label": self._label_input.text().strip(),
-            "category": checked.text() if checked else "",
-        }
+        category = checked.text() if checked else ""
+        label = self._label_input.text().strip()
+        if not label and category:
+            label = category
+        existing[sid] = {"label": label, "category": category}
         p = RESULTS / "validation" / "state_labels.csv"
         p.parent.mkdir(parents=True, exist_ok=True)
         rows = [
@@ -540,6 +773,62 @@ class StateCharacterizationView(QWidget):
             return
         self._state_list.setCurrentRow(next_row)
         self._load_clip()
+
+    def _go_back(self) -> None:
+        current_row = self._state_list.currentRow()
+        prev_row = current_row - 1
+        while prev_row >= 0:
+            if not self._state_list.item(prev_row).isHidden():
+                break
+            prev_row -= 1
+        if prev_row < 0:
+            self._clip_status.setText("Already at first state.")
+            return
+        self._state_list.setCurrentRow(prev_row)
+        self._load_clip()
+
+    def _add_custom_category(self) -> None:
+        name = self._cat_input.text().strip()
+        if not name or name in self._cat_buttons:
+            self._cat_input.clear()
+            return
+        btn = QPushButton(name)
+        btn.setCheckable(True)
+        btn.setStyleSheet(_CHIP_STYLE)
+        self._cat_group.addButton(btn)
+        stretch = self._custom_cat_chips_layout.takeAt(
+            self._custom_cat_chips_layout.count() - 1,
+        )
+        self._custom_cat_chips_layout.insertWidget(
+            self._custom_cat_chips_layout.count(), btn,
+        )
+        if stretch:
+            self._custom_cat_chips_layout.addItem(stretch)
+        self._cat_buttons[name] = btn
+        self._cat_input.clear()
+        custom = self.cfg.get("state_categories", [])
+        if name not in custom:
+            custom.append(name)
+            self.cfg["state_categories"] = custom
+            _save_cfg(self.cfg)
+        self._apply_scaled_styles()
+
+    def _restore_custom_categories(self) -> None:
+        for name in self.cfg.get("state_categories", []):
+            if name not in self._cat_buttons:
+                btn = QPushButton(name)
+                btn.setCheckable(True)
+                btn.setStyleSheet(_CHIP_STYLE)
+                self._cat_group.addButton(btn)
+                stretch = self._custom_cat_chips_layout.takeAt(
+                    self._custom_cat_chips_layout.count() - 1,
+                )
+                self._custom_cat_chips_layout.insertWidget(
+                    self._custom_cat_chips_layout.count(), btn,
+                )
+                if stretch:
+                    self._custom_cat_chips_layout.addItem(stretch)
+                self._cat_buttons[name] = btn
 
     # ─────────────────────────────────────── Command runner ──
 

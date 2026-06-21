@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -77,6 +78,129 @@ VALIDATION_DIR = RESULTS / "validation"
 # ---------------------------------------------------------------------------
 
 _WSL_CUML: bool | None = None   # None = not yet checked
+
+
+GPU_STACKS = [
+    {
+        "id": "rapids-24.12-cuda12.2",
+        "label": "RAPIDS 24.12 / CUDA 12.2",
+        "min_driver": (525, 60, 13),
+        "packages": [
+            "cuml-cu12==24.12.0",
+            "cudf-cu12==24.12.0",
+            "cupy-cuda12x==12.2.0",
+            "cuda-python==12.2.1",
+            "cuda-toolkit[cublas,cufft,curand,cusolver,cusparse]==12.2.2",
+            "nvidia-cuda-runtime-cu12==12.2.140",
+            "nvidia-cuda-nvrtc-cu12==12.2.140",
+            "nvidia-nvjitlink-cu12==12.2.140",
+            "nvidia-cublas-cu12==12.2.5.6",
+            "nvidia-cufft-cu12==11.0.8.103",
+            "nvidia-curand-cu12==10.3.3.141",
+            "nvidia-cusolver-cu12==11.5.2.141",
+            "nvidia-cusparse-cu12==12.1.2.141",
+        ],
+    },
+    {
+        "id": "rapids-26.04-cuda12.9",
+        "label": "RAPIDS 26.04 / CUDA 12.9",
+        "min_driver": (575, 51, 3),
+        "packages": [
+            "cudf-cu12==26.4.0",
+            "cuml-cu12==26.4.0",
+            "cupy-cuda12x==14.1.1",
+        ],
+    },
+]
+
+
+def _parse_version_tuple(text: str) -> tuple[int, ...] | None:
+    m = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", text)
+    if not m:
+        return None
+    return tuple(int(part) for part in m.groups(default="0"))
+
+
+def _version_gte(found: tuple[int, ...], required: tuple[int, ...]) -> bool:
+    size = max(len(found), len(required))
+    found = found + (0,) * (size - len(found))
+    required = required + (0,) * (size - len(required))
+    return found >= required
+
+
+def detect_nvidia_driver() -> dict:
+    """Return NVIDIA driver/GPU details from nvidia-smi."""
+    info = {
+        "ok": False,
+        "gpu_name": None,
+        "driver": None,
+        "driver_tuple": None,
+        "cuda": None,
+        "error": None,
+    }
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True, text=True, timeout=8,
+        )
+    except Exception as exc:
+        info["error"] = str(exc)
+        return info
+    if proc.returncode != 0:
+        info["error"] = (proc.stderr or proc.stdout).strip()
+        return info
+    text = proc.stdout
+    driver = re.search(r"Driver Version:\s*([0-9.]+)", text)
+    cuda = re.search(r"CUDA Version:\s*([0-9.]+)", text)
+    if driver:
+        info["driver"] = driver.group(1)
+        info["driver_tuple"] = _parse_version_tuple(driver.group(1))
+    if cuda:
+        info["cuda"] = cuda.group(1)
+    try:
+        gpu_proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        gpu_name = gpu_proc.stdout.strip().splitlines()[0].strip()
+        info["gpu_name"] = gpu_name or None
+    except Exception:
+        pass
+    info["ok"] = bool(info["driver_tuple"])
+    return info
+
+
+def select_gpu_stack(driver_tuple: tuple[int, ...] | None) -> dict | None:
+    """Choose the newest pinned RAPIDS stack compatible with the driver."""
+    if not driver_tuple:
+        return None
+    for stack in sorted(GPU_STACKS, key=lambda item: item["min_driver"], reverse=True):
+        if _version_gte(driver_tuple, stack["min_driver"]):
+            return stack
+    return None
+
+
+def gpu_stack_message(driver_info: dict) -> str:
+    if not driver_info.get("ok"):
+        return (
+            "No working NVIDIA driver was detected. Install or repair the NVIDIA "
+            "driver before enabling GPU acceleration."
+        )
+    stack = select_gpu_stack(driver_info.get("driver_tuple"))
+    driver = driver_info.get("driver") or "unknown"
+    cuda = driver_info.get("cuda") or "unknown"
+    if stack:
+        return (
+            f"Detected NVIDIA driver {driver} (CUDA {cuda}). "
+            f"Recommended install: {stack['label']}."
+        )
+    minimum = min(stack["min_driver"] for stack in GPU_STACKS)
+    min_text = ".".join(str(part) for part in minimum)
+    return (
+        f"Detected NVIDIA driver {driver} (CUDA {cuda}). The current pinned "
+        f"RAPIDS stack requires driver {min_text} or newer. Upgrade the NVIDIA "
+        "driver, then return here to install GPU acceleration."
+    )
 
 
 def _wsl_path(win_path: str) -> str:
@@ -282,7 +406,6 @@ _DEFAULT_CFG = {
     "collapse_threshold": 0.5,
     "use_wavelets": True,
     "enable_state_collapse": False,
-    "export_clips": False,
     "onboarding_complete": False,
     "project_name": "VIEB Project",
     "last_completed_stage": "",

@@ -14,7 +14,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton,
-    QScrollArea, QStackedWidget, QTableWidget,
+    QScrollArea, QSizePolicy, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -35,6 +35,7 @@ COHORT_COLORS = ["#4E79A7", "#E07B39", "#59A14F", "#B07AA1"]
 _TAB_LABELS = [
     "Column Mapping",
     "Comparison Report",
+    "Motif Discovery",
     "Cohort Analysis",
     "Quantification",
     "Fear Index",
@@ -145,7 +146,7 @@ class AnalysisView(QWidget):
         self._current_tab = 0
         # Each entry is True when that tab needs a redraw.
         # Starts True so the first visit always renders.
-        self._tab_dirty = [True] * 7
+        self._tab_dirty = [True] * 8
         import vieb_config as _vc
         self._cond_a = _vc.get_condition_a_label()
         self._cond_b = _vc.get_condition_b_label()
@@ -158,6 +159,7 @@ class AnalysisView(QWidget):
         return [
             "Column Mapping",
             "Comparison Report",
+            "Motif Discovery",
             "Cohort Analysis",
             "Quantification",
             self._metric_label,
@@ -206,6 +208,7 @@ class AnalysisView(QWidget):
         builders = [
             self._build_tab0,
             self._build_tab1,
+            self._build_tab2,
             self._build_tab3,
             self._build_tab4,
             self._build_tab5,
@@ -322,6 +325,72 @@ class AnalysisView(QWidget):
             cl.addWidget(_placeholder("Install matplotlib to view charts."))
 
         cl.addStretch()
+        scroll.setWidget(content)
+        lay.addWidget(scroll, stretch=1)
+        return page
+
+    # ──────────────────────────────────────── Tab 2: Motif Discovery ──
+
+    def _build_tab2(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(8)
+
+        self._t2_terminal = TerminalBox()
+
+        top = QHBoxLayout()
+        t2_title = QLabel("Motif Discovery")
+        t2_title.setFont(QFont("Arial", 14, QFont.Bold))
+        top.addWidget(t2_title)
+        top.addStretch()
+        self._t2_export_btn = QPushButton("Export CSV")
+        self._t2_export_btn.setFixedHeight(30)
+        self._t2_export_btn.clicked.connect(self._export_motifs_csv)
+        top.addWidget(self._t2_export_btn)
+        run2_btn = QPushButton("Run Motifs")
+        run2_btn.setFixedHeight(30)
+        run2_btn.clicked.connect(
+            lambda: self._run_command(["compare.py", "--motifs"], self._t2_terminal)
+        )
+        top.addWidget(run2_btn)
+        lay.addLayout(top)
+        lay.addWidget(self._t2_terminal)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setSpacing(16)
+
+        self._t2_placeholder = _placeholder(
+            "No motif data found.\n"
+            "Run pipeline stages 1-10 first, then click 'Run Motifs'.\n\n"
+            "python compare.py --motifs"
+        )
+        cl.addWidget(self._t2_placeholder)
+
+        if _MPL:
+            cl.addWidget(_section_title("Top Context-Enriched Motifs"))
+            self._t2_canvas = MplCanvas(figsize=(9, 3.2))
+            self._t2_canvas.setMinimumHeight(280)
+            cl.addWidget(self._t2_canvas)
+        else:
+            self._t2_canvas = None
+            cl.addWidget(_placeholder("Install matplotlib to view charts."))
+
+        cl.addWidget(_section_title("Motif Enrichment Table"))
+        self._t2_table = QTableWidget(0, 6)
+        self._t2_table.setHorizontalHeaderLabels(
+            ["Motif", "Type", "Context A", "Context B", "Enrichment", "95% CI"]
+        )
+        self._t2_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._t2_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._t2_table.setSortingEnabled(True)
+        self._t2_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cl.addWidget(self._t2_table, stretch=1)
+
         scroll.setWidget(content)
         lay.addWidget(scroll, stretch=1)
         return page
@@ -626,7 +695,7 @@ class AnalysisView(QWidget):
     def _get_loaders(self):
         return [
             self._load_tab0,
-            self._load_tab1, self._load_tab3,
+            self._load_tab1, self._load_tab2, self._load_tab3,
             self._load_tab4, self._load_tab5, self._load_tab6,
             self._load_tab7,
         ]
@@ -650,7 +719,7 @@ class AnalysisView(QWidget):
 
     def _mark_all_dirty(self) -> None:
         """Flag every tab for redraw on next visit."""
-        self._tab_dirty = [True] * 7
+        self._tab_dirty = [True] * 8
 
     # ────────────────────────────────────────────────── Data loading ──
 
@@ -785,15 +854,113 @@ class AnalysisView(QWidget):
         canvas3.fig.tight_layout()
         canvas3.draw()
 
+    # ─────────────────────── Tab 2 loader ──
+
+    def _load_tab2(self) -> None:
+        motifs = self._data.get("motifs") if isinstance(self._data, dict) else None
+        if motifs is None or motifs.empty:
+            motif_path = RESULTS / "comparison" / "motifs.csv"
+            if motif_path.exists():
+                try:
+                    motifs = pd.read_csv(motif_path)
+                except Exception:
+                    motifs = None
+
+        has_data = motifs is not None and not motifs.empty
+        self._t2_placeholder.setVisible(not has_data)
+        self._t2_table.setVisible(has_data)
+        if self._t2_canvas:
+            self._t2_canvas.setVisible(has_data)
+
+        if not has_data:
+            if self._t2_canvas:
+                self._t2_canvas.ax.clear()
+                self._t2_canvas.ax.text(
+                    0.5, 0.5, "No motif data", ha="center", va="center",
+                    transform=self._t2_canvas.ax.transAxes, color="#999"
+                )
+                self._t2_canvas.draw()
+            return
+
+        m = motifs.copy()
+        if "abs_log2_enrichment" in m.columns:
+            m = m.sort_values("abs_log2_enrichment", ascending=False)
+        elif "enrichment_ratio" in m.columns:
+            m = m.sort_values("enrichment_ratio", ascending=False)
+
+        self._t2_table.setSortingEnabled(False)
+        self._t2_table.setRowCount(len(m))
+        cols = [
+            "motif", "type", "context_A_freq", "context_B_freq",
+            "enrichment_ratio", "ci_low",
+        ]
+        for ri, (_, row) in enumerate(m.iterrows()):
+            for ci, col in enumerate(cols):
+                if col == "ci_low":
+                    low = row.get("ci_low", "")
+                    high = row.get("ci_high", "")
+                    try:
+                        txt = f"[{float(low):.3f}, {float(high):.3f}]"
+                    except (TypeError, ValueError):
+                        txt = ""
+                else:
+                    val = row.get(col, "")
+                    txt = f"{val:.4f}" if isinstance(val, float) else str(val)
+                self._t2_table.setItem(ri, ci, QTableWidgetItem(txt))
+        self._t2_table.setSortingEnabled(True)
+
+        if not self._t2_canvas or not _MPL:
+            return
+
+        canvas = self._t2_canvas
+        canvas.fig.clf()
+        ax = canvas.fig.add_subplot(111)
+        top = m.head(12)
+        labels = top["motif"].astype(str).tolist() if "motif" in top.columns else []
+        if "log2_enrichment" in top.columns:
+            vals = top["log2_enrichment"].to_numpy(dtype=float)
+        elif "enrichment_ratio" in top.columns:
+            vals = np.log2(top["enrichment_ratio"].to_numpy(dtype=float))
+        else:
+            vals = np.array([])
+        if labels:
+            y = np.arange(len(labels))
+            colors = ["#D55E00" if v >= 0 else "#0072B2" for v in vals]
+            ax.barh(y, vals, color=colors, alpha=0.85)
+            ax.set_yticks(y)
+            ax.set_yticklabels(
+                [l[:28] + ("..." if len(l) > 28 else "") for l in labels],
+                fontsize=8,
+            )
+            ax.invert_yaxis()
+            ax.axvline(0, color="#888", linewidth=0.8)
+            ax.set_xlabel("log2 enrichment: Context A vs Context B")
+        else:
+            ax.text(0.5, 0.5, "No motifs", ha="center", va="center",
+                    transform=ax.transAxes, color="#999")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        canvas.fig.tight_layout()
+        canvas.draw()
+
+    def _export_motifs_csv(self) -> None:
+        p = RESULTS / "comparison" / "motifs.csv"
+        if not p.exists():
+            QMessageBox.warning(self, "No Data", "motifs.csv not found.")
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export Motifs", "motifs.csv", "CSV (*.csv)"
+        )
+        if dest:
+            shutil.copy2(str(p), dest)
+            QMessageBox.information(self, "Exported", f"Saved to {dest}")
+
     # ─────────────────────── Tab 3 loader + helpers ──
 
     def _cohort_cmd(self) -> list[str]:
         gb = self._t3_groupby.currentText()
         cohort_p = self.cfg.get("cohort_csv_path", "") or "cohort_normalized.csv"
         cmd = ["cohort_analysis.py", "--groupby", gb, "--cohort", cohort_p]
-        out_dir = self.cfg.get("cohort_output_dir", "").strip()
-        if out_dir:
-            cmd += ["--output", out_dir]
         return cmd
 
     def _change_cohort_file(self) -> None:
@@ -852,8 +1019,7 @@ class AnalysisView(QWidget):
             return
 
         # — Plot 1: cohort state profiles PNG (from cohort_analysis.py) —
-        _out = self.cfg.get("cohort_output_dir", "").strip()
-        cohort_dir = Path(_out) if _out else RESULTS / "cohort"
+        cohort_dir = RESULTS / "cohort"
         profiles_png = cohort_dir / "cohort_state_profiles.png"
         if profiles_png.exists() and self._t3_profiles_canvas:
             try:

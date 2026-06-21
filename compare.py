@@ -2309,6 +2309,193 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 # Step 4: Per-animal scalar summary (delegates to quantify.py)
 # ---------------------------------------------------------------------------
 
+def _motif_counts(labels: np.ndarray, n: int) -> dict[tuple[int, ...], int]:
+    """Count valid overlapping state motifs of length n."""
+    counts: dict[tuple[int, ...], int] = {}
+    if len(labels) < n:
+        return counts
+    for i in range(len(labels) - n + 1):
+        window = labels[i:i + n]
+        if np.all(window >= 0):
+            motif = tuple(int(v) for v in window)
+            counts[motif] = counts.get(motif, 0) + 1
+    return counts
+
+
+def _format_motif(motif: tuple[int, ...]) -> str:
+    return "→".join(str(v) for v in motif)
+
+
+def _pick_motif_contexts(context_values: list[str]) -> tuple[str, str]:
+    available = sorted({str(v) for v in context_values if str(v) and str(v) != "nan"})
+    if len(available) < 2:
+        sys.exit("Motif discovery needs at least two context values in metadata.csv.")
+
+    label_a = str(_vc.get_condition_a_label())
+    label_b = str(_vc.get_condition_b_label())
+    if label_a in available and label_b in available and label_a != label_b:
+        return label_a, label_b
+    if "A" in available and "B" in available:
+        return "A", "B"
+    return available[0], available[1]
+
+
+def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> None:
+    import matplotlib.pyplot as plt
+
+    if df.empty:
+        return
+
+    plot_df = df.copy()
+    if "abs_log2_enrichment" in plot_df.columns:
+        plot_df = plot_df.sort_values("abs_log2_enrichment", ascending=False)
+    else:
+        plot_df = plot_df.sort_values("enrichment_ratio", ascending=False)
+    plot_df = plot_df.head(limit)
+
+    mat = plot_df[["context_A_freq", "context_B_freq"]].to_numpy(dtype=float)
+    labels = plot_df["motif"].astype(str).tolist()
+
+    fig_h = max(4.0, 0.28 * len(plot_df) + 1.5)
+    fig, ax = plt.subplots(figsize=(6.5, fig_h))
+    im = ax.imshow(mat, cmap="magma", aspect="auto")
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Context A", "Context B"])
+    ax.set_title("Top Context-Enriched Motifs")
+    ax.set_xlabel("Frequency within context")
+    for r in range(mat.shape[0]):
+        for c in range(mat.shape[1]):
+            ax.text(c, r, f"{mat[r, c]:.3f}", ha="center", va="center",
+                    color="white" if mat[r, c] > mat.max() * 0.55 else "black",
+                    fontsize=7)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
+def cmd_motifs(min_confidence: float = 0.0):
+    """
+    Discover bigram/trigram state motifs enriched between two contexts.
+
+    Outputs:
+      - results/comparison/motifs.csv
+      - results/comparison/motif_heatmap.png
+    """
+    index_path = os.path.join(_res(), "features", "index.json")
+    cluster_info_path = os.path.join(_res(), "shared", "cluster_info.json")
+    if not os.path.exists(index_path):
+        sys.exit("No feature index found. Run --extract first.")
+    if not os.path.exists(cluster_info_path):
+        sys.exit("No cluster_info.json found. Run --cluster first.")
+    if not os.path.exists(_meta()):
+        sys.exit("metadata.csv not found.")
+
+    with open(index_path) as f:
+        index = json.load(f)
+
+    meta = pd.read_csv(_meta())
+    meta = _vc.normalize_metadata_columns(meta)
+    if "filename" not in meta.columns or "context" not in meta.columns:
+        sys.exit("metadata.csv must include filename and context columns for motif discovery.")
+    meta["stem"] = meta["filename"].astype(str).str.replace(r"\.mp4$", "", regex=True)
+    meta_by_stem = meta.drop_duplicates("stem").set_index("stem")
+
+    context_a, context_b = _pick_motif_contexts(meta["context"].dropna().astype(str).tolist())
+    print(f"Motif discovery contexts: {context_a} vs {context_b}")
+    if min_confidence > 0.0:
+        print(f"Applying min-confidence filter: {min_confidence}")
+
+    counts = {
+        context_a: {"bigram": {}, "trigram": {}},
+        context_b: {"bigram": {}, "trigram": {}},
+    }
+    totals = {
+        context_a: {"bigram": 0, "trigram": 0},
+        context_b: {"bigram": 0, "trigram": 0},
+    }
+    videos_used = {context_a: 0, context_b: 0}
+
+    for stem in sorted(k for k in index.keys() if k != "_meta"):
+        if stem not in meta_by_stem.index:
+            continue
+        ctx = str(meta_by_stem.loc[stem, "context"])
+        if ctx not in (context_a, context_b):
+            continue
+        labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
+        if not os.path.exists(labels_path):
+            continue
+        labels = np.load(labels_path).astype(np.int32)
+        if min_confidence > 0.0:
+            probs_path = os.path.join(_res(), "shared", f"{stem}_probs.npy")
+            if os.path.exists(probs_path):
+                probs = np.load(probs_path)
+                labels = labels.copy()
+                labels[probs < min_confidence] = -1
+
+        videos_used[ctx] += 1
+        for n, typ in ((2, "bigram"), (3, "trigram")):
+            c = _motif_counts(labels, n)
+            totals[ctx][typ] += sum(c.values())
+            dest = counts[ctx][typ]
+            for motif, value in c.items():
+                dest[motif] = dest.get(motif, 0) + value
+
+    rows = []
+    for typ in ("bigram", "trigram"):
+        motifs = sorted(set(counts[context_a][typ]) | set(counts[context_b][typ]))
+        total_a = totals[context_a][typ]
+        total_b = totals[context_b][typ]
+        for motif in motifs:
+            count_a = int(counts[context_a][typ].get(motif, 0))
+            count_b = int(counts[context_b][typ].get(motif, 0))
+            freq_a = count_a / total_a if total_a else 0.0
+            freq_b = count_b / total_b if total_b else 0.0
+            eps_a = 0.5 / total_a if total_a else 0.5
+            eps_b = 0.5 / total_b if total_b else 0.5
+            ratio = (freq_a + eps_a) / (freq_b + eps_b)
+            se = np.sqrt(1.0 / (count_a + 0.5) + 1.0 / (count_b + 0.5))
+            ci_low = float(np.exp(np.log(ratio) - 1.96 * se))
+            ci_high = float(np.exp(np.log(ratio) + 1.96 * se))
+            rows.append({
+                "motif": _format_motif(motif),
+                "type": typ,
+                "context_A": context_a,
+                "context_B": context_b,
+                "context_A_count": count_a,
+                "context_B_count": count_b,
+                "context_A_freq": freq_a,
+                "context_B_freq": freq_b,
+                "enrichment_ratio": ratio,
+                "log2_enrichment": float(np.log2(ratio)),
+                "abs_log2_enrichment": float(abs(np.log2(ratio))),
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "flagged": bool(ratio >= 2.0 or ratio <= 0.5),
+            })
+
+    out_dir = os.path.join(_res(), "comparison")
+    os.makedirs(out_dir, exist_ok=True)
+    out_csv = os.path.join(out_dir, "motifs.csv")
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(
+            ["abs_log2_enrichment", "type", "motif"],
+            ascending=[False, True, True],
+        )
+    df.to_csv(out_csv, index=False)
+    print(f"Motifs saved: results/comparison/motifs.csv  ({len(df)} motifs)")
+    print(f"Videos used: {context_a}={videos_used[context_a]}, {context_b}={videos_used[context_b]}")
+    print(f"Totals: bigrams {totals[context_a]['bigram']:,}/{totals[context_b]['bigram']:,}, "
+          f"trigrams {totals[context_a]['trigram']:,}/{totals[context_b]['trigram']:,}")
+
+    if not df.empty:
+        _plot_motif_heatmap(df, os.path.join(out_dir, "motif_heatmap.png"))
+
+
 def cmd_summarize():
     """
     Deprecated thin wrapper — delegates to quantify.py build_master_table().
@@ -2486,6 +2673,8 @@ def main():
                         help="[deprecated] Use --quantify instead")
     parser.add_argument("--quantify", action="store_true",
                         help="Build master_table.csv with all per-animal scalars")
+    parser.add_argument("--motifs", "--motif", action="store_true", dest="motifs",
+                        help="Discover context-enriched bigram/trigram state motifs")
     parser.add_argument("--collapse", action="store_true",
                         help="Merge similar states by centroid cosine similarity (run after --cluster)")
     parser.add_argument("--collapse-threshold", type=float, default=0.5,
@@ -2520,7 +2709,7 @@ def main():
                         help="With --cluster: apply the existing saved model to new videos only "
                              "(fast, does not refit preprocessor/UMAP/HDBSCAN)")
     parser.add_argument("--min-confidence", type=float, default=0.0,
-                        help="With --report/--quantify: exclude frames with prob < threshold")
+                        help="With --report/--motifs/--quantify: exclude frames with prob < threshold")
     parser.add_argument("--cohort", metavar="FILE", default=None,
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     parser.add_argument("--save-run", action="store_true",
@@ -2530,7 +2719,7 @@ def main():
     args = parser.parse_args()
 
     if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
-                args.report, args.summarize, args.quantify, args.save_run,
+                args.report, args.summarize, args.quantify, args.motifs, args.save_run,
                 args.event_align]):
         parser.print_help()
         sys.exit(1)
@@ -2572,6 +2761,8 @@ def main():
         cmd_report(fps=args.fps, min_confidence=args.min_confidence)
     if args.summarize:
         cmd_summarize()
+    if args.motifs:
+        cmd_motifs(min_confidence=args.min_confidence)
     if args.quantify:
         cmd_quantify(cohort=args.cohort, min_confidence=args.min_confidence)
     if args.event_align:

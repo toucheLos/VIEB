@@ -24,6 +24,37 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 
+GPU_STACKS = [
+    {
+        "label": "RAPIDS 24.12 / CUDA 12.2",
+        "min_driver": (525, 60, 13),
+        "packages": [
+            "cuml-cu12==24.12.0",
+            "cudf-cu12==24.12.0",
+            "cupy-cuda12x==12.2.0",
+            "cuda-python==12.2.1",
+            "cuda-toolkit[cublas,cufft,curand,cusolver,cusparse]==12.2.2",
+            "nvidia-cuda-runtime-cu12==12.2.140",
+            "nvidia-cuda-nvrtc-cu12==12.2.140",
+            "nvidia-nvjitlink-cu12==12.2.140",
+            "nvidia-cublas-cu12==12.2.5.6",
+            "nvidia-cufft-cu12==11.0.8.103",
+            "nvidia-curand-cu12==10.3.3.141",
+            "nvidia-cusolver-cu12==11.5.2.141",
+            "nvidia-cusparse-cu12==12.1.2.141",
+        ],
+    },
+    {
+        "label": "RAPIDS 26.04 / CUDA 12.9",
+        "min_driver": (575, 51, 3),
+        "packages": [
+            "cudf-cu12==26.4.0",
+            "cuml-cu12==26.4.0",
+            "cupy-cuda12x==14.1.1",
+        ],
+    },
+]
+
 
 # ---------------------------------------------------------------------------
 # Generic helpers
@@ -315,6 +346,47 @@ def detect_cuda_version():
     return None
 
 
+def _parse_version_tuple(text):
+    m = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", text or "")
+    if not m:
+        return None
+    return tuple(int(part) for part in m.groups(default="0"))
+
+
+def _version_gte(found, required):
+    size = max(len(found), len(required))
+    found = found + (0,) * (size - len(found))
+    required = required + (0,) * (size - len(required))
+    return found >= required
+
+
+def detect_nvidia_driver_version():
+    """Run nvidia-smi and parse driver version. Returns tuple or None."""
+    try:
+        proc = subprocess.Popen(
+            ["nvidia-smi"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        out, _ = proc.communicate()
+        text = out.decode("utf-8", errors="replace")
+        m = re.search(r"Driver Version:\s*([0-9.]+)", text)
+        if m:
+            return _parse_version_tuple(m.group(1))
+    except (OSError, IOError):
+        pass
+    return None
+
+
+def select_gpu_stack(driver_version):
+    if not driver_version:
+        return None
+    for stack in sorted(GPU_STACKS, key=lambda item: item["min_driver"], reverse=True):
+        if _version_gte(driver_version, stack["min_driver"]):
+            return stack
+    return None
+
+
 def install_core(venv_python, plat):
     """
     Install VIEB's core dependencies. On Linux/WSL2, attempt GPU (RAPIDS)
@@ -366,9 +438,22 @@ def install_core(venv_python, plat):
         )
         return status
 
+    driver_version = detect_nvidia_driver_version()
+    stack = select_gpu_stack(driver_version)
+    if stack is None:
+        min_driver = ".".join(str(part) for part in min(s["min_driver"] for s in GPU_STACKS))
+        status["gpu"] = False
+        status["gpu_reason"] = (
+            "Detected CUDA {0}.{1}, but VIEB's pinned RAPIDS stack requires "
+            "NVIDIA driver {2} or newer. Upgrade the NVIDIA driver, or run "
+            "CPU mode for now.".format(cuda_major, cuda_minor, min_driver)
+        )
+        return status
+
     ret = run_streaming(
-        [venv_python, "-m", "pip", "install", "--no-build-isolation", "-e", ".[gpu]"],
-        "Installing GPU (RAPIDS/cuML) extras...",
+        [venv_python, "-m", "pip", "install",
+         "--extra-index-url", "https://pypi.nvidia.com"] + stack["packages"],
+        "Installing GPU (RAPIDS/cuML) extras: {0}...".format(stack["label"]),
     )
     if ret != 0:
         status["gpu"] = False

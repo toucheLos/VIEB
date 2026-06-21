@@ -175,7 +175,7 @@ class PipelineRunner(QThread):
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
             use_wavelets = bool(self.cfg.get("use_wavelets", True))
             enable_collapse = bool(self.cfg.get("enable_state_collapse", False))
-            export_clips = bool(self.cfg.get("export_clips", False))
+            min_confidence = float(self.cfg.get("min_confidence", 0.7))
             umap_dims = int(self.cfg.get("umap_dims", 10))
             hdbscan_min_samples = int(self.cfg.get("hdbscan_min_samples", 0)) or None
 
@@ -251,9 +251,12 @@ class PipelineRunner(QThread):
                         if not ok:
                             raise RuntimeError("Per-animal scalar computation failed.")
                     elif sid == 10:
-                        # compare.py --motifs is not yet implemented; skip gracefully
-                        # so the full pipeline can still complete.
-                        self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
+                        ok = self._run_subprocess([
+                            "compare.py", "--motifs",
+                            "--min-confidence", str(min_confidence),
+                        ])
+                        if not ok:
+                            raise RuntimeError("Motif discovery failed.")
                     elif sid == 11:
                         clips_args = ["generate_clips.py", "--fps", str(fps)]
                         ok = self._run_subprocess(clips_args)
@@ -284,10 +287,20 @@ class SubprocessWorker(QThread):
         super().__init__()
         self.args = args
         self.python_exe = python_exe or sys.executable
+        self._proc: subprocess.Popen | None = None
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except OSError:
+                pass
 
     def run(self):
         try:
-            p = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 [self.python_exe, *self.args],
                 cwd=str(ROOT),
                 stdout=subprocess.PIPE,
@@ -296,13 +309,18 @@ class SubprocessWorker(QThread):
                 encoding="utf-8",
                 errors="replace",
             )
-            assert p.stdout is not None
-            for line in p.stdout:
+            assert self._proc.stdout is not None
+            for line in self._proc.stdout:
+                if self._stop_flag:
+                    break
                 self.log.emit(line)
-            self.done.emit(p.wait() == 0)
+            self._proc.wait()
+            self.done.emit(self._proc.returncode == 0 and not self._stop_flag)
         except Exception:
             self.log.emit(traceback.format_exc())
             self.done.emit(False)
+        finally:
+            self._proc = None
 
 
 class ClipGenerationWorker(QThread):

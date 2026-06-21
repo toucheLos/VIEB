@@ -1210,7 +1210,7 @@ class ValidationView(QWidget):
             self._load_btn.setEnabled(False)
             self._player._display.setText(
                 "No clips directory found.\n\n"
-                "Generate clips first:\n  python characterize.py --clips"
+                "Generate clips first:\n  python generate_clips.py"
             )
         else:
             self._load_btn.setEnabled(True)
@@ -1295,7 +1295,7 @@ class ValidationView(QWidget):
         if not clips_dir.exists():
             self._player._display.setText(
                 f"No clips found for State {state_id}.\n\n"
-                "Generate clips first:\n  python characterize.py --clips"
+                "Generate clips first:\n  python generate_clips.py"
             )
             self._clip_name_lbl.setText("")
             self._existing_lbl.setText("")

@@ -73,8 +73,8 @@ python compare.py --quantify --min-confidence 0.7  # Quantify with confidence fi
 
 ```bash
 python characterize.py                   # Behavioral state profiles + t-SNE → results/characterization/
-python characterize.py --clips           # Also export exemplar video clips → clips/state_<id>/
-python characterize.py --n-clips 10      # Change clips per category (default 15)
+python generate_clips.py                 # Export exemplar video clips → clips/state_<id>/
+python generate_clips.py --n-clips 10    # Change clips per category (default 15)
 ```
 
 ---

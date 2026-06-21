@@ -43,7 +43,6 @@ _NEW_PROJECT_DEFAULTS: dict = {
     "collapse_threshold": 0.5,
     "use_wavelets": True,
     "enable_state_collapse": False,
-    "export_clips": False,
     "onboarding_complete": False,
     "project_name": "VIEB Project",
     "last_completed_stage": "",
@@ -81,10 +80,6 @@ _NEW_PROJECT_DEFAULTS: dict = {
     "h5_manifest_path": "",
     "manifest_path": "",
     "h5_source_col": "",
-<<<<<<< HEAD
-    "manifest_path": "",
-=======
->>>>>>> 81e1fbe94c256750a3bc620286ae81ebb1673e42
     "h5_frame_col": "Frame Number",
 }
 

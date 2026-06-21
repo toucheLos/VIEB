@@ -55,9 +55,11 @@ pip install -e .                # Core pipeline (no DLC)
 pip install -e ".[tracking]"    # Full install including DeepLabCut
 ```
 
-**GPU acceleration (Linux):** Install cuML for GPU-accelerated UMAP and HDBSCAN:
+**GPU acceleration (Linux):** Use the app's **Set up GPU acceleration** button or run
+`python vieb_setup.py`. The setup flow checks your NVIDIA driver and installs a pinned
+RAPIDS/cuML stack compatible with that driver.
 ```bash
-pip install --extra-index-url https://pypi.nvidia.com cuml-cu12
+python vieb_setup.py
 ```
 
 **Launch the GUI:**
@@ -110,7 +112,7 @@ Shared models saved to `results/shared/`. Per-video state labels saved as `<stem
 
 ```bash
 python characterize.py
-python characterize.py --clips   # also export exemplar video clips per state
+python generate_clips.py         # export exemplar video clips per state
 ```
 
 Generates kinematic profiles, context enrichment statistics, and behavioral bout structure for each discovered state. Outputs `results/characterization/state_summary.csv` and `context_report.csv`.

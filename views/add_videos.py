@@ -5,14 +5,14 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QRadioButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, _has_pose_csvs
+from _utils import ROOT, RESULTS, _has_pose_csvs, _probe_wsl_cuml
 from _workers import SubprocessWorker
 from views.dlc_setup import _StepCard, _PRIMARY_BTN_STYLE, _ClickableLabel, _translate_log
 
@@ -36,6 +36,9 @@ class AddVideosView(QWidget):
         self.cfg = cfg
         self._worker = None
         self._action_buttons: list[QPushButton] = []
+        self._active_step_num: int | None = None
+        self._step_results: dict[int, bool] = {}
+        self._steps: dict[int, _StepCard] = {}
         self._build()
         self.refresh()
 
@@ -68,6 +71,14 @@ class AddVideosView(QWidget):
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:#555;")
         outer.addWidget(subtitle)
+
+        self._gpu_badge = QLabel("⏳ Checking GPU…")
+        self._gpu_badge.setStyleSheet(
+            "background:#f5f5f5;border:1px solid #ddd;border-radius:4px;"
+            "padding:4px 10px;color:#555;font-size:12px;"
+        )
+        outer.addWidget(self._gpu_badge)
+        QTimer.singleShot(800, self._probe_gpu_async)
 
         self._banner_frame = QFrame()
         self._banner_frame.setObjectName("statusBanner")
@@ -102,6 +113,12 @@ class AddVideosView(QWidget):
         self._log_header.clicked.connect(self._toggle_log)
         log_hdr_row.addWidget(self._log_header)
         log_hdr_row.addStretch()
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFlat(True)
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._log.toPlainText())
+        )
+        log_hdr_row.addWidget(copy_btn)
         clear_log_btn = QPushButton("Clear")
         clear_log_btn.setFlat(True)
         clear_log_btn.clicked.connect(self._log.clear)
@@ -115,6 +132,32 @@ class AddVideosView(QWidget):
         visible = not self._log.isVisible()
         self._log.setVisible(visible)
         self._log_header.setText("Hide log  ▴" if visible else "Show log  ▾")
+
+    # ── GPU detection ────────────────────────────────────────────────────
+
+    def _probe_gpu_async(self):
+        class _ProbeThread(QThread):
+            result = pyqtSignal(bool)
+            def run(self):
+                self.result.emit(_probe_wsl_cuml())
+
+        self._gpu_thread = _ProbeThread(self)
+        self._gpu_thread.result.connect(self._on_gpu_probe)
+        self._gpu_thread.start()
+
+    def _on_gpu_probe(self, ok: bool):
+        if ok:
+            self._gpu_badge.setText("✓ GPU (WSL2 + cuML) — pose estimation and clustering use your GPU")
+            self._gpu_badge.setStyleSheet(
+                "background:#e8f5e9;border:1px solid #a5d6a7;border-radius:4px;"
+                "padding:4px 10px;color:#1b5e20;font-size:12px;"
+            )
+        else:
+            self._gpu_badge.setText("CPU mode — pose estimation and clustering run on CPU")
+            self._gpu_badge.setStyleSheet(
+                "background:#fff8e1;border:1px solid #ffe082;border-radius:4px;"
+                "padding:4px 10px;color:#795548;font-size:12px;"
+            )
 
     # ── Status helpers ───────────────────────────────────────────────────
 
@@ -178,6 +221,7 @@ class AddVideosView(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         self._action_buttons = []
+        self._steps = {}
 
         total_videos = self._count_total_videos()
         csv_count = self._count_pose_csvs()
@@ -241,7 +285,9 @@ class AddVideosView(QWidget):
         pose_btn.clicked.connect(self._run_pose_estimation)
         step1.body_layout().addWidget(pose_btn, alignment=Qt.AlignLeft)
         self._action_buttons.append(pose_btn)
-        if new_for_pose == 0:
+        if self._step_results.get(1) is False:
+            step1.set_status("error")
+        elif new_for_pose == 0:
             step1.set_status("done", expanded=False)
         else:
             step1.set_status("current")
@@ -262,7 +308,9 @@ class AddVideosView(QWidget):
         extract_btn.clicked.connect(self._run_extract)
         step2.body_layout().addWidget(extract_btn, alignment=Qt.AlignLeft)
         self._action_buttons.append(extract_btn)
-        if new_for_pose > 0:
+        if self._step_results.get(2) is False:
+            step2.set_status("error")
+        elif new_for_pose > 0:
             step2.set_status("pending", expanded=False)
         elif new_for_features == 0:
             step2.set_status("done", expanded=False)
@@ -311,7 +359,9 @@ class AddVideosView(QWidget):
         cluster_btn.clicked.connect(self._run_cluster)
         step3.body_layout().addWidget(cluster_btn, alignment=Qt.AlignLeft)
         self._action_buttons.append(cluster_btn)
-        if new_for_pose > 0 or new_for_features > 0:
+        if self._step_results.get(3) is False:
+            step3.set_status("error")
+        elif new_for_pose > 0 or new_for_features > 0:
             step3.set_status("pending", expanded=False)
         elif new_for_cluster == 0:
             step3.set_status("done", expanded=False)
@@ -336,14 +386,17 @@ class AddVideosView(QWidget):
     def _add_step(self, number: int, title: str, description: str) -> _StepCard:
         card = _StepCard(number, title, description)
         self._steps_lay.addWidget(card)
+        self._steps[number] = card
         return card
 
     # ── Actions ──────────────────────────────────────────────────────────
 
     def _run_pose_estimation(self):
+        self._active_step_num = 1
         self._run_subprocess(["setup_dlc_training.py", "--analyze"], use_dlc_python=True)
 
     def _run_extract(self):
+        self._active_step_num = 2
         fps = self.cfg.get("fps", 30)
         args = ["compare.py", "--extract", "--fps", str(fps)]
         if not self.cfg.get("use_wavelets", True):
@@ -351,6 +404,7 @@ class AddVideosView(QWidget):
         self._run_subprocess(args)
 
     def _run_cluster(self):
+        self._active_step_num = 3
         fps = self.cfg.get("fps", 30)
         if self._apply_radio is not None and self._apply_radio.isChecked():
             args = ["compare.py", "--cluster", "--apply-existing", "--fps", str(fps)]
@@ -369,6 +423,8 @@ class AddVideosView(QWidget):
         if self._worker and self._worker.isRunning():
             self._log_human("⚠ A task is already running. Wait for it to finish.")
             return
+        if self._active_step_num is not None:
+            self._step_results.pop(self._active_step_num, None)
         self._set_buttons_enabled(False)
         self.worker_running.emit(True)
         python_exe = (self.cfg.get("dlc_python") or sys.executable) if use_dlc_python else sys.executable
@@ -384,8 +440,15 @@ class AddVideosView(QWidget):
             self._log_human("✓ Task completed successfully.")
         else:
             self._log_human("✕ Task failed — check the log above for details.")
+        if self._active_step_num is not None:
+            self._step_results[self._active_step_num] = ok
+        self._active_step_num = None
         self.refresh()
         self.pipeline_done.emit()
+
+    def stop_worker(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
 
     def _set_buttons_enabled(self, enabled: bool):
         for b in self._action_buttons:

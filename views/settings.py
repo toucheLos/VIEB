@@ -170,6 +170,35 @@ class SettingsView(QWidget):
         form.addWidget(_meta_row_widget, r, 1)
         r += 1
 
+        # ── Cohort CSV ───────────────────────────────────────────────────
+        self._cohort_csv = QLineEdit(self.cfg.get("cohort_csv_path", ""))
+        self._cohort_csv.setPlaceholderText("Path to cohort CSV/Excel …")
+        cohort_browse = QPushButton("Browse...")
+        cohort_browse.setFixedWidth(80)
+        cohort_browse.clicked.connect(self._browse_cohort_csv)
+        _cohort_row_widget = QWidget()
+        _cohort_row_h = QHBoxLayout(_cohort_row_widget)
+        _cohort_row_h.setContentsMargins(0, 0, 0, 0)
+        _cohort_row_h.setSpacing(4)
+        _cohort_row_h.addWidget(self._cohort_csv)
+        _cohort_row_h.addWidget(cohort_browse)
+        _cohort_tip = (
+            "Cohort file mapping animals to groups for cohort-level analysis.\n"
+            "Used by Cohort Analysis, Quantification, and Fear Index tabs.\n"
+            "Supports CSV or Excel (.xlsx/.xls) formats."
+        )
+        lbl_cohort = QLabel("Cohort file")
+        lbl_cohort.setToolTip(_cohort_tip)
+        self._cohort_csv.setToolTip(_cohort_tip)
+        form.addWidget(lbl_cohort, r, 0)
+        _cohort_h_with_help = QHBoxLayout()
+        _cohort_h_with_help.setContentsMargins(0, 0, 0, 0)
+        _cohort_h_with_help.setSpacing(4)
+        _cohort_h_with_help.addWidget(_cohort_row_widget)
+        _cohort_h_with_help.addWidget(_help_btn("Cohort file", _cohort_tip))
+        form.addLayout(_cohort_h_with_help, r, 1)
+        r += 1
+
         map_btn = QPushButton("Configure Column Mapping…")
         map_btn.setToolTip("Map your CSV column names to VIEB concepts (animal_id, day, context …)")
         map_btn.clicked.connect(self._open_mapper)
@@ -386,6 +415,14 @@ class SettingsView(QWidget):
         if p:
             self._meta_csv.setText(p)
 
+    def _browse_cohort_csv(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select Cohort File", self._cohort_csv.text(),
+            "Data files (*.csv *.xlsx *.xls);;All files (*.*)"
+        )
+        if p:
+            self._cohort_csv.setText(p)
+
     def _browse_dlc_python(self):
         p, _ = QFileDialog.getOpenFileName(
             self, "Select DLC Python Interpreter", self._dlc_python_le.text(),
@@ -557,6 +594,7 @@ class SettingsView(QWidget):
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["dlc_python"] = self._dlc_python_le.text().strip()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        self.cfg["cohort_csv_path"] = self._cohort_csv.text().strip()
         self.cfg["pose_source"] = self._pose_source.currentText()
         self.cfg["h5_path"] = self._h5_path.text().strip()
         self.cfg["h5_manifest_path"] = self._h5_manifest.text().strip()

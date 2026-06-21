@@ -27,6 +27,7 @@ from _utils import (
     _wsl_check_installed, _wsl_check_distro, _wsl_check_venv,
     _wsl_elevate_install, wsl_cuml_reset_cache,
     _wsl_path, _wsl_python, _probe_wsl_cuml,
+    detect_nvidia_driver, select_gpu_stack, gpu_stack_message,
 )
 from _workers import ExportWorker, SubprocessWorker
 
@@ -190,7 +191,7 @@ venv_wsl/bin/pip install --upgrade pip -q
 echo "--- Installing pipeline dependencies ---"
 venv_wsl/bin/pip install numpy pandas scikit-learn umap-learn hdbscan joblib -q
 echo "--- Installing cuML (RAPIDS) --- this may take several minutes ---"
-venv_wsl/bin/pip install --extra-index-url https://pypi.nvidia.com cuml-cu12
+venv_wsl/bin/pip install --extra-index-url https://pypi.nvidia.com cuml-cu12==24.12.0 cudf-cu12==24.12.0 cupy-cuda12x==12.2.0 cuda-python==12.2.1 "cuda-toolkit[cublas,cufft,curand,cusolver,cusparse]==12.2.2" nvidia-cuda-runtime-cu12==12.2.140 nvidia-cuda-nvrtc-cu12==12.2.140 nvidia-nvjitlink-cu12==12.2.140 nvidia-cublas-cu12==12.2.5.6 nvidia-cufft-cu12==11.0.8.103 nvidia-curand-cu12==10.3.3.141 nvidia-cusolver-cu12==11.5.2.141 nvidia-cusparse-cu12==12.1.2.141
 echo "--- Verifying GPU ---"
 venv_wsl/bin/python -c "import cuml; import cupy; cupy.cuda.runtime.getDeviceCount(); print('cuml_ok')"
 echo "=== Setup complete ==="
@@ -536,13 +537,11 @@ class DiagnoseDialog(QDialog):
 class LinuxGpuSetupDialog(QDialog):
     """Guide the user through installing cuML (RAPIDS) on Linux for GPU-accelerated clustering."""
 
-    _INSTALL_CMD = (
-        "pip install --extra-index-url https://pypi.nvidia.com cuml-cu12"
-    )
-
     def __init__(self, gpu_name: str | None = None, parent=None):
         super().__init__(parent)
-        self._gpu_name = gpu_name or "NVIDIA GPU"
+        self._driver_info = detect_nvidia_driver()
+        self._stack = select_gpu_stack(self._driver_info.get("driver_tuple"))
+        self._gpu_name = gpu_name or self._driver_info.get("gpu_name") or "NVIDIA GPU"
         self._worker = None
         self.setWindowTitle("GPU Acceleration Setup")
         self.resize(620, 480)
@@ -559,16 +558,23 @@ class LinuxGpuSetupDialog(QDialog):
         lay.addWidget(hdr)
 
         info = QLabel(
-            "cuML (RAPIDS) is not installed. It enables 10–50× faster UMAP + HDBSCAN "
-            "clustering on your GPU.\n\n"
-            "Run the command below inside your VIEB virtual environment, then click Verify."
+            "cuML (RAPIDS) enables much faster UMAP + HDBSCAN clustering on your GPU.\n\n"
+            + gpu_stack_message(self._driver_info)
         )
         info.setWordWrap(True)
         lay.addWidget(info)
 
-        cmd_box = QTextEdit(self._INSTALL_CMD)
+        if self._stack:
+            install_cmd = (
+                "pip install --extra-index-url https://pypi.nvidia.com "
+                + " ".join(self._stack["packages"])
+            )
+        else:
+            install_cmd = "Upgrade the NVIDIA driver, then re-open this setup dialog."
+
+        cmd_box = QTextEdit(install_cmd)
         cmd_box.setReadOnly(True)
-        cmd_box.setMaximumHeight(44)
+        cmd_box.setMaximumHeight(64)
         cmd_box.setStyleSheet(
             "background:#1e1e1e;color:#cfd8dc;font-family:Consolas,monospace;"
             "font-size:12px;border-radius:4px;padding:4px;"
@@ -578,9 +584,10 @@ class LinuxGpuSetupDialog(QDialog):
         btn_row = QHBoxLayout()
         self._install_btn = QPushButton("Run Install")
         self._install_btn.setToolTip(
-            "Run the install command inside the active Python environment.\n"
+            "Install the pinned RAPIDS/cuML packages compatible with this driver.\n"
             "This may take several minutes on the first run."
         )
+        self._install_btn.setEnabled(self._stack is not None)
         self._install_btn.clicked.connect(self._run_install)
         btn_row.addWidget(self._install_btn)
 
@@ -612,14 +619,21 @@ class LinuxGpuSetupDialog(QDialog):
     def _run_install(self):
         if self._worker and self._worker.isRunning():
             return
+        if self._stack is None:
+            self._status.setText("Upgrade the NVIDIA driver before installing GPU acceleration.")
+            self._status.setStyleSheet("color:#b71c1c;font-weight:bold;")
+            return
         self._install_btn.setEnabled(False)
         self._verify_btn.setEnabled(False)
         self._status.setText("")
         self._log.clear()
         self._append("Running install…\n")
-        self._worker = SubprocessWorker(["-m", "pip", "install",
-                                         "--extra-index-url", "https://pypi.nvidia.com",
-                                         "cuml-cu12"])
+        args = [
+            "-m", "pip", "install",
+            "--extra-index-url", "https://pypi.nvidia.com",
+        ] + list(self._stack["packages"])
+        self._append("Installing " + self._stack["label"] + "\n")
+        self._worker = SubprocessWorker(args)
         self._worker.log.connect(self._append)
         self._worker.done.connect(self._on_install_done)
         self._worker.start()

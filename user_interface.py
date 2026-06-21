@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -164,10 +165,21 @@ def _probe_nvidia_smi() -> str | None:
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5,
         )
-        name = r.stdout.strip().splitlines()[0].strip()
-        return name if name else None
+        lines = r.stdout.strip().splitlines()
+        if lines:
+            name = lines[0].strip()
+            if name:
+                return name
     except Exception:
-        return None
+        pass
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=5)
+        m = re.search(r"\|\s*\d+\s+(.+?)\s+(?:On|Off)\s+\|", r.stdout)
+        if m:
+            return " ".join(m.group(1).split())
+    except Exception:
+        pass
+    return None
 
 
 def _probe_linux_cuml():
@@ -428,7 +440,6 @@ _DEFAULT_CFG = {
     "collapse_threshold": 0.5,
     "use_wavelets": True,
     "enable_state_collapse": False,
-    "export_clips": False,
     "onboarding_complete": False,
     "project_name": "VIEB Project",
     "last_completed_stage": "",
@@ -437,7 +448,6 @@ _DEFAULT_CFG = {
     "context_groups": "A,B,C",
     "context_descriptions": {},
     "cohort_csv_path": "",
-    "cohort_output_dir": "",
     "metadata_csv_path": "",
     "hdbscan_min_samples": 0,
     "umap_dims": 10,
@@ -809,7 +819,6 @@ class PipelineRunner(QThread):
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
             use_wavelets = bool(self.cfg.get("use_wavelets", True))
             enable_collapse = bool(self.cfg.get("enable_state_collapse", False))
-            export_clips = bool(self.cfg.get("export_clips", False))
             hdbscan_min_samples = int(self.cfg.get("hdbscan_min_samples", 0)) or None
             umap_dims = int(self.cfg.get("umap_dims", 10))
             validate = bool(self.cfg.get("validate", False))
@@ -883,14 +892,16 @@ class PipelineRunner(QThread):
                         if not ok:
                             raise RuntimeError("Per-animal scalar computation failed.")
                     elif sid == 10:
-                        self.log.emit("[info] Stage 10 (Motif Discovery) is not yet available — skipping.\n")
-                    elif sid == 11:
-                        char_args = ["characterize.py", "--fps", str(fps)]
-                        if export_clips:
-                            char_args.append("--clips")
-                        ok = self._run_subprocess(char_args)
+                        ok = self._run_subprocess([
+                            "compare.py", "--motifs",
+                            "--min-confidence", str(min_confidence),
+                        ])
                         if not ok:
-                            raise RuntimeError("Characterization failed.")
+                            raise RuntimeError("Motif discovery failed.")
+                    elif sid == 11:
+                        ok = self._run_subprocess(["generate_clips.py", "--fps", str(fps)])
+                        if not ok:
+                            raise RuntimeError("Clip generation failed.")
                     self.stage_done.emit(sid, True)
                 except (Exception, SystemExit) as _exc:
                     msg = (
@@ -1224,7 +1235,7 @@ sudo apt-get install -y -q python3 python3-venv python3-pip
 python3 -m venv venv_wsl
 venv_wsl/bin/pip install --upgrade pip -q
 venv_wsl/bin/pip install numpy pandas scikit-learn umap-learn hdbscan joblib -q
-venv_wsl/bin/pip install --extra-index-url https://pypi.nvidia.com cuml-cu12
+venv_wsl/bin/pip install --extra-index-url https://pypi.nvidia.com cuml-cu12==24.12.0 cudf-cu12==24.12.0 cupy-cuda12x==12.2.0 cuda-python==12.2.1 "cuda-toolkit[cublas,cufft,curand,cusolver,cusparse]==12.2.2" nvidia-cuda-runtime-cu12==12.2.140 nvidia-cuda-nvrtc-cu12==12.2.140 nvidia-nvjitlink-cu12==12.2.140 nvidia-cublas-cu12==12.2.5.6 nvidia-cufft-cu12==11.0.8.103 nvidia-curand-cu12==10.3.3.141 nvidia-cusolver-cu12==11.5.2.141 nvidia-cusparse-cu12==12.1.2.141
 venv_wsl/bin/python -c "import cuml; import cupy; cupy.cuda.runtime.getDeviceCount(); print('cuml_ok')"
 """
 
@@ -1886,12 +1897,6 @@ class StageRow(QFrame):
             self._mconf.valueChanged.connect(lambda v: self.changed.emit("min_confidence", v))
             params.addWidget(self._mconf)
             has_params = True
-        if self.stage["id"] == 11:
-            self._clips = QCheckBox("Export video clips")
-            self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
-            self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
-            params.addWidget(self._clips)
-            has_params = True
         params.addStretch()
         if has_params:
             bl.addLayout(params)
@@ -2173,7 +2178,7 @@ class RunPipelineView(QWidget):
             self._gpu_setup_btn.setVisible(on_windows)
             if on_windows:
                 self._gpu_setup_btn.setText("GPU Setup")
-        elif _WSL_CUML is False:
+        elif _WSL_CUML is False or _WSL_CUML == "installed":
             if on_windows:
                 badge_text = "CPU mode: WSL2 + cuML not found"
                 self._gpu_badge.setText(badge_text)
@@ -2185,13 +2190,14 @@ class RunPipelineView(QWidget):
                 self._gpu_setup_btn.setText("Set up GPU acceleration")
             elif _linux_gpu_name:
                 if _WSL_CUML == "installed":
-                    # cuML is installed but CUDA driver can't initialize (e.g. nvidia-uvm I/O error)
-                    self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML installed, CUDA init failed (try rebooting)")
+                    # cuML is installed but CUDA cannot initialize; open setup for driver guidance.
+                    self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML installed, CUDA init failed")
                     self._gpu_badge.setStyleSheet(
                         "background:#fff8e1;border:1px solid #ffe082;"
                         "border-radius:4px;padding:4px 10px;color:#795548;"
                     )
-                    self._gpu_setup_btn.setVisible(False)
+                    self._gpu_setup_btn.setVisible(True)
+                    self._gpu_setup_btn.setText("Fix GPU acceleration")
                 else:
                     # GPU hardware found but cuML not installed
                     self._gpu_badge.setText(f"GPU detected ({_linux_gpu_name}) — cuML not installed")
@@ -2207,7 +2213,8 @@ class RunPipelineView(QWidget):
                     "background:#f5f5f5;border:1px solid #ddd;"
                     "border-radius:4px;padding:4px 10px;color:#888;"
                 )
-                self._gpu_setup_btn.setVisible(False)
+                self._gpu_setup_btn.setVisible(True)
+                self._gpu_setup_btn.setText("Set up GPU acceleration")
         else:
             self._gpu_badge.setText("Checking GPU...")
 
@@ -2266,7 +2273,7 @@ class RunPipelineView(QWidget):
             elif sid == 10:
                 mins = 1
             else:
-                mins = 3 + (5 if self.cfg.get("export_clips") else 0)
+                mins = 8 if sid == 11 else 3
             row.set_eta(f"~{mins} min")
 
     def update_from_cfg(self):
@@ -2417,8 +2424,6 @@ class RunPipelineView(QWidget):
 
         if not self.cfg.get("enable_state_collapse", False):
             all_ids = [i for i in all_ids if i != 7]
-        if not self.cfg.get("export_clips", False) and from_here:
-            pass
         if _has_pose_csvs(Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))):
             if 1 in all_ids:
                 all_ids.remove(1)
@@ -3887,7 +3892,16 @@ class SettingsView(QWidget):
         form.addLayout(meta_h, r, 1)
         r += 1
 
-        self._cohort_out = dir_row("Cohort output directory", "cohort_output_dir")
+        self._cohort_le = QLineEdit(self.cfg.get("cohort_csv_path", ""))
+        cohort_browse = QPushButton("Browse...")
+        cohort_browse.clicked.connect(lambda: self._browse_file(self._cohort_le,
+            "Data files (*.csv *.xlsx *.xls);;All files (*.*)"))
+        cohort_h = QHBoxLayout()
+        cohort_h.addWidget(self._cohort_le)
+        cohort_h.addWidget(cohort_browse)
+        form.addWidget(QLabel("Cohort file"), r, 0)
+        form.addLayout(cohort_h, r, 1)
+        r += 1
 
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row("Context groups (comma-separated)", self._ctx_groups)
@@ -3935,7 +3949,7 @@ class SettingsView(QWidget):
         self._results.setText(self.cfg.get("results_dir", ""))
         self._raw.setText(self.cfg.get("raw_videos_dir", ""))
         self._meta_le.setText(self.cfg.get("metadata_csv_path", ""))
-        self._cohort_out.setText(self.cfg.get("cohort_output_dir", ""))
+        self._cohort_le.setText(self.cfg.get("cohort_csv_path", ""))
         self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
         self._fps.setValue(int(self.cfg.get("fps", 30)))
         self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
@@ -3946,8 +3960,8 @@ class SettingsView(QWidget):
         if d:
             le.setText(d)
 
-    def _browse_file(self, le):
-        path, _ = QFileDialog.getOpenFileName(self, "Select File", le.text(), "CSV files (*.csv)")
+    def _browse_file(self, le, filter_str="CSV files (*.csv)"):
+        path, _ = QFileDialog.getOpenFileName(self, "Select File", le.text(), filter_str)
         if path:
             le.setText(path)
 
@@ -3961,7 +3975,7 @@ class SettingsView(QWidget):
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
         self.cfg["metadata_csv_path"] = self._meta_le.text()
-        self.cfg["cohort_output_dir"] = self._cohort_out.text()
+        self.cfg["cohort_csv_path"] = self._cohort_le.text().strip()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
         self.cfg["fps"] = self._fps.value()
         self.cfg["umap_dims"] = self._umap_dims.value()
@@ -4545,11 +4559,11 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._sb_noise)
 
         self._sb_stop = QPushButton("■")
-        self._sb_stop.setFixedSize(18, 18)
+        self._sb_stop.setFixedSize(22, 22)
         self._sb_stop.setToolTip("Stop running process")
         self._sb_stop.setStyleSheet(
             "QPushButton{border:none;background:transparent;color:#c62828;"
-            "font-size:10px;padding:0;}"
+            "font-size:14px;padding:0;}"
             "QPushButton:hover{color:#e53935;}"
         )
         self._sb_stop.setCursor(Qt.PointingHandCursor)
@@ -4606,6 +4620,8 @@ class MainWindow(QMainWindow):
     def _stop_all(self):
         if hasattr(self._pv, '_stop_pipeline'):
             self._pv._stop_pipeline()
+        if hasattr(self._adv, 'stop_worker'):
+            self._adv.stop_worker()
         if hasattr(self._av, 'stop_worker'):
             self._av.stop_worker()
         if hasattr(self._scv, 'stop_worker'):

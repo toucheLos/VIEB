@@ -272,7 +272,7 @@ class RunPipelineView(QWidget):
             elif sid == 10:
                 mins = 1
             else:
-                mins = 3 + (5 if self.cfg.get("export_clips") else 0)
+                mins = 8 if sid == 11 else 3
             row.set_eta(f"~{mins} min")
 
     def update_from_cfg(self, statuses: dict | None = None):

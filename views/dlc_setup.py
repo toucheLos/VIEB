@@ -212,8 +212,9 @@ class _StepCard(QFrame):
         "done":    ("#e8f5e9", "#a5d6a7", "#2e7d32"),
         "current": ("#e3f2fd", "#90caf9", "#1565c0"),
         "pending": ("#fafafa", "#e0e0e0", "#999999"),
+        "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
-    _ICONS = {"done": "✓", "current": "▶", "pending": "○"}
+    _ICONS = {"done": "✓", "current": "▶", "pending": "○", "error": "✕"}
 
     def __init__(self, number: int, title: str, description: str):
         super().__init__()
