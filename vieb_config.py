@@ -127,20 +127,25 @@ def get_column_map() -> dict:
     Values of '' or '— not mapped —' are treated as unmapped (no rename).
     """
     cfg = _load_config()
-    defaults = {
-        "animal_id":  "animal_id",
-        "day":        "day",
-        "context":    "context",
-        "experiment": "experiment",
-        "cohort":     "",
-        "event":      "",
-    }
-    stored = cfg.get("column_map", {})
-    result = dict(defaults)
-    for k, v in stored.items():
-        if v and v != "— not mapped —":
-            result[k] = v
-    return result
+    try:
+        import metadata_schema as _ms
+        return dict(_ms.get_metadata_schema(cfg).get("column_map", {}))
+    except Exception:
+        defaults = {
+            "session_id": "filename",
+            "animal_id":  "animal_id",
+            "day":        "day",
+            "context":    "context",
+            "experiment": "experiment",
+            "cohort":     "",
+            "event":      "",
+        }
+        stored = cfg.get("column_map", {})
+        result = dict(defaults)
+        for k, v in stored.items():
+            if v and v != "— not mapped —":
+                result[k] = v
+        return result
 
 
 def get_condition_labels() -> tuple[str, str]:
@@ -208,6 +213,32 @@ def get_optional_report_columns() -> list[str]:
     return [x for x in items if x]
 
 
+def get_metadata_schema() -> dict:
+    """Return the active project metadata schema."""
+    try:
+        import metadata_schema as _ms
+        return _ms.get_metadata_schema(_load_config())
+    except Exception:
+        return {}
+
+
+def get_enabled_analysis_groups(df=None) -> list[dict]:
+    """Return enabled metadata analysis groups for the active project."""
+    try:
+        import metadata_schema as _ms
+        return _ms.get_enabled_analysis_groups(_load_config(), df)
+    except Exception:
+        return []
+
+
+def resolve_session_id_column(df, warn: bool = False) -> str | None:
+    try:
+        import metadata_schema as _ms
+        return _ms.resolve_session_id_column(df, _load_config(), warn=warn)
+    except Exception:
+        return None
+
+
 def normalize_metadata_columns(df) -> "pd.DataFrame":
     """Rename user CSV columns to VIEB standard names using the project column_map.
 
@@ -215,12 +246,15 @@ def normalize_metadata_columns(df) -> "pd.DataFrame":
     and the mapped column exists in the DataFrame.  Leaves unmapped columns
     (empty string or '— not mapped —') untouched.
     """
-    import pandas as _pd
-    cm = get_column_map()
-    rename = {v: k for k, v in cm.items() if v and v != k and v in df.columns}
-    if rename:
-        return df.rename(columns=rename)
-    return df
+    try:
+        import metadata_schema as _ms
+        return _ms.normalize_metadata_columns(df, _load_config(), warn=True)
+    except Exception:
+        cm = get_column_map()
+        rename = {v: k for k, v in cm.items() if v and v != k and v in df.columns}
+        if rename:
+            return df.rename(columns=rename)
+        return df
 
 
 def get_raw_videos_dir() -> str:

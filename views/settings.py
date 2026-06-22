@@ -165,7 +165,7 @@ class SettingsView(QWidget):
         _meta_row_h.addWidget(self._meta_csv)
         _meta_row_h.addWidget(meta_browse)
         lbl_meta = QLabel("Metadata CSV")
-        lbl_meta.setToolTip("CSV file with one row per video: filename, animal_id, day, context, etc.")
+        lbl_meta.setToolTip("CSV file with one row per session/recording. Column names can be mapped below.")
         form.addWidget(lbl_meta, r, 0)
         form.addWidget(_meta_row_widget, r, 1)
         r += 1
@@ -200,7 +200,10 @@ class SettingsView(QWidget):
         r += 1
 
         map_btn = QPushButton("Configure Column Mapping…")
-        map_btn.setToolTip("Map your CSV column names to VIEB concepts (animal_id, day, context …)")
+        map_btn.setToolTip(
+            "Map your CSV columns to VIEB concepts, add optional experimental "
+            "columns, and choose report grouping variables."
+        )
         map_btn.clicked.connect(self._open_mapper)
         form.addWidget(QLabel(""), r, 0)
         form.addWidget(map_btn, r, 1)
@@ -210,7 +213,7 @@ class SettingsView(QWidget):
         gen_meta_btn.setToolTip(
             "Scan raw_videos/ and/or the configured H5 pose file and build a\n"
             "metadata.csv template with inferred filename/date/box/experiment/\n"
-            "day/context/animal_id columns. no_shock and fear are left blank."
+            "day/context/animal_id columns. Optional columns can be added in mapping."
         )
         gen_meta_btn.clicked.connect(self._open_metadata_generator)
         form.addWidget(QLabel(""), r, 0)
@@ -219,8 +222,7 @@ class SettingsView(QWidget):
 
         validate_meta_btn = QPushButton("Validate Metadata…")
         validate_meta_btn.setToolTip(
-            "Check metadata.csv for blank 'animal_id' or 'context' values\n"
-            "before running feature extraction / comparison."
+            "Check metadata.csv against the project metadata schema before running analysis."
         )
         validate_meta_btn.clicked.connect(self._validate_metadata)
         form.addWidget(QLabel(""), r, 0)
@@ -504,7 +506,7 @@ class SettingsView(QWidget):
         lay = QVBoxLayout(dlg)
 
         info_lbl = QLabel(
-            f"{len(df)} row(s) inferred. 'no_shock' and 'fear' are left blank for you to fill in."
+            f"{len(df)} row(s) inferred. Add optional experiment columns in the metadata mapper if needed."
         )
         lay.addWidget(info_lbl)
 
@@ -574,8 +576,13 @@ class SettingsView(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         mapper = MetadataMapperWidget(self.cfg, parent=dlg)
 
-        def _on_saved(col_map):
-            self.cfg["column_map"] = col_map
+        def _on_saved(schema):
+            if isinstance(schema, dict) and "column_map" in schema:
+                self.cfg["metadata_schema"] = schema
+                self.cfg["column_map"] = schema.get("column_map", {})
+                self.cfg["optional_report_columns"] = list(schema.get("optional_columns", {}).keys()) or ["fear"]
+            else:
+                self.cfg["column_map"] = schema
             self.settings_changed.emit(self.cfg)
             dlg.accept()
 

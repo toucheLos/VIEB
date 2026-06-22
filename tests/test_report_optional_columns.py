@@ -12,7 +12,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame):
+def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame, config_extra: dict | None = None):
     project_dir = tmp_path / "project"
     results_dir = project_dir / "results"
     features_dir = results_dir / "features"
@@ -20,7 +20,10 @@ def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame):
     features_dir.mkdir(parents=True)
     shared_dir.mkdir(parents=True)
 
-    stems = metadata["filename"].str.replace(r"\.mp4$", "", regex=True).tolist()
+    import metadata_schema as ms
+    schema_cfg = config_extra or {}
+    normalized = ms.normalize_metadata_columns(metadata, schema_cfg)
+    stems = normalized["stem"].tolist()
     index = {"_meta": {"n_keypoints": 2, "n_features": 10, "use_wavelets": False}}
     label_sets = [
         np.array([0, 0, 1, 1, 0, 1], dtype=np.int32),
@@ -57,11 +60,14 @@ def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame):
     metadata.to_csv(meta_path, index=False)
 
     config_path = project_dir / "config.json"
-    config_path.write_text(json.dumps({
+    config = {
         "results_dir": str(results_dir),
         "metadata_csv_path": str(meta_path),
         "optional_report_columns": ["fear"],
-    }))
+    }
+    if config_extra:
+        config.update(config_extra)
+    config_path.write_text(json.dumps(config))
     app_config_path = tmp_path / "app_config.json"
     app_config_path.write_text(json.dumps({"active_project": str(project_dir)}))
 
@@ -120,3 +126,101 @@ def test_cmd_report_keeps_fear_specific_output_when_present(tmp_path, monkeypatc
     assert (results_dir / "comparison" / "state_by_fear.png").exists()
     summary = pd.read_csv(results_dir / "comparison" / "summary_table.csv")
     assert "fear" in summary.columns
+
+
+def test_cmd_report_spence_style_source_file_mapping(tmp_path, monkeypatch, capsys):
+    metadata = pd.DataFrame({
+        "source_file": ["rat1_tp0.csv", "rat1_tp1.h5", "rat2_tp0.mp4", "rat2_tp1.avi"],
+        "rat": ["r1", "r1", "r2", "r2"],
+        "timepoint": ["baseline", "drug", "baseline", "drug"],
+        "treatment": ["vehicle", "drug", "vehicle", "drug"],
+        "protein_A": [1.0, 2.0, 1.5, 2.5],
+    })
+    cfg = {
+        "metadata_schema": {
+            "id_column": "source_file",
+            "column_map": {
+                "session_id": "source_file",
+                "animal_id": "rat",
+                "day": "timepoint",
+            },
+            "optional_columns": {
+                "treatment": "treatment",
+                "protein_A": "protein_A",
+            },
+            "analysis_groups": [
+                {
+                    "name": "Timepoint",
+                    "column": "day",
+                    "enabled": True,
+                    "plots": ["state_fraction"],
+                },
+                {
+                    "name": "Treatment",
+                    "column": "treatment",
+                    "enabled": True,
+                    "plots": ["state_fraction", "motif_enrichment"],
+                },
+            ],
+            "correlations": [
+                {
+                    "name": "Protein correlations",
+                    "columns": ["protein_A"],
+                    "targets": ["state_fraction"],
+                    "enabled": True,
+                }
+            ],
+        }
+    }
+    compare, results_dir = _setup_report_project(tmp_path, monkeypatch, metadata, cfg)
+
+    compare.cmd_report(fps=30.0, min_confidence=0.8)
+
+    out = capsys.readouterr().out
+    assert "No fear column found" not in out
+    summary = pd.read_csv(results_dir / "comparison" / "summary_table.csv")
+    assert {"session_id", "stem", "animal_id", "day", "treatment", "protein_A"}.issubset(summary.columns)
+    assert summary["stem"].tolist() == ["rat1_tp0", "rat1_tp1", "rat2_tp0", "rat2_tp1"]
+    assert (results_dir / "comparison" / "state_by_treatment.png").exists()
+    assert (results_dir / "comparison" / "motifs_by_treatment.csv").exists()
+    assert (results_dir / "comparison" / "correlations.csv").exists()
+    assert (results_dir / "metadata_schema_report.json").exists()
+
+
+def test_cmd_report_without_context_skips_context_outputs(tmp_path, monkeypatch, capsys):
+    metadata = pd.DataFrame({
+        "filename": ["vidA.mp4", "vidB.mp4", "vidC.mp4", "vidD.mp4"],
+        "animal_id": ["101", "101", "102", "102"],
+        "day": [0, 1, 0, 1],
+    })
+    compare, results_dir = _setup_report_project(
+        tmp_path, monkeypatch, metadata, {"optional_report_columns": ["fear"]}
+    )
+
+    compare.cmd_report(fps=30.0, min_confidence=0.8)
+
+    out = capsys.readouterr().out
+    assert "context" in out
+    assert (results_dir / "comparison" / "summary_table.csv").exists()
+    assert (results_dir / "comparison" / "transition_table.csv").exists()
+    assert not (results_dir / "comparison" / "transition_by_context.png").exists()
+    assert not (results_dir / "comparison" / "motifs.csv").exists()
+
+
+def test_metadata_schema_missing_session_identifier_validation():
+    import metadata_schema as ms
+
+    report = ms.validate_metadata_schema(pd.DataFrame({"rat": ["r1"], "timepoint": ["t0"]}), {})
+
+    assert not report["valid"]
+    assert "session_id" in report["missing_required_fields"]
+
+
+def test_stem_derivation_common_extensions():
+    import metadata_schema as ms
+
+    values = ["a/b/session1.mp4", "session2.csv", "session3.h5", "session4.mov", "session5"]
+
+    assert [ms.derive_stem(v) for v in values] == [
+        "session1", "session2", "session3", "session4", "session5"
+    ]

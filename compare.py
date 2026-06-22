@@ -18,6 +18,7 @@ import io
 import json
 import os
 import platform
+import re
 import sys
 
 import numpy as np
@@ -32,6 +33,16 @@ def _res(): return _vc.get_results_dir()
 def _meta(): return _vc.get_metadata_path()
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _slug(text: object) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(text).strip().lower()).strip("_")
+    return slug or "group"
+
+
+def _state_group_filename(group_col: str) -> str:
+    compat = {"animal_id": "state_by_animal.png"}
+    return compat.get(group_col, f"state_by_{_slug(group_col)}.png")
 
 
 def _fix_features_path(path: str) -> str:
@@ -1975,7 +1986,12 @@ def _compute_transition_matrix(labels: np.ndarray, n_clusters: int) -> np.ndarra
     return counts / row_sums
 
 
-def _plot_transition_heatmaps(group_matrices: dict, n_clusters: int, save_path: str):
+def _plot_transition_heatmaps(
+    group_matrices: dict,
+    n_clusters: int,
+    save_path: str,
+    group_label: str = "Context",
+):
     """
     Side-by-side heatmaps of mean transition matrices per group (context).
     """
@@ -1995,7 +2011,7 @@ def _plot_transition_heatmaps(group_matrices: dict, n_clusters: int, save_path: 
     for ax, grp in zip(axes, groups):
         mat = group_matrices[grp]
         im = ax.imshow(mat, vmin=0, vmax=vmax, cmap="Blues", aspect="auto")
-        ax.set_title(f"Context {grp}")
+        ax.set_title(f"{group_label} {grp}")
         ax.set_xlabel("To state")
         ax.set_ylabel("From state")
         ax.set_xticks(range(n_clusters))
@@ -2006,7 +2022,7 @@ def _plot_transition_heatmaps(group_matrices: dict, n_clusters: int, save_path: 
                         fontsize=7, color="white" if mat[i, j] > vmax * 0.6 else "black")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    plt.suptitle("Mean State Transition Probabilities by Context", fontsize=11)
+    plt.suptitle(f"Mean State Transition Probabilities by {group_label}", fontsize=11)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -2065,6 +2081,42 @@ def _plot_animal_trajectories(df, state_cols, n_clusters):
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {save_path}")
+
+
+def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> None:
+    schema = _vc.get_metadata_schema()
+    rows = []
+    for corr in schema.get("correlations", []):
+        if not isinstance(corr, dict) or not corr.get("enabled", False):
+            continue
+        for col in corr.get("columns", []):
+            if col not in df.columns:
+                print(f"[info] Correlation skipped for {col}: column not found.")
+                continue
+            x = pd.to_numeric(df[col], errors="coerce")
+            if x.notna().sum() < 3:
+                print(f"[info] Correlation skipped for {col}: need at least 3 numeric values.")
+                continue
+            for target in state_cols:
+                y = pd.to_numeric(df[target], errors="coerce")
+                valid = x.notna() & y.notna()
+                if valid.sum() < 3:
+                    continue
+                r = float(np.corrcoef(x[valid], y[valid])[0, 1])
+                rows.append({
+                    "analysis": corr.get("name", "Configured correlations"),
+                    "column": col,
+                    "target_type": "state_fraction",
+                    "target": target,
+                    "n": int(valid.sum()),
+                    "pearson_r": r,
+                })
+    if not rows:
+        return
+    out = pd.DataFrame(rows)
+    out_path = os.path.join(_res(), "comparison", "correlations.csv")
+    out.to_csv(out_path, index=False)
+    print(f"Correlations saved: results/comparison/correlations.csv ({len(out)} rows)")
 
 
 def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
@@ -2127,11 +2179,26 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         sys.exit("metadata.csv not found.")
     meta = pd.read_csv(_meta())
     meta = _vc.normalize_metadata_columns(meta)
-    meta["stem"] = meta["filename"].str.replace(r"\.mp4$", "", regex=True)
+    if "stem" not in meta.columns:
+        sys.exit("[ERROR] metadata.csv needs a session identifier column. "
+                 "Map one to 'session_id' or provide filename/source_file.")
 
     df = df_states.merge(meta, on="stem", how="left")
 
     os.makedirs(os.path.join(_res(), "comparison"), exist_ok=True)
+    try:
+        import metadata_schema as _ms
+        schema_report = _ms.metadata_schema_report(meta, _vc._load_config())
+        schema_report["summary_rows"] = int(len(df))
+        schema_report["unmatched_stems"] = sorted(
+            set(df_states["stem"].astype(str)) - set(meta["stem"].astype(str))
+        )
+        os.makedirs(_res(), exist_ok=True)
+        with open(os.path.join(_res(), "metadata_schema_report.json"), "w", encoding="utf-8") as f:
+            json.dump(schema_report, f, indent=2, default=str)
+        print("Metadata schema report saved: results/metadata_schema_report.json")
+    except Exception as e:
+        print(f"[warn] Could not write metadata schema report: {e}")
     df.to_csv(os.path.join(_res(), "comparison", "summary_table.csv"), index=False)
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
 
@@ -2225,19 +2292,35 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     df_trans_full.to_csv(os.path.join(_res(), "comparison", "transition_table.csv"), index=False)
     print(f"Transition table saved: results/comparison/transition_table.csv")
 
-    # Heatmap per context
-    if "context" in df_trans.columns and df_trans["context"].notna().any():
+    analysis_groups = _vc.get_enabled_analysis_groups(df)
+
+    # Heatmaps for configured grouping variables.
+    transition_groups = [
+        g for g in analysis_groups
+        if g.get("available", True) and "transition_matrix" in g.get("plots", [])
+    ]
+    for group in transition_groups:
+        group_col = group["column"]
+        if group_col not in df_trans.columns or not df_trans[group_col].notna().any():
+            print(f"[info] Transition report skipped for {group_col}: column missing or empty.")
+            continue
         group_matrices = {}
-        for ctx, grp in df_trans.groupby("context"):
+        for value, grp in df_trans.groupby(group_col):
             mats = []
             for _, row in grp.iterrows():
                 mat = np.array([[row[f"trans_{i}_{j}"] for j in range(n_clusters)]
                                 for i in range(n_clusters)])
                 mats.append(mat)
-            group_matrices[ctx] = np.stack(mats).mean(axis=0)
+            group_matrices[value] = np.stack(mats).mean(axis=0)
+        filename = (
+            "transition_by_context.png"
+            if group_col == "context"
+            else f"transition_by_{_slug(group_col)}.png"
+        )
         _plot_transition_heatmaps(
             group_matrices, n_clusters,
-            os.path.join(_res(), "comparison", "transition_by_context.png")
+            os.path.join(_res(), "comparison", filename),
+            group_label=group.get("name", group_col),
         )
 
     # ---- Plots ----
@@ -2284,36 +2367,24 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         plt.close()
         print(f"  Saved: {save_path}")
 
-    # Experiment-specific comparisons from config (only when columns exist).
-    optional_cols = _vc.get_optional_report_columns()
-    for optional_col in optional_cols:
-        if optional_col not in df.columns:
-            if optional_col == "fear":
+    # State-fraction comparisons for configured grouping variables.
+    for group in analysis_groups:
+        group_col = group["column"]
+        if "state_fraction" not in group.get("plots", []):
+            continue
+        if not group.get("available", True):
+            if group_col == "fear":
                 print("[info] No fear column found; skipping fear-specific report.")
             else:
-                print(f"[info] No {optional_col} column found; skipping {optional_col}-specific report.")
+                print(f"[info] State-fraction report skipped for {group_col}: {group.get('skip_reason')}")
             continue
-        if not df[optional_col].notna().any():
-            print(f"  SKIP state_by_{optional_col}.png: '{optional_col}' column in metadata.csv is empty")
-            continue
-        label = "Fear Condition" if optional_col == "fear" else optional_col.replace("_", " ").title()
+        filename = _state_group_filename(group_col)
+        label = group.get("name", group_col.replace("_", " ").title())
         boxplot_by_group(
-            optional_col,
-            os.path.join(_res(), "comparison", f"state_by_{optional_col}.png"),
+            group_col,
+            os.path.join(_res(), "comparison", filename),
             label,
         )
-
-    if "day" in df.columns:
-        boxplot_by_group("day", os.path.join(_res(), "comparison", "state_by_day.png"), "Day")
-
-    if "context" in df.columns:
-        boxplot_by_group("context", os.path.join(_res(), "comparison", "state_by_context.png"), "Context")
-
-    if "experiment" in df.columns:
-        boxplot_by_group("experiment", os.path.join(_res(), "comparison", "state_by_experiment.png"), "Experiment (CFC vs CFD)")
-
-    if "animal_id" in df.columns:
-        boxplot_by_group("animal_id", os.path.join(_res(), "comparison", "state_by_animal.png"), "Animal ID")
 
     # Per-animal trajectory across days
     if "animal_id" in df.columns and "day" in df.columns:
@@ -2321,27 +2392,37 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     # Statistical summary to terminal
     print(f"\n--- Group means (state fractions) ---")
-    for group_col in ["fear", "day", "context", "experiment", "animal_id"]:
+    for group in analysis_groups:
+        group_col = group["column"]
         if group_col not in df.columns:
             continue
         if df[group_col].notna().sum() == 0:
             continue
-        print(f"\nBy {group_col}:")
+        print(f"\nBy {group.get('name', group_col)}:")
         group_means = df.groupby(group_col)[state_cols].mean().round(3)
         print(group_means.to_string())
 
-    if "context" in df.columns:
-        motif_contexts = df["context"].dropna().astype(str).unique().tolist()
-        if len(motif_contexts) >= 2:
+    _write_configured_correlations(df, state_cols)
+
+    motif_groups = [
+        g for g in analysis_groups
+        if g.get("available", True) and "motif_enrichment" in g.get("plots", [])
+    ]
+    if motif_groups:
+        for group in motif_groups:
+            group_col = group["column"]
+            values = df[group_col].dropna().astype(str).unique().tolist()
+            if len(values) < 2:
+                print(f"[info] Motif report skipped for {group_col}: need at least two values.")
+                continue
             try:
-                print("\n--- Motifs ---")
-                cmd_motifs(min_confidence=min_confidence)
+                print(f"\n--- Motifs by {group.get('name', group_col)} ---")
+                prefix = "motifs" if group_col == "context" else f"motifs_by_{_slug(group_col)}"
+                cmd_motifs(min_confidence=min_confidence, group_col=group_col, output_prefix=prefix)
             except SystemExit as e:
                 print(f"[info] Motif report skipped: {e}")
-        else:
-            print("[info] Motif report skipped: need at least two context values.")
     else:
-        print("[info] Motif report skipped: no context column found.")
+        print("[info] Motif report skipped: no configured motif enrichment groups are available.")
 
     print(f"\nResults in results/comparison/")
 
@@ -2384,6 +2465,15 @@ def _pick_motif_contexts(context_values: list[str]) -> tuple[str, str]:
     return available[0], available[1]
 
 
+def _pick_motif_groups(values: list[str], group_col: str) -> tuple[str, str]:
+    if group_col == "context":
+        return _pick_motif_contexts(values)
+    available = sorted({str(v) for v in values if str(v) and str(v) != "nan"})
+    if len(available) < 2:
+        sys.exit(f"Motif discovery needs at least two values in '{group_col}'.")
+    return available[0], available[1]
+
+
 def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> None:
     import matplotlib.pyplot as plt
 
@@ -2421,9 +2511,13 @@ def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> No
     print(f"  Saved: {save_path}")
 
 
-def cmd_motifs(min_confidence: float = 0.0):
+def cmd_motifs(
+    min_confidence: float = 0.0,
+    group_col: str = "context",
+    output_prefix: str = "motifs",
+):
     """
-    Discover bigram/trigram state motifs enriched between two contexts.
+    Discover bigram/trigram state motifs enriched between two metadata groups.
 
     Outputs:
       - results/comparison/motifs.csv
@@ -2443,13 +2537,12 @@ def cmd_motifs(min_confidence: float = 0.0):
 
     meta = pd.read_csv(_meta())
     meta = _vc.normalize_metadata_columns(meta)
-    if "filename" not in meta.columns or "context" not in meta.columns:
-        sys.exit("metadata.csv must include filename and context columns for motif discovery.")
-    meta["stem"] = meta["filename"].astype(str).str.replace(r"\.mp4$", "", regex=True)
+    if "stem" not in meta.columns or group_col not in meta.columns:
+        sys.exit(f"metadata.csv must include a session identifier and '{group_col}' for motif discovery.")
     meta_by_stem = meta.drop_duplicates("stem").set_index("stem")
 
-    context_a, context_b = _pick_motif_contexts(meta["context"].dropna().astype(str).tolist())
-    print(f"Extracting motifs: {context_a} vs {context_b}")
+    context_a, context_b = _pick_motif_groups(meta[group_col].dropna().astype(str).tolist(), group_col)
+    print(f"Extracting motifs by {group_col}: {context_a} vs {context_b}")
     if min_confidence > 0.0:
         print(f"Applying min-confidence filter: {min_confidence}")
 
@@ -2466,7 +2559,7 @@ def cmd_motifs(min_confidence: float = 0.0):
     for stem in sorted(k for k in index.keys() if k != "_meta"):
         if stem not in meta_by_stem.index:
             continue
-        ctx = str(meta_by_stem.loc[stem, "context"])
+        ctx = str(meta_by_stem.loc[stem, group_col])
         if ctx not in (context_a, context_b):
             continue
         labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
@@ -2523,7 +2616,7 @@ def cmd_motifs(min_confidence: float = 0.0):
 
     out_dir = os.path.join(_res(), "comparison")
     os.makedirs(out_dir, exist_ok=True)
-    out_csv = os.path.join(out_dir, "motifs.csv")
+    out_csv = os.path.join(out_dir, f"{output_prefix}.csv")
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(
@@ -2531,16 +2624,18 @@ def cmd_motifs(min_confidence: float = 0.0):
             ascending=[False, True, True],
         )
     df.to_csv(out_csv, index=False)
-    print(f"Motifs saved: results/comparison/motifs.csv  ({len(df)} motifs)")
+    print(f"Motifs saved: results/comparison/{output_prefix}.csv  ({len(df)} motifs)")
     print(f"Videos used: {context_a}={videos_used[context_a]}, {context_b}={videos_used[context_b]}")
     print(f"Totals: bigrams {totals[context_a]['bigram']:,}/{totals[context_b]['bigram']:,}, "
           f"trigrams {totals[context_a]['trigram']:,}/{totals[context_b]['trigram']:,}")
 
     if not df.empty:
-        _plot_motif_heatmap(df, os.path.join(out_dir, "motif_heatmap.png"))
+        heatmap_name = "motif_heatmap.png" if output_prefix == "motifs" else f"{output_prefix}_heatmap.png"
+        _plot_motif_heatmap(df, os.path.join(out_dir, heatmap_name))
 
     # ---- Supplementary bout-based motif outputs → results/motifs/ ----
-    _write_bout_motifs(meta_by_stem, index, context_a, context_b, min_confidence)
+    if group_col == "context":
+        _write_bout_motifs(meta_by_stem, index, context_a, context_b, min_confidence)
 
 
 def _write_bout_motifs(

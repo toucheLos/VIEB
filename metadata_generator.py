@@ -2,9 +2,9 @@
 metadata_generator.py — Build a metadata.csv template from raw videos/CSVs
 or from a shared H5 pose file.
 
-Standard VIEB metadata columns: filename, date, box, experiment, day,
-context, no_shock, animal_id, fear. Fields that can't be inferred are left
-blank for the user to fill in (no_shock and fear are always left blank).
+Standard VIEB metadata columns remain Luna-compatible by default:
+filename, date, box, experiment, day, context, no_shock, animal_id, fear.
+Projects can also normalize an existing manifest CSV through metadata_schema.
 
 Also provides validate_metadata() / validate_metadata_csv(), used by
 compare.py and the GUI to warn the user about incomplete rows before
@@ -19,13 +19,16 @@ import re
 
 import pandas as pd
 
+import metadata_schema as _ms
+
 META_COLUMNS = [
     "filename", "date", "box", "experiment", "day", "context",
     "no_shock", "animal_id", "fear",
 ]
 
-# Columns that must be filled in for downstream analysis to make sense.
-REQUIRED_COLUMNS = ["animal_id", "context"]
+# Only a session identifier is universally required. animal_id/context/day are
+# optional but unlock additional reports when present.
+REQUIRED_COLUMNS = ["session_id"]
 
 # e.g. "20241113_Box_1_CFC_Day_0_(Context_A)_9001.mp4"
 _FULL_RE = re.compile(
@@ -178,13 +181,17 @@ def scan_h5_keys(h5_path: str) -> list[dict]:
 def generate_metadata_template(
     raw_videos_dir: str | None = None,
     h5_path: str | None = None,
+    filename_regex: str | None = None,
 ) -> pd.DataFrame:
     """Build a metadata.csv template DataFrame from raw_videos_dir and/or an
     H5 pose file. If both are given, raw_videos_dir rows take priority and
     h5 rows are appended for keys without an obviously matching filename."""
     rows: list[dict] = []
     if raw_videos_dir:
-        rows.extend(scan_raw_videos(raw_videos_dir))
+        if filename_regex:
+            rows.extend(scan_raw_videos_with_regex(raw_videos_dir, filename_regex))
+        else:
+            rows.extend(scan_raw_videos(raw_videos_dir))
     if h5_path:
         existing_ids = {r["animal_id"] for r in rows if r["animal_id"]}
         for row in scan_h5_keys(h5_path):
@@ -195,6 +202,40 @@ def generate_metadata_template(
         return pd.DataFrame(columns=META_COLUMNS)
 
     return pd.DataFrame(rows, columns=META_COLUMNS)
+
+
+def scan_raw_videos_with_regex(raw_videos_dir: str, filename_regex: str) -> list[dict]:
+    """Scan videos and infer fields with a user-provided named-group regex."""
+    if not raw_videos_dir or not os.path.isdir(raw_videos_dir):
+        return []
+    rx = re.compile(filename_regex)
+    rows = []
+    for video_path in sorted(glob.glob(os.path.join(raw_videos_dir, "*.mp4"))):
+        filename = os.path.basename(video_path)
+        row = {col: "" for col in META_COLUMNS}
+        row["filename"] = filename
+        m = rx.search(filename)
+        if m:
+            for key, value in m.groupdict().items():
+                if key in row:
+                    row[key] = value
+                elif key == "session_id":
+                    row["filename"] = value
+        rows.append(row)
+    return rows
+
+
+def generate_metadata_from_manifest(
+    manifest_path: str,
+    config: dict | None = None,
+    out_path: str | None = None,
+) -> pd.DataFrame:
+    """Normalize a user-supplied manifest CSV to canonical VIEB metadata."""
+    df = pd.read_csv(manifest_path, dtype=str).fillna("")
+    normalized = _ms.normalize_metadata_columns(df, config or {}, warn=True)
+    if out_path:
+        normalized.to_csv(out_path, index=False)
+    return normalized
 
 
 def write_metadata_csv(df: pd.DataFrame, out_path: str) -> None:
@@ -225,51 +266,34 @@ def validate_metadata(df: pd.DataFrame) -> dict:
     "row" is the 1-based row number as it would appear in Excel/Google
     Sheets (header = row 1, first data row = row 2).
     """
+    schema_report = _ms.validate_metadata_schema(df)
     result: dict = {
-        "valid": True,
-        "missing_columns": [],
+        "valid": schema_report["valid"],
+        "missing_columns": schema_report.get("missing_required_fields", []),
+        "missing_session_id": [],
         "missing_animal_id": [],
         "missing_context": [],
-        "messages": [],
+        "messages": list(schema_report.get("messages", [])),
+        "schema_report": schema_report,
     }
 
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            result["missing_columns"].append(col)
+    normalized = _ms.normalize_metadata_columns(df)
+    if "session_id" in normalized.columns:
+        blank_mask = normalized["session_id"].isna() | (normalized["session_id"].astype(str).str.strip() == "")
+        for idx in normalized.index[blank_mask]:
+            csv_row = int(idx) + 2
+            filename = str(normalized.at[idx, "filename"]) if "filename" in normalized.columns else ""
+            result["missing_session_id"].append({"row": csv_row, "filename": filename})
 
-    if result["missing_columns"]:
+    if result["missing_session_id"]:
         result["valid"] = False
-        result["messages"].append(
-            "metadata.csv is missing required column(s): "
-            + ", ".join(result["missing_columns"])
-        )
-
-    key_map = {"animal_id": "missing_animal_id", "context": "missing_context"}
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            continue
-        blank_mask = df[col].isna() | (df[col].astype(str).str.strip() == "")
-        for idx in df.index[blank_mask]:
-            csv_row = int(idx) + 2  # +1 for 0-based index, +1 for header row
-            filename = ""
-            if "filename" in df.columns:
-                filename = str(df.at[idx, "filename"])
-            result[key_map[col]].append({"row": csv_row, "filename": filename})
-
-    for col, key in key_map.items():
-        rows = result[key]
-        if not rows:
-            continue
-        result["valid"] = False
-        shown = rows[:20]
+        shown = result["missing_session_id"][:20]
         descr = ", ".join(
             f"row {r['row']} ({r['filename']})" if r["filename"] else f"row {r['row']}"
             for r in shown
         )
-        extra = f", and {len(rows) - 20} more" if len(rows) > 20 else ""
-        result["messages"].append(
-            f"{len(rows)} row(s) missing '{col}': {descr}{extra}"
-        )
+        extra = f", and {len(result['missing_session_id']) - 20} more" if len(result["missing_session_id"]) > 20 else ""
+        result["messages"].append(f"{len(result['missing_session_id'])} row(s) missing 'session_id': {descr}{extra}")
 
     return result
 

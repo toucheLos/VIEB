@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -29,9 +30,10 @@ from _utils import _load_cfg, _save_cfg
 
 # (concept_key, display_label, is_required)
 _CONCEPTS: list[tuple[str, str, bool]] = [
-    ("animal_id",   "Animal ID",            True),
-    ("day",         "Day / Session",        True),
-    ("context",     "Context / Condition",  True),
+    ("session_id",  "Session / File ID",    True),
+    ("animal_id",   "Animal ID",            False),
+    ("day",         "Day / Session",        False),
+    ("context",     "Context / Condition",  False),
     ("experiment",  "Experiment",           False),
     ("cohort",      "Cohort / Group",       False),
     ("event",       "Event / Outcome",      False),
@@ -41,6 +43,7 @@ _NOT_MAPPED = "— not mapped —"
 
 # Aliases for auto-detection: concept → candidate column names (lower-case)
 _ALIASES: dict[str, list[str]] = {
+    "session_id": ["session_id", "filename", "source_file", "video_file", "file", "recording_file"],
     "animal_id":  ["animal_id", "animal", "mouse_id", "rat_id", "subject"],
     "day":        ["day", "session", "session_num", "trial_day"],
     "context":    ["context", "condition", "ctx", "group_condition"],
@@ -109,6 +112,9 @@ class MetadataMapperWidget(QWidget):
         super().__init__(parent)
         self.cfg = cfg
         self._combos: dict[str, QComboBox] = {}
+        self._optional_cols: QLineEdit | None = None
+        self._analysis_groups: QLineEdit | None = None
+        self._correlation_cols: QLineEdit | None = None
         self._preview_table: QTableWidget | None = None
         self._build()
 
@@ -160,7 +166,9 @@ class MetadataMapperWidget(QWidget):
         grid.addWidget(hdr_concept, 0, 0)
         grid.addWidget(hdr_col, 0, 1)
 
-        current_map = self.cfg.get("column_map", {})
+        schema = self.cfg.get("metadata_schema", {}) if isinstance(self.cfg.get("metadata_schema"), dict) else {}
+        current_map = dict(schema.get("column_map", {}))
+        current_map.update(self.cfg.get("column_map", {}))
         auto = _autodetect_columns(csv_path)
 
         for row_idx, (concept, label, required) in enumerate(_CONCEPTS, start=1):
@@ -188,6 +196,43 @@ class MetadataMapperWidget(QWidget):
                 combo.setCurrentIndex(0)  # "— not mapped —"
 
         lay.addLayout(grid)
+
+        schema = self.cfg.get("metadata_schema", {}) if isinstance(self.cfg.get("metadata_schema"), dict) else {}
+        optional_cols = schema.get("optional_columns", {})
+        if isinstance(optional_cols, dict):
+            optional_text = ", ".join(optional_cols.keys())
+        else:
+            optional_text = ""
+        self._optional_cols = QLineEdit(optional_text)
+        self._optional_cols.setPlaceholderText("fear, sex, genotype, treatment, protein_A")
+        lay.addWidget(QLabel("Optional experimental columns (comma-separated):"))
+        lay.addWidget(self._optional_cols)
+
+        groups = schema.get("analysis_groups", [])
+        group_cols = [str(g.get("column", "")) for g in groups if isinstance(g, dict) and g.get("enabled", True)]
+        if not group_cols:
+            group_cols = ["context", "animal_id", "day", "experiment", "fear"]
+        self._analysis_groups = QLineEdit(", ".join(group_cols))
+        self._analysis_groups.setPlaceholderText("context, animal_id, treatment, timepoint")
+        self._analysis_groups.setToolTip(
+            "Grouping columns for state occupancy plots. 'context' also enables "
+            "transition matrices and motif enrichment; other groups can be edited "
+            "in config.json for plot-specific control."
+        )
+        lay.addWidget(QLabel("Analysis groups / report columns:"))
+        lay.addWidget(self._analysis_groups)
+
+        correlations = schema.get("correlations", [])
+        corr_cols: list[str] = []
+        if not isinstance(correlations, list):
+            correlations = []
+        for corr in correlations:
+            if isinstance(corr, dict):
+                corr_cols.extend(str(c) for c in corr.get("columns", []))
+        self._correlation_cols = QLineEdit(", ".join(dict.fromkeys(corr_cols)))
+        self._correlation_cols.setPlaceholderText("protein_A, protein_B")
+        lay.addWidget(QLabel("Continuous columns for correlations (comma-separated):"))
+        lay.addWidget(self._correlation_cols)
 
         # ── Action buttons ────────────────────────────────────────────────
         btn_row = QHBoxLayout()
@@ -307,7 +352,50 @@ class MetadataMapperWidget(QWidget):
             val = combo.currentText() if combo else ""
             column_map[concept] = "" if val == _NOT_MAPPED else val
 
+        optional_names = []
+        if self._optional_cols is not None:
+            optional_names = [x.strip() for x in self._optional_cols.text().split(",") if x.strip()]
+        optional_columns = {name: name for name in optional_names}
+
+        group_names = []
+        if self._analysis_groups is not None:
+            group_names = [x.strip() for x in self._analysis_groups.text().split(",") if x.strip()]
+        analysis_groups = []
+        for col in group_names:
+            plots = ["state_fraction"]
+            if col == "context":
+                plots.extend(["transition_matrix", "motif_enrichment"])
+            if col == "animal_id":
+                plots.append("trajectory")
+            analysis_groups.append({
+                "name": col.replace("_", " ").title(),
+                "column": col,
+                "enabled": True,
+                "plots": plots,
+                "optional": col not in ("session_id",),
+            })
+
+        corr_names = []
+        if self._correlation_cols is not None:
+            corr_names = [x.strip() for x in self._correlation_cols.text().split(",") if x.strip()]
+        correlations = []
+        if corr_names:
+            correlations.append({
+                "name": "Configured correlations",
+                "columns": corr_names,
+                "targets": ["state_fraction", "motif_frequency"],
+                "enabled": True,
+            })
+
         self.cfg["column_map"] = column_map
+        self.cfg["metadata_schema"] = {
+            "id_column": column_map.get("session_id", "filename") or "filename",
+            "column_map": column_map,
+            "optional_columns": optional_columns,
+            "analysis_groups": analysis_groups,
+            "correlations": correlations,
+        }
+        self.cfg["optional_report_columns"] = optional_names or ["fear"]
         _save_cfg(self.cfg)
-        self.mapping_saved.emit(column_map)
+        self.mapping_saved.emit(self.cfg["metadata_schema"])
         QMessageBox.information(self, "Column Mapping", "Column mapping saved.")
