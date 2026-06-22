@@ -23,6 +23,7 @@
   "export_clips": false,
 
   "context_groups": "A,B,C",
+  "optional_report_columns": ["fear"],
 
   "onboarding_complete": false
 }

@@ -541,6 +541,20 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
 
     if not use_wavelets:
         print("(wavelets disabled)")
+
+    # Print feature availability report
+    report = extractor.get_feature_availability_report()
+    if report.get("groups"):
+        resolved = [g for g, info in report["groups"].items() if info["resolved"]]
+        skipped_groups = [g for g, info in report["groups"].items() if not info["resolved"]]
+        if resolved:
+            print(f"Keypoint groups resolved: {', '.join(resolved)}")
+        if skipped_groups:
+            print(f"Keypoint groups missing: {', '.join(skipped_groups)}")
+        if report.get("skipped_features"):
+            for feat, reason in report["skipped_features"].items():
+                print(f"  Skipping {feat}: {reason}")
+
     print(f"Extracting features from {len(videos)} videos...")
     for video_path in videos:
         stem = os.path.splitext(os.path.basename(video_path))[0]
@@ -2228,6 +2242,9 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     # ---- Plots ----
     def boxplot_by_group(group_col, save_path, group_label):
+        if group_col not in df.columns:
+            print(f"  SKIP {os.path.basename(save_path)}: '{group_col}' column not found")
+            return
         valid = df[group_col].dropna()
         groups = sorted(valid.unique())
         if len(groups) < 2:
@@ -2267,11 +2284,24 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         plt.close()
         print(f"  Saved: {save_path}")
 
-    # Fear comparison (only if column is filled in)
-    if df["fear"].notna().any():
-        boxplot_by_group("fear", os.path.join(_res(), "comparison", "state_by_fear.png"), "Fear Condition")
-    else:
-        print("  SKIP state_by_fear.png: 'fear' column in metadata.csv is empty (fill it in)")
+    # Experiment-specific comparisons from config (only when columns exist).
+    optional_cols = _vc.get_optional_report_columns()
+    for optional_col in optional_cols:
+        if optional_col not in df.columns:
+            if optional_col == "fear":
+                print("[info] No fear column found; skipping fear-specific report.")
+            else:
+                print(f"[info] No {optional_col} column found; skipping {optional_col}-specific report.")
+            continue
+        if not df[optional_col].notna().any():
+            print(f"  SKIP state_by_{optional_col}.png: '{optional_col}' column in metadata.csv is empty")
+            continue
+        label = "Fear Condition" if optional_col == "fear" else optional_col.replace("_", " ").title()
+        boxplot_by_group(
+            optional_col,
+            os.path.join(_res(), "comparison", f"state_by_{optional_col}.png"),
+            label,
+        )
 
     if "day" in df.columns:
         boxplot_by_group("day", os.path.join(_res(), "comparison", "state_by_day.png"), "Day")
@@ -2300,6 +2330,19 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         group_means = df.groupby(group_col)[state_cols].mean().round(3)
         print(group_means.to_string())
 
+    if "context" in df.columns:
+        motif_contexts = df["context"].dropna().astype(str).unique().tolist()
+        if len(motif_contexts) >= 2:
+            try:
+                print("\n--- Motifs ---")
+                cmd_motifs(min_confidence=min_confidence)
+            except SystemExit as e:
+                print(f"[info] Motif report skipped: {e}")
+        else:
+            print("[info] Motif report skipped: need at least two context values.")
+    else:
+        print("[info] Motif report skipped: no context column found.")
+
     print(f"\nResults in results/comparison/")
 
 
@@ -2323,7 +2366,8 @@ def _motif_counts(labels: np.ndarray, n: int) -> dict[tuple[int, ...], int]:
 
 
 def _format_motif(motif: tuple[int, ...]) -> str:
-    return "→".join(str(v) for v in motif)
+    """Format as Python tuple string for ast.literal_eval compatibility."""
+    return str(motif)
 
 
 def _pick_motif_contexts(context_values: list[str]) -> tuple[str, str]:
@@ -2405,7 +2449,7 @@ def cmd_motifs(min_confidence: float = 0.0):
     meta_by_stem = meta.drop_duplicates("stem").set_index("stem")
 
     context_a, context_b = _pick_motif_contexts(meta["context"].dropna().astype(str).tolist())
-    print(f"Motif discovery contexts: {context_a} vs {context_b}")
+    print(f"Extracting motifs: {context_a} vs {context_b}")
     if min_confidence > 0.0:
         print(f"Applying min-confidence filter: {min_confidence}")
 
@@ -2494,6 +2538,129 @@ def cmd_motifs(min_confidence: float = 0.0):
 
     if not df.empty:
         _plot_motif_heatmap(df, os.path.join(out_dir, "motif_heatmap.png"))
+
+    # ---- Supplementary bout-based motif outputs → results/motifs/ ----
+    _write_bout_motifs(meta_by_stem, index, context_a, context_b, min_confidence)
+
+
+def _write_bout_motifs(
+    meta_by_stem: pd.DataFrame,
+    index: dict,
+    context_a: str,
+    context_b: str,
+    min_confidence: float,
+):
+    """Produce bout-sequence n-gram tables in results/motifs/."""
+    bouts_path = os.path.join(_res(), "characterization", "bouts.csv")
+    if not os.path.exists(bouts_path):
+        print("[info] Bout-based motif tables skipped: run --report first to generate bouts.csv")
+        return
+
+    bouts = pd.read_csv(bouts_path)
+    if bouts.empty:
+        return
+
+    motifs_dir = os.path.join(_res(), "motifs")
+    os.makedirs(motifs_dir, exist_ok=True)
+
+    # Enrich bouts with prev_state / next_state
+    enriched_rows = []
+    for stem, grp in bouts.groupby("stem"):
+        grp = grp.sort_values("start_frame").reset_index(drop=True)
+        states = grp["state"].tolist()
+        for i, row in grp.iterrows():
+            r = row.to_dict()
+            idx = grp.index.get_loc(i)
+            r["prev_state"] = int(states[idx - 1]) if idx > 0 else -1
+            r["next_state"] = int(states[idx + 1]) if idx < len(states) - 1 else -1
+            enriched_rows.append(r)
+
+    enriched_df = pd.DataFrame(enriched_rows)
+    enriched_df.to_csv(os.path.join(motifs_dir, "bouts.csv"), index=False)
+    print(f"  Bout sequences: results/motifs/bouts.csv ({len(enriched_df)} bouts)")
+
+    # Extract n-grams from bout sequences (not frame labels)
+    seq_rows = []
+    global_counts: dict[str, dict[tuple, int]] = {"bigram": {}, "trigram": {}}
+    ctx_counts: dict[str, dict[str, dict[tuple, int]]] = {}
+    ctx_totals: dict[str, dict[str, int]] = {}
+
+    for stem, grp in bouts.groupby("stem"):
+        grp = grp.sort_values("start_frame")
+        states = grp["state"].tolist()
+        ctx = str(meta_by_stem.loc[stem, "context"]) if stem in meta_by_stem.index else ""
+
+        for n, typ in ((2, "bigram"), (3, "trigram")):
+            for i in range(len(states) - n + 1):
+                motif = tuple(int(s) for s in states[i:i + n])
+                global_counts[typ][motif] = global_counts[typ].get(motif, 0) + 1
+
+                if ctx:
+                    ctx_counts.setdefault(ctx, {}).setdefault(typ, {})
+                    ctx_counts[ctx][typ][motif] = ctx_counts[ctx][typ].get(motif, 0) + 1
+                    ctx_totals.setdefault(ctx, {}).setdefault(typ, 0)
+                    ctx_totals[ctx][typ] += 1
+
+                meta_cols = {}
+                if stem in meta_by_stem.index:
+                    for c in ["context", "animal_id", "day", "experiment"]:
+                        if c in meta_by_stem.columns:
+                            meta_cols[c] = meta_by_stem.loc[stem, c]
+
+                seq_rows.append({
+                    "stem": stem,
+                    "type": typ,
+                    "motif": str(motif),
+                    "position": i,
+                    **meta_cols,
+                })
+
+    seq_df = pd.DataFrame(seq_rows)
+    seq_df.to_csv(os.path.join(motifs_dir, "motif_sequences.csv"), index=False)
+    print(f"  Motif sequences: results/motifs/motif_sequences.csv ({len(seq_df)} occurrences)")
+
+    # Global frequency summary
+    summary_rows = []
+    for typ in ("bigram", "trigram"):
+        total = sum(global_counts[typ].values())
+        for motif, count in sorted(global_counts[typ].items(), key=lambda x: -x[1]):
+            summary_rows.append({
+                "type": typ,
+                "motif": str(motif),
+                "count": count,
+                "frequency": count / total if total else 0.0,
+            })
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(os.path.join(motifs_dir, "motif_summary.csv"), index=False)
+    print(f"  Motif summary: results/motifs/motif_summary.csv ({len(summary_df)} motifs)")
+
+    # Context enrichment (bout-based)
+    all_contexts = sorted(ctx_counts.keys())
+    enrichment_rows = []
+    for typ in ("bigram", "trigram"):
+        all_motifs = sorted(global_counts[typ].keys())
+        global_total = sum(global_counts[typ].values())
+        for motif in all_motifs:
+            global_freq = global_counts[typ][motif] / global_total if global_total else 0.0
+            for ctx in all_contexts:
+                ctx_total = ctx_totals.get(ctx, {}).get(typ, 0)
+                ctx_count = ctx_counts.get(ctx, {}).get(typ, {}).get(motif, 0)
+                ctx_freq = ctx_count / ctx_total if ctx_total else 0.0
+                ratio = ctx_freq / global_freq if global_freq > 0 else 0.0
+                enrichment_rows.append({
+                    "type": typ,
+                    "motif": str(motif),
+                    "context": ctx,
+                    "count": ctx_count,
+                    "frequency": ctx_freq,
+                    "global_frequency": global_freq,
+                    "enrichment_ratio": ratio,
+                })
+    enrichment_df = pd.DataFrame(enrichment_rows)
+    enrichment_df.to_csv(os.path.join(motifs_dir, "motif_context_enrichment.csv"), index=False)
+    print(f"  Context enrichment: results/motifs/motif_context_enrichment.csv ({len(enrichment_df)} rows)")
+
+    print(f"Motifs → results/motifs/")
 
 
 def cmd_summarize():

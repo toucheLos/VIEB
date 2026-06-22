@@ -191,6 +191,23 @@ def get_primary_metric_label() -> str:
     return val or "Fear Index"
 
 
+def get_optional_report_columns() -> list[str]:
+    """Return optional metadata columns to plot when present.
+
+    These are experiment-specific report targets. Missing columns are expected
+    for many projects and should never make the core report fail.
+    """
+    cfg = _load_config()
+    val = cfg.get("optional_report_columns", cfg.get("analysis_columns", ["fear"]))
+    if isinstance(val, str):
+        items = [x.strip() for x in val.split(",")]
+    elif isinstance(val, (list, tuple)):
+        items = [str(x).strip() for x in val]
+    else:
+        items = ["fear"]
+    return [x for x in items if x]
+
+
 def normalize_metadata_columns(df) -> "pd.DataFrame":
     """Rename user CSV columns to VIEB standard names using the project column_map.
 

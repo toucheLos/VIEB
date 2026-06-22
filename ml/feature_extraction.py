@@ -44,7 +44,18 @@ class PoseFeatureExtractor:
       is omitted and the vector is shorter.
     """
 
-    # Semantic roles used for postural features
+    # Anatomical keypoint groups — features are conditional on group availability.
+    # Labs with different keypoint sets can override via config.json "keypoint_roles".
+    _KNOWN_GROUPS: dict = {
+        "head": ["nose", "left_ear", "right_ear"],
+        "body_center": ["center", "centroid"],
+        "hips": ["left_hip", "right_hip"],
+        "tail": ["tail_base", "tail_tip"],
+        "forepaws": [],
+        "hindpaws": [],
+    }
+
+    # Individual roles kept for backward compat with _compute_* methods
     _KNOWN_ROLES: tuple = ("nose", "left_ear", "right_ear", "center/centroid", "tail_base")
 
     # Hardcoded defaults for the 8-point Luna lab mouse model
@@ -63,6 +74,13 @@ class PoseFeatureExtractor:
     _SEMANTIC_FEATURES: dict = {
         "rearing_score": ("nose", "tail_base", "left_ear", "right_ear"),
         "head_angle":    ("nose", "tail_base", "left_ear", "right_ear"),
+    }
+
+    # Group-level requirements for semantic features (parallel to _SEMANTIC_FEATURES).
+    # Used when _group_indices is available; falls back to _SEMANTIC_FEATURES otherwise.
+    _SEMANTIC_FEATURE_GROUPS: dict = {
+        "rearing_score": ("head", "tail"),
+        "head_angle":    ("head", "tail"),
     }
 
     def __init__(
@@ -107,23 +125,38 @@ class PoseFeatureExtractor:
         self._roles_resolved: bool = False
         self._object_kp_indices: set = set(object_keypoint_indices or [])
         self._n_bodyparts: Optional[int] = None
+        self._group_indices: dict = {}
+        self._has_explicit_groups: bool = False
 
         if bodypart_names is not None:
             resolved = self._resolve_keypoint_indices(bodypart_names, keypoint_roles or {})
-            # When bodypart_names is explicitly provided, use only what was
-            # resolved — don't fall back to hardcoded defaults which assume
-            # the 8-point mouse model and may reference invalid indices.
             self._role_idx = resolved
             self._roles_resolved = bool(resolved)
             self._object_kp_indices = self._resolve_object_indices(
                 bodypart_names, object_keypoints or []
             )
             self._n_bodyparts = len(bodypart_names)
+            self._group_indices = self._resolve_group_indices(
+                bodypart_names, keypoint_roles or {}
+            )
+            # Detect explicit group-format config (values are lists)
+            if keypoint_roles:
+                first_val = next(iter(keypoint_roles.values()), None)
+                self._has_explicit_groups = isinstance(first_val, list)
 
-        # Determine which Layer 2 (semantic) features can be computed
+        # Determine which Layer 2 (semantic) features can be computed.
+        # When explicit group config is provided, only use group-based check.
+        # Otherwise fall back to individual role check for backward compat.
         self._available_semantic: set = set()
-        for feat_name, required_roles in self._SEMANTIC_FEATURES.items():
-            if all(self._get_role_idx(r) is not None for r in required_roles):
+        for feat_name, required_groups in self._SEMANTIC_FEATURE_GROUPS.items():
+            if self._group_indices and all(
+                len(self._group_indices.get(g, [])) > 0 for g in required_groups
+            ):
+                self._available_semantic.add(feat_name)
+            elif not self._has_explicit_groups and all(
+                self._get_role_idx(r) is not None
+                for r in self._SEMANTIC_FEATURES.get(feat_name, ())
+            ):
                 self._available_semantic.add(feat_name)
 
     @classmethod
@@ -154,9 +187,16 @@ class PoseFeatureExtractor:
         name_lower_to_idx: dict = {name.lower(): i for i, name in enumerate(bodypart_names)}
 
         # Invert keypoint_roles: role → list of keypoint names
+        # Handle both old format ({kp_name: role_str}) and new group format ({group: [kp_names]})
         role_to_names: dict = {}
-        for kp_name, role in (keypoint_roles or {}).items():
-            role_to_names.setdefault(role, []).append(kp_name)
+        for key, val in (keypoint_roles or {}).items():
+            if isinstance(val, list):
+                # New group format: key=group_name, val=list of kp names
+                # Map each kp name as if it were a role pointing to itself
+                for kp_name in val:
+                    role_to_names.setdefault(kp_name, []).append(kp_name)
+            else:
+                role_to_names.setdefault(val, []).append(key)
 
         result: dict = {}
         for role in cls._KNOWN_ROLES:
@@ -211,6 +251,66 @@ class PoseFeatureExtractor:
                 indices.add(name_lower_to_idx[kp.lower()])
         return indices
 
+    @classmethod
+    def _resolve_group_indices(
+        cls,
+        bodypart_names: List[str],
+        keypoint_roles: dict,
+    ) -> dict:
+        """
+        Resolve anatomical groups to keypoint indices.
+
+        Supports two config formats:
+        - New (group-based): {"head": ["nose", "left_ear"], "tail": ["tail_base"]}
+        - Old (role-based): {"nose": "nose", "left_ear": "left_ear"}
+
+        When keypoint_roles is empty, resolves groups from _KNOWN_GROUPS defaults
+        by matching group member names against bodypart_names.
+
+        Returns
+        -------
+        dict mapping group name → list of integer indices (empty list if unresolved).
+        """
+        if not bodypart_names:
+            return {}
+
+        name_lower_to_idx = {name.lower(): i for i, name in enumerate(bodypart_names)}
+
+        # Detect format: values are lists → new group format; strings → old role format
+        is_group_format = False
+        if keypoint_roles:
+            first_val = next(iter(keypoint_roles.values()))
+            is_group_format = isinstance(first_val, list)
+
+        # Build groups dict from config or defaults
+        if is_group_format:
+            groups_config = keypoint_roles
+        elif keypoint_roles:
+            # Old format: {kp_name: role_string} → invert to {role: [kp_names]}
+            groups_config = {}
+            for kp_name, role in keypoint_roles.items():
+                groups_config.setdefault(role, []).append(kp_name)
+        else:
+            groups_config = cls._KNOWN_GROUPS
+
+        # Resolve each group's keypoints to indices
+        result: dict = {}
+        for group_name, kp_names in groups_config.items():
+            indices = []
+            for kp in kp_names:
+                lower = kp.lower()
+                if lower in name_lower_to_idx:
+                    indices.append(name_lower_to_idx[lower])
+            result[group_name] = indices
+
+        # When using defaults, also ensure all _KNOWN_GROUPS are represented
+        if not keypoint_roles:
+            for group_name in cls._KNOWN_GROUPS:
+                if group_name not in result:
+                    result[group_name] = []
+
+        return result
+
     @property
     def _body_kp_mask(self) -> Optional[np.ndarray]:
         """Boolean mask of shape (K,) where True = body keypoint (not an object).
@@ -230,6 +330,34 @@ class PoseFeatureExtractor:
     def _get_role_idx(self, role: str) -> Optional[int]:
         """Return the keypoint index for a semantic role, or None if unavailable."""
         return self._role_idx.get(role, None)
+
+    def _get_group_indices(self, group: str) -> List[int]:
+        """Return keypoint indices for an anatomical group, or empty list."""
+        return self._group_indices.get(group, [])
+
+    def get_feature_availability_report(self) -> dict:
+        """Return a report of which groups resolved and which features are available."""
+        groups_report = {}
+        for group_name, indices in self._group_indices.items():
+            groups_report[group_name] = {
+                "resolved": len(indices) > 0,
+                "indices": indices,
+                "n_keypoints": len(indices),
+            }
+
+        all_semantic = set(self._SEMANTIC_FEATURE_GROUPS.keys())
+        skipped = {}
+        for feat_name, required_groups in self._SEMANTIC_FEATURE_GROUPS.items():
+            if feat_name not in self._available_semantic:
+                missing = [g for g in required_groups
+                           if len(self._group_indices.get(g, [])) == 0]
+                skipped[feat_name] = f"missing groups: {', '.join(missing)}"
+
+        return {
+            "groups": groups_report,
+            "available_features": sorted(self._available_semantic),
+            "skipped_features": skipped,
+        }
 
     def extract_features(self, pose: np.ndarray, confidence: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
@@ -846,10 +974,16 @@ class PoseFeatureExtractor:
     def get_feature_meta(self, n_keypoints: int = None) -> dict:
         """Return metadata about the feature vector for serialization in index.json."""
         names = self.get_feature_names(n_keypoints)
-        return {
+        meta = {
             "feature_names": names,
             "n_features": len(names),
             "n_keypoints": n_keypoints or getattr(self, '_last_n_keypoints', 8),
             "use_wavelets": self.use_wavelets,
             "semantic_features": sorted(self._available_semantic),
         }
+        if self._group_indices:
+            meta["keypoint_groups"] = {
+                g: {"indices": idx, "resolved": len(idx) > 0}
+                for g, idx in self._group_indices.items()
+            }
+        return meta
