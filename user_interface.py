@@ -691,6 +691,8 @@ class DataLoader(QThread):
             data["transition_table"] = _csv("comparison/transition_table.csv")
             data["bouts"] = _csv("characterization/bouts.csv")
             data["motifs"] = _csv("comparison/motifs.csv")
+            data["motif_context_enrichment"] = _csv("motifs/motif_context_enrichment.csv")
+            data["motif_summary"] = _csv("motifs/motif_summary.csv")
             data["cluster_info"] = _json("shared/cluster_info.json")
             data["feature_index"] = _json("features/index.json")
             data["animal_scalars"] = _csv("comparison/animal_scalars.csv")
@@ -3347,7 +3349,7 @@ class MotifsView(QWidget):
         self._table = QTableWidget()
         self._table.setColumnCount(6)
         self._table.setHorizontalHeaderLabels(
-            ["Motif", "Type", "Context A Freq", "Context B Freq", "Enrichment", "CI"]
+            ["Motif", "Type", "Context A Ratio", "Context B Ratio", "Enrichment", "P-value"]
         )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._table.setSortingEnabled(True)
@@ -3368,6 +3370,58 @@ class MotifsView(QWidget):
         self._data = data
         self._refresh()
 
+    @staticmethod
+    def _build_display_table(motifs: pd.DataFrame, enrichment: pd.DataFrame | None) -> pd.DataFrame:
+        """Join the primary motif summary with per-context enrichment rows for display."""
+        if enrichment is None or enrichment.empty:
+            display = motifs.copy()
+            if "context_A_ratio" not in display.columns:
+                display["context_A_ratio"] = np.nan
+            if "context_B_ratio" not in display.columns:
+                display["context_B_ratio"] = np.nan
+            if "p_value" not in display.columns:
+                display["p_value"] = np.nan
+            return display
+
+        e = enrichment.copy()
+        if "type" not in e.columns or "motif" not in e.columns or "context" not in e.columns:
+            display = motifs.copy()
+            display["context_A_ratio"] = np.nan
+            display["context_B_ratio"] = np.nan
+            if "p_value" not in display.columns:
+                display["p_value"] = np.nan
+            return display
+
+        if {"count_in_context", "total_in_context"}.issubset(e.columns):
+            denom = e["total_in_context"].replace(0, np.nan).astype(float)
+            e["context_ratio"] = e["count_in_context"].astype(float) / denom
+        else:
+            e["context_ratio"] = np.nan
+
+        pivot = (
+            e.pivot_table(
+                index=["type", "motif"],
+                columns="context",
+                values="context_ratio",
+                aggfunc="first",
+            )
+            .reset_index()
+        )
+        if "A" in pivot.columns:
+            pivot = pivot.rename(columns={"A": "context_A_ratio"})
+        else:
+            pivot["context_A_ratio"] = np.nan
+        if "B" in pivot.columns:
+            pivot = pivot.rename(columns={"B": "context_B_ratio"})
+        else:
+            pivot["context_B_ratio"] = np.nan
+
+        keep_cols = ["type", "motif", "context_A_ratio", "context_B_ratio"]
+        display = motifs.merge(pivot[keep_cols], on=["type", "motif"], how="left")
+        if "p_value" not in display.columns:
+            display["p_value"] = np.nan
+        return display
+
     def _refresh(self):
         motifs = self._data.get("motifs") if isinstance(self._data, dict) else None
         if motifs is None or motifs.empty:
@@ -3380,7 +3434,8 @@ class MotifsView(QWidget):
                 self._canvas.ax.text(0.5, 0.5, "No motif data", ha="center", va="center")
                 self._canvas.draw()
             return
-        m = motifs.copy()
+        enrichment = self._data.get("motif_context_enrichment") if isinstance(self._data, dict) else None
+        m = self._build_display_table(motifs.copy(), enrichment)
         t = self._type.currentText()
         if t != "All" and "type" in m.columns:
             m = m[m["type"].astype(str) == t]
@@ -3391,17 +3446,18 @@ class MotifsView(QWidget):
         cols = [
             ("motif", 0),
             ("type", 1),
-            ("context_A_freq", 2),
-            ("context_B_freq", 3),
+            ("context_A_ratio", 2),
+            ("context_B_ratio", 3),
             ("enrichment_ratio", 4),
-            ("ci_low", 5),
+            ("p_value", 5),
         ]
         for r, (_, row) in enumerate(m.iterrows()):
             for c, idx in cols:
-                if c == "ci_low":
-                    txt = f"[{row.get('ci_low', '')}, {row.get('ci_high', '')}]"
+                val = row.get(c, "")
+                if c in {"context_A_ratio", "context_B_ratio", "enrichment_ratio", "p_value"}:
+                    txt = "" if pd.isna(val) else f"{float(val):.4g}"
                 else:
-                    txt = str(row.get(c, ""))
+                    txt = str(val)
                 it = QTableWidgetItem(txt)
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 self._table.setItem(r, idx, it)
