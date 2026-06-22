@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import user_interface as ui  # noqa: E402
+
+
+def test_safe_get_state_columns_sorted():
+    df = pd.DataFrame({
+        "state_10_frac": [0.1],
+        "state_2_frac": [0.2],
+        "other": [1],
+        "state_1_frac": [0.3],
+    })
+
+    assert ui.safe_get_state_columns(df) == ["state_1_frac", "state_2_frac", "state_10_frac"]
+
+
+def test_safe_infer_target_state_with_configured_groups():
+    df = pd.DataFrame({
+        "context": ["baseline", "drug", "baseline", "drug"],
+        "state_0_frac": [0.4, 0.2, 0.5, 0.3],
+        "state_1_frac": [0.1, 0.7, 0.2, 0.8],
+    })
+
+    target, reason = ui.safe_infer_target_state(df, "context", "baseline", "drug")
+
+    assert reason == ""
+    assert target == "state_1_frac"
+
+
+def test_safe_infer_target_state_all_na_skips():
+    df = pd.DataFrame({
+        "timepoint": ["pre", "post"],
+        "state_0_frac": [np.nan, np.nan],
+    })
+
+    target, reason = ui.safe_infer_target_state(df, "timepoint", "pre", "post")
+
+    assert target is None
+    assert "no valid state data" in reason
+
+
+def test_safe_infer_target_state_no_state_columns_skips():
+    df = pd.DataFrame({"context": ["baseline", "drug"]})
+
+    target, reason = ui.safe_infer_target_state(df, "context", "baseline", "drug")
+
+    assert target is None
+    assert "no state fraction columns" in reason
+
+
+def test_panel_available_disabled_learning_curve():
+    ok, reason = ui.panel_available(
+        pd.DataFrame({"context": ["baseline"]}),
+        {"ui_panels": {"learning_curves": {"enabled": False}}},
+        "learning_curves",
+    )
+
+    assert not ok
+    assert "disabled" in reason
+
+
+def test_panel_available_missing_optional_column():
+    ok, reason = ui.panel_available(
+        pd.DataFrame({"state_0_frac": [0.5]}),
+        {},
+        "transition_by_context",
+    )
+
+    assert not ok
+    assert "context" in reason

@@ -370,6 +370,150 @@ def _state_means(summary: pd.DataFrame, n: int, hide_leading: bool = False) -> t
     return state_ids, vals, lead
 
 
+def safe_get_state_columns(df: pd.DataFrame | None) -> list[str]:
+    """Return state fraction columns sorted by state id."""
+    cols = _state_fraction_cols(df)
+    def _key(col: str) -> int:
+        try:
+            return int(str(col).split("_")[1])
+        except Exception:
+            return 10**9
+    return sorted(cols, key=_key)
+
+
+def safe_has_column(df: pd.DataFrame | None, column: str | None) -> bool:
+    return bool(df is not None and column and column in df.columns)
+
+
+def safe_column_has_data(df: pd.DataFrame | None, column: str | None) -> bool:
+    return safe_has_column(df, column) and bool(df[column].notna().any())
+
+
+PANEL_REGISTRY = {
+    "state_summary": {
+        "name": "State Summary",
+        "universal": True,
+        "required_files": ["characterization/state_summary.csv"],
+        "required_metadata_columns": [],
+        "required_config_fields": [],
+        "safe_skip": False,
+    },
+    "bouts": {
+        "name": "Bouts",
+        "universal": True,
+        "required_files": ["characterization/bouts.csv"],
+        "required_metadata_columns": [],
+        "required_config_fields": [],
+        "safe_skip": False,
+    },
+    "motifs": {
+        "name": "Motifs",
+        "universal": True,
+        "required_files": ["comparison/motifs.csv"],
+        "required_metadata_columns": [],
+        "required_config_fields": [],
+        "safe_skip": False,
+    },
+    "learning_curves": {
+        "name": "Learning Curves",
+        "universal": False,
+        "required_files": ["comparison/summary_table.csv"],
+        "required_metadata_columns": [],
+        "required_config_fields": [],
+        "safe_skip": True,
+    },
+    "transition_by_context": {
+        "name": "Transition by Context",
+        "universal": False,
+        "required_files": ["comparison/transition_table.csv"],
+        "required_metadata_columns": ["context"],
+        "required_config_fields": [],
+        "safe_skip": True,
+    },
+}
+
+
+def _nested_get(data: dict, path: str, default=None):
+    cur = data
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+
+def panel_available(
+    df: pd.DataFrame | None,
+    config: dict | None,
+    panel_name: str,
+    results_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """Return whether a panel can render and a human-readable skip reason."""
+    cfg = config or {}
+    panel = PANEL_REGISTRY.get(panel_name)
+    if panel is None:
+        return False, f"Panel '{panel_name}' is not registered."
+
+    panel_cfg = _nested_get(cfg, f"ui_panels.{panel_name}", {})
+    if isinstance(panel_cfg, dict) and panel_cfg.get("enabled") is False:
+        return False, f"{panel['name']} panel disabled in config."
+
+    if results_dir is not None:
+        for rel_path in panel.get("required_files", []):
+            if not (results_dir / rel_path).exists():
+                return False, f"{panel['name']} panel skipped: missing {rel_path}."
+
+    for column in panel.get("required_metadata_columns", []):
+        if not safe_column_has_data(df, column):
+            return False, f"{panel['name']} panel skipped: missing metadata column '{column}'."
+
+    for field in panel.get("required_config_fields", []):
+        value = _nested_get(cfg, field)
+        if value in (None, ""):
+            return False, f"{panel['name']} panel skipped: required config '{field}' is not set."
+
+    return True, ""
+
+
+def _normalize_state_col(value: object) -> str:
+    text = str(value).strip()
+    if re.fullmatch(r"\d+", text):
+        return f"state_{text}_frac"
+    return text
+
+
+def safe_infer_target_state(
+    df: pd.DataFrame | None,
+    group_col: str,
+    baseline_group: object,
+    comparison_group: object,
+    state_cols: list[str] | None = None,
+) -> tuple[str | None, str]:
+    """Pick the state with the largest comparison-baseline difference."""
+    if df is None or df.empty:
+        return None, "no summary data available"
+    if group_col not in df.columns:
+        return None, f"metadata column '{group_col}' is missing"
+    state_cols = state_cols or safe_get_state_columns(df)
+    if not state_cols:
+        return None, "no state fraction columns found"
+
+    base = df[df[group_col].astype(str) == str(baseline_group)]
+    comp = df[df[group_col].astype(str) == str(comparison_group)]
+    if base.empty or comp.empty:
+        return None, "configured comparison groups do not both exist in the data"
+
+    base_mean = base[state_cols].apply(pd.to_numeric, errors="coerce").mean()
+    comp_mean = comp[state_cols].apply(pd.to_numeric, errors="coerce").mean()
+    diff = (comp_mean - base_mean).dropna()
+    if diff.empty:
+        return None, "comparison groups have no valid state data"
+    target = diff.idxmax()
+    if not isinstance(target, str) or target not in df.columns:
+        return None, "could not infer a valid target state"
+    return target, ""
+
+
 STAGES = [
     {
         "id": 0,
@@ -501,6 +645,17 @@ _DEFAULT_CFG = {
             },
         ],
         "correlations": [],
+    },
+    "ui_panels": {
+        "learning_curves": {
+            "enabled": False,
+            "group_column": "context",
+            "baseline_group": None,
+            "comparison_group": None,
+            "order_column": "day",
+            "subject_column": "animal_id",
+            "target_state": "auto",
+        }
     },
     "object_keypoints": [],
     "condition_a_label": "",
@@ -3816,39 +3971,103 @@ class QuantificationView(QWidget):
             return
         self._lc_canvas.ax.clear()
         summary = self._data.get("summary")
-        if summary is None or not {"animal_id", "day", "context"}.issubset(summary.columns):
-            self._lc_canvas.ax.text(0.5, 0.5, "Run Report Generation to view learning curves.", ha="center", va="center")
+
+        def _skip(message: str):
+            self._lc_canvas.ax.clear()
+            self._lc_canvas.ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
             self._lc_canvas.draw()
-            return
-        state_cols = [c for c in summary.columns if c.startswith("state_") and c.endswith("_frac")]
+            return None
+
+        if summary is None:
+            return _skip("Run Report Generation to view learning curves.")
+
+        lc_cfg = ((self.cfg or {}).get("ui_panels", {}).get("learning_curves", {}))
+        if not isinstance(lc_cfg, dict):
+            lc_cfg = {}
+        if not lc_cfg.get("enabled", False):
+            return _skip("Learning curve panel skipped: enable it in UI panel configuration.")
+
+        ok, reason = panel_available(summary, self.cfg, "learning_curves")
+        if not ok:
+            return _skip(reason)
+
+        group_col = lc_cfg.get("group_column") or "context"
+        baseline_group = lc_cfg.get("baseline_group")
+        comparison_group = lc_cfg.get("comparison_group")
+        order_col = lc_cfg.get("order_column") or "day"
+        subject_col = lc_cfg.get("subject_column") or "animal_id"
+        target_cfg = lc_cfg.get("target_state", "auto")
+
+        if not safe_column_has_data(summary, group_col):
+            return _skip(f"Learning curve panel skipped: metadata column '{group_col}' is missing or empty.")
+        if baseline_group in (None, "") or comparison_group in (None, ""):
+            return _skip("Learning curve panel skipped: required comparison groups are not configured.")
+        if not safe_column_has_data(summary, order_col):
+            return _skip(f"Learning curve panel skipped: order column '{order_col}' is missing or empty.")
+
+        values = set(summary[group_col].dropna().astype(str))
+        if str(baseline_group) not in values or str(comparison_group) not in values:
+            return _skip("Learning curve panel skipped: configured comparison groups are not present in the data.")
+
+        state_cols = safe_get_state_columns(summary)
         if not state_cols:
-            self._lc_canvas.draw()
-            return
-        a_mean = summary[summary["context"].astype(str).str.upper().str.startswith("A")][state_cols].mean()
-        b_mean = summary[summary["context"].astype(str).str.upper().str.startswith("B")][state_cols].mean()
-        fear_col = (a_mean - b_mean).idxmax() if not a_mean.empty and not b_mean.empty else state_cols[0]
+            return _skip("Learning curve panel skipped: no state fraction columns found.")
+
+        if str(target_cfg).strip().lower() == "auto":
+            target_col, target_reason = safe_infer_target_state(
+                summary, group_col, baseline_group, comparison_group, state_cols
+            )
+            if target_col is None:
+                return _skip(f"Learning curve panel skipped: {target_reason}.")
+        else:
+            target_col = _normalize_state_col(target_cfg)
+            if target_col not in summary.columns:
+                return _skip(f"Learning curve panel skipped: target state '{target_cfg}' is not in summary_table.csv.")
+
         rows = []
-        for (animal, day), grp in summary.groupby(["animal_id", "day"]):
-            a = grp[grp["context"].astype(str).str.upper().str.startswith("A")][fear_col].mean()
-            b = grp[grp["context"].astype(str).str.upper().str.startswith("B")][fear_col].mean()
-            if pd.notna(a) and pd.notna(b):
-                rows.append({"animal_id": str(animal), "day": day, "disc_ratio": (a - b) / (a + b + 1e-6)})
+        group_keys = [order_col]
+        if subject_col in summary.columns:
+            group_keys.insert(0, subject_col)
+        for keys, grp in summary.groupby(group_keys):
+            if len(group_keys) == 2:
+                subject, order_value = keys
+            else:
+                subject, order_value = "All", keys
+            base = pd.to_numeric(
+                grp[grp[group_col].astype(str) == str(baseline_group)][target_col],
+                errors="coerce",
+            ).mean()
+            comp = pd.to_numeric(
+                grp[grp[group_col].astype(str) == str(comparison_group)][target_col],
+                errors="coerce",
+            ).mean()
+            if pd.notna(base) and pd.notna(comp):
+                denom = abs(base) + abs(comp)
+                if denom > 0:
+                    rows.append({
+                        "subject": str(subject),
+                        "order": order_value,
+                        "contrast": (comp - base) / (denom + 1e-6),
+                    })
         if not rows:
-            self._lc_canvas.ax.text(0.5, 0.5, "No A/B context pairs found.", ha="center", va="center")
-            self._lc_canvas.draw()
-            return
+            return _skip("Learning curve panel skipped: no valid paired comparison rows found.")
+
         df = pd.DataFrame(rows)
-        for aid, grp in df.groupby("animal_id"):
+        for _, grp in df.groupby("subject"):
             alpha = 0.35 if self._lc_indiv_chk.isChecked() else 0
             if alpha:
-                g = grp.sort_values("day")
-                self._lc_canvas.ax.plot(g["day"], g["disc_ratio"], color="#999", alpha=alpha, linewidth=0.8)
-        mean = df.groupby("day")["disc_ratio"].mean()
+                g = grp.sort_values("order")
+                self._lc_canvas.ax.plot(g["order"], g["contrast"], color="#999", alpha=alpha, linewidth=0.8)
+
+        mean = df.groupby("order")["contrast"].mean()
         self._lc_canvas.ax.plot(mean.index, mean.values, marker="o", color="#1a73e8", linewidth=2.5, label="Mean")
         self._lc_canvas.ax.axhline(0, color="#999", linestyle="--", linewidth=0.8)
-        self._lc_canvas.ax.set_title("Fear Conditioning Learning Curve")
-        self._lc_canvas.ax.set_xlabel("Day")
-        self._lc_canvas.ax.set_ylabel("Discrimination Ratio")
+        label = str(target_col).replace("_frac", "").replace("_", " ").title()
+        self._lc_canvas.ax.set_title(
+            f"{label}: {comparison_group} vs {baseline_group}"
+        )
+        self._lc_canvas.ax.set_xlabel(str(order_col).replace("_", " ").title())
+        self._lc_canvas.ax.set_ylabel("Normalized Difference")
         self._lc_canvas.ax.legend()
         self._lc_canvas.fig.tight_layout()
         self._lc_canvas.draw()
@@ -3940,6 +4159,26 @@ class SettingsView(QWidget):
 
         self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
         row("Context groups (comma-separated)", self._ctx_groups)
+
+        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
+        if not isinstance(lc_cfg, dict):
+            lc_cfg = {}
+        self._lc_enabled = QCheckBox("Enable configured learning curve panel")
+        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
+        form.addWidget(QLabel("Learning curves"), r, 0)
+        form.addWidget(self._lc_enabled, r, 1)
+        r += 1
+        self._lc_group_col = QLineEdit(str(lc_cfg.get("group_column", "context") or ""))
+        row("Learning group column", self._lc_group_col)
+        self._lc_baseline = QLineEdit("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
+        row("Learning baseline group", self._lc_baseline)
+        self._lc_comparison = QLineEdit("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
+        row("Learning comparison group", self._lc_comparison)
+        self._lc_order_col = QLineEdit(str(lc_cfg.get("order_column", "day") or ""))
+        row("Learning order column", self._lc_order_col)
+        self._lc_target_state = QLineEdit(str(lc_cfg.get("target_state", "auto") or "auto"))
+        row("Learning target state", self._lc_target_state)
+
         self._fps = QSpinBox()
         self._fps.setRange(1, 256)
         self._fps.setValue(int(self.cfg.get("fps", 30)))
@@ -3986,6 +4225,15 @@ class SettingsView(QWidget):
         self._meta_le.setText(self.cfg.get("metadata_csv_path", ""))
         self._cohort_le.setText(self.cfg.get("cohort_csv_path", ""))
         self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
+        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
+        if not isinstance(lc_cfg, dict):
+            lc_cfg = {}
+        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
+        self._lc_group_col.setText(str(lc_cfg.get("group_column", "context") or ""))
+        self._lc_baseline.setText("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
+        self._lc_comparison.setText("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
+        self._lc_order_col.setText(str(lc_cfg.get("order_column", "day") or ""))
+        self._lc_target_state.setText(str(lc_cfg.get("target_state", "auto") or "auto"))
         self._fps.setValue(int(self.cfg.get("fps", 30)))
         self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
         self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
@@ -4012,6 +4260,16 @@ class SettingsView(QWidget):
         self.cfg["metadata_csv_path"] = self._meta_le.text()
         self.cfg["cohort_csv_path"] = self._cohort_le.text().strip()
         self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
+        ui_panels = self.cfg.setdefault("ui_panels", {})
+        ui_panels["learning_curves"] = {
+            "enabled": self._lc_enabled.isChecked(),
+            "group_column": self._lc_group_col.text().strip() or "context",
+            "baseline_group": self._lc_baseline.text().strip() or None,
+            "comparison_group": self._lc_comparison.text().strip() or None,
+            "order_column": self._lc_order_col.text().strip() or "day",
+            "subject_column": "animal_id",
+            "target_state": self._lc_target_state.text().strip() or "auto",
+        }
         self.cfg["fps"] = self._fps.value()
         self.cfg["umap_dims"] = self._umap_dims.value()
         self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()

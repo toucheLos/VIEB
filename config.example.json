@@ -59,6 +59,17 @@
     ],
     "correlations": []
   },
+  "ui_panels": {
+    "learning_curves": {
+      "enabled": false,
+      "group_column": "context",
+      "baseline_group": null,
+      "comparison_group": null,
+      "order_column": "day",
+      "subject_column": "animal_id",
+      "target_state": "auto"
+    }
+  },
 
   "onboarding_complete": false
 }
