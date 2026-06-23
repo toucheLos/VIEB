@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""VIEB GUI - Video Interpreter for Experimental Behavior."""
+"""VIEB GUI - Video Interpreter Excluding Bias."""
 
 from __future__ import annotations
 
@@ -1727,7 +1727,7 @@ class StageRow(QFrame):
         "pending": ("#fafafa", "#e0e0e0", "#999999"),
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
-    _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ICONS = {"done": "OK", "running": ">", "pending": "o", "error": "X"}
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -1786,7 +1786,7 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
+        self._arrow = QLabel(">")
         self._arrow.setStyleSheet(
             "color:#999;background:transparent;border:none;"
         )
@@ -1958,10 +1958,12 @@ class StageRow(QFrame):
         self.set_status("pending")
 
     def _toggle(self):
-        expanded = not self._body.isVisible()
+        self.set_expanded(not self._body.isVisible())
+
+    def set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setText("v" if expanded else ">")
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -1978,13 +1980,9 @@ class StageRow(QFrame):
             f"font-weight:bold;color:{icon_color};"
         )
         if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText("▾")
+            self.set_expanded(True)
         else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText("▸")
+            self.set_expanded(False)
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
@@ -2062,6 +2060,9 @@ class RunPipelineView(QWidget):
         self._dlc_btn = QPushButton("DLC Setup")
         self._dlc_btn.clicked.connect(self.navigate_dlc.emit)
         top.addWidget(self._dlc_btn)
+        self._expand_all_btn = QPushButton("Expand All")
+        self._expand_all_btn.clicked.connect(self._toggle_all_rows)
+        top.addWidget(self._expand_all_btn)
         self._run_full = QPushButton("Run Full Pipeline")
         self._run_full.clicked.connect(self.run_full_pipeline)
         top.addWidget(self._run_full)
@@ -2285,6 +2286,12 @@ class RunPipelineView(QWidget):
         self._global_log.setVisible(visible)
         self._log_toggle.setText("Hide log  ▴" if visible else "Show log  ▾")
 
+    def _toggle_all_rows(self):
+        expand = any(not row._body.isVisible() for row in self._rows.values())
+        for row in self._rows.values():
+            row.set_expanded(expand)
+        self._expand_all_btn.setText("Collapse All" if expand else "Expand All")
+
     def _append_log(self, line):
         if not self._global_log.isVisible():
             self._global_log.show()
@@ -2301,6 +2308,7 @@ class RunPipelineView(QWidget):
 
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)
+        self._expand_all_btn.setEnabled(enabled)
         self._stop_btn.setVisible(not enabled)
         self._stop_btn.setEnabled(not enabled)
         for row in self._rows.values():
@@ -2308,6 +2316,9 @@ class RunPipelineView(QWidget):
 
     def _start_worker(self, stage_ids):
         if self._worker and self._worker.isRunning():
+            return
+        if not stage_ids:
+            self._status.setText("No runnable pipeline stages selected.")
             return
         self._worker = PipelineRunner(stage_ids, self.cfg)
         self._active_stages = set(stage_ids)
@@ -2415,27 +2426,23 @@ class RunPipelineView(QWidget):
         self._cmd_thread.start()
 
     def _build_sequence(self, start_sid=1, from_here=False):
-        all_ids = [s["id"] for s in STAGES if s["id"] >= start_sid] if from_here else [start_sid]
+        runnable_ids = [s["id"] for s in STAGES if s["id"] >= 2]
+        if from_here:
+            all_ids = [sid for sid in runnable_ids if sid >= start_sid]
+        else:
+            all_ids = [start_sid] if start_sid in runnable_ids else []
 
         if not self.cfg.get("enable_state_collapse", False):
             all_ids = [i for i in all_ids if i != 7]
         if not self.cfg.get("export_clips", False) and from_here:
             pass
         if _has_pose_csvs(Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))):
-            if 1 in all_ids:
-                all_ids.remove(1)
+            if 1 in self._rows:
                 self._rows[1].set_status("done")
-        if from_here:
-            done_ids = {
-                int(k)
-                for k, v in self.cfg.get("stage_status", {}).items()
-                if str(v) == "done" and str(k).isdigit()
-            }
-            all_ids = [sid for sid in all_ids if sid not in done_ids]
         return all_ids
 
     def run_full_pipeline(self):
-        self._start_worker(self._build_sequence(1, from_here=True))
+        self._start_worker(self._build_sequence(2, from_here=True))
 
     def _run_stage(self, sid):
         self._start_worker(self._build_sequence(sid, from_here=False))
@@ -4206,7 +4213,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._init_project()
         self.cfg = _load_cfg()
-        self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
+        self.setWindowTitle("VIEB - Video Interpreter Excluding Bias")
         self.setMinimumSize(1024, 768)
         w, h = self.cfg.get("window_size", [1280, 800])
         self.resize(w, h)

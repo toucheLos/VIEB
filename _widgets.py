@@ -377,7 +377,7 @@ class StageRow(QFrame):
         "pending": ("#fafafa", "#e0e0e0", "#999999"),
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
-    _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ICONS = {"done": "OK", "running": ">", "pending": "o", "error": "X"}
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -436,7 +436,7 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
+        self._arrow = QLabel(">")
         self._arrow.setStyleSheet(
             "color:#999;background:transparent;border:none;"
         )
@@ -569,10 +569,12 @@ class StageRow(QFrame):
         self.set_status("pending")
 
     def _toggle(self):
-        expanded = not self._body.isVisible()
+        self.set_expanded(not self._body.isVisible())
+
+    def set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setText("v" if expanded else ">")
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -589,13 +591,9 @@ class StageRow(QFrame):
             f"font-weight:bold;color:{icon_color};"
         )
         if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText("▾")
+            self.set_expanded(True)
         else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText("▸")
+            self.set_expanded(False)
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)

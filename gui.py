@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""VIEB GUI - Video Interpreter for Experimental Behavior."""
+"""VIEB GUI - Video Interpreter Excluding Bias."""
 
 from __future__ import annotations
 
@@ -2832,7 +2832,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.cfg = _load_cfg()
-        self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
+        self.setWindowTitle("VIEB - Video Interpreter Excluding Bias")
         self.setMinimumSize(1024, 768)
         w, h = self.cfg.get("window_size", [1280, 800])
         self.resize(w, h)

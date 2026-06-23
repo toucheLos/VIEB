@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 import sys
 import subprocess
-from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -12,7 +11,7 @@ from PyQt5.QtWidgets import (
 )
 
 from _utils import (
-    ROOT, RESULTS, STAGES, _has_pose_csvs, _open_folder, _save_cfg,
+    ROOT, RESULTS, STAGES, _open_folder, _save_cfg,
     wsl_cuml_available, wsl_cuml_reset_cache, _probe_wsl_cuml, _state_key, _MPL,
 )
 from _workers import PipelineRunner, SubprocessWorker
@@ -71,6 +70,12 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
+        self._dlc_btn = QPushButton("DLC Setup")
+        self._dlc_btn.clicked.connect(self.navigate_dlc.emit)
+        top.addWidget(self._dlc_btn)
+        self._expand_all_btn = QPushButton("Expand All")
+        self._expand_all_btn.clicked.connect(self._toggle_all_rows)
+        top.addWidget(self._expand_all_btn)
         self._run_full = QPushButton("Run Full Pipeline (Stages 2–11)")
         self._run_full.setToolTip(
             "Run all behavioral analysis stages in order."
@@ -287,6 +292,12 @@ class RunPipelineView(QWidget):
         self._global_log.setVisible(visible)
         self._log_toggle.setText("Hide log  ▴" if visible else "Show log  ▾")
 
+    def _toggle_all_rows(self):
+        expand = any(not row._body.isVisible() for row in self._rows.values())
+        for row in self._rows.values():
+            row.set_expanded(expand)
+        self._expand_all_btn.setText("Collapse All" if expand else "Expand All")
+
     def _append_log(self, line):
         if not self._global_log.isVisible():
             self._global_log.show()
@@ -297,6 +308,8 @@ class RunPipelineView(QWidget):
 
     def _set_buttons(self, enabled):
         self._run_full.setEnabled(enabled)
+        self._dlc_btn.setEnabled(enabled)
+        self._expand_all_btn.setEnabled(enabled)
         for sid, row in self._rows.items():
             if sid != 0:  # Stage 0 is not a pipeline step; keep its button usable
                 row.set_enabled(enabled)
@@ -327,6 +340,9 @@ class RunPipelineView(QWidget):
 
     def _start_worker(self, stage_ids):
         if self._worker and self._worker.isRunning():
+            return
+        if not stage_ids:
+            self._status.setText("No runnable pipeline stages selected.")
             return
         if not self._check_metadata(stage_ids):
             return
@@ -453,8 +469,9 @@ class RunPipelineView(QWidget):
         t.start()
 
     def _build_sequence(self, start_sid=1, from_here=False):
-        # Get all stage IDs in order
-        all_stage_ids = [s["id"] for s in STAGES]
+        # Get runnable stage IDs in order. Stage 0 is setup, and stage 1 is
+        # handled by the DLC Setup view rather than the pipeline runner.
+        all_stage_ids = [s["id"] for s in STAGES if s["id"] >= 2]
 
         if from_here:
             # Include start_sid and everything after
@@ -466,15 +483,6 @@ class RunPipelineView(QWidget):
         # Filter out collapse stage if not enabled
         if not self.cfg.get("enable_state_collapse", False):
             ids = [i for i in ids if i != 7]
-
-        # Filter out DLC stage if pose CSVs already exist
-        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        if _has_pose_csvs(raw_dir) and 1 in ids:
-            ids.remove(1)
-
-        # Never run stage 1 from pipeline runner (it opens DLC Setup)
-        if 1 in ids and from_here:
-            ids.remove(1)
 
         return ids
 
