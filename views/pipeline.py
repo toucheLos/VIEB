@@ -656,7 +656,11 @@ class RunPipelineView(QWidget):
             ids = [i for i in ids if i != 7]
 
         # Filter out DLC stage if pose CSVs already exist
-        raw_dir = Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
+        try:
+            import vieb_config as _vc
+            raw_dir = Path(_vc.get_raw_videos_dir())
+        except Exception:
+            raw_dir = Path("__missing_project__")
         if _has_pose_csvs(raw_dir) and 1 in ids:
             ids.remove(1)
 

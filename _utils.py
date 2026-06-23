@@ -58,7 +58,7 @@ def _get_results_dir_vc() -> Path:
         import vieb_config as _vc
         return Path(_vc.get_results_dir())
     except Exception:
-        return ROOT / "results"
+        return ROOT / "projects" / "_no_active_project" / "results"
 
 
 def _get_clips_dir_vc() -> Path:
@@ -66,7 +66,7 @@ def _get_clips_dir_vc() -> Path:
         import vieb_config as _vc
         return Path(_vc.get_clips_dir())
     except Exception:
-        return ROOT / "clips"
+        return ROOT / "projects" / "_no_active_project" / "clips"
 
 
 RESULTS = _get_results_dir_vc()
@@ -398,7 +398,7 @@ STAGES = [
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
     "results_dir": str(RESULTS),
-    "raw_videos_dir": str(ROOT / "raw_videos"),
+    "raw_videos_dir": "",
     "fps": 30,
     "window_size": [1280, 800],
     "last_view": "Overview",
@@ -487,6 +487,11 @@ def _register_project(path: str) -> None:
 
 def _get_project_config_path() -> Path:
     """Return the config.json path for the currently active project."""
+    try:
+        import project_manager as _pm
+        return _pm.get_active_project(ROOT, APP_CONFIG_PATH) / "config.json"
+    except Exception:
+        pass
     if APP_CONFIG_PATH.exists():
         try:
             app_cfg = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -497,7 +502,7 @@ def _get_project_config_path() -> Path:
                     return p / "config.json"
         except Exception:
             pass
-    return CONFIG_PATH
+    return ROOT / "projects" / "_no_active_project" / "config.json"
 
 
 def _load_cfg():

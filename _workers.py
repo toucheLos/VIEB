@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import project_manager as _pm
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
@@ -90,7 +91,11 @@ class DataLoader(QThread):
             data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
             data["state_occupancy"] = _csv("diagnostics/state_occupancy.csv")
 
-            meta_p = ROOT / "metadata.csv"
+            try:
+                import vieb_config as _vc
+                meta_p = Path(_vc.get_metadata_path())
+            except Exception:
+                meta_p = ROOT / "projects" / "_no_active_project" / "metadata.csv"
             data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
 
             data["cohort"] = None
@@ -196,6 +201,12 @@ class PipelineRunner(QThread):
         ok_all = True
         cluster_bundle_ran = False
         try:
+            try:
+                _pm.get_active_project(ROOT, ROOT / "app_config.json")
+            except _pm.ProjectSelectionError:
+                self.log.emit("No valid project selected. Complete Project Onboarding before running the pipeline.\n")
+                self.all_done.emit(False)
+                return
             fps = float(self.cfg.get("fps", 30))
             mcs = int(self.cfg.get("min_cluster_size", 2000))
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))

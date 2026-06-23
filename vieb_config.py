@@ -18,6 +18,9 @@ import os
 import re
 import sys
 from typing import Optional
+from pathlib import Path
+
+import project_manager as _pm
 
 PROJECT_ROOT: str = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "config.json")
@@ -32,42 +35,24 @@ _DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
 # ---------------------------------------------------------------------------
 
 def _load_config() -> dict:
-    # Check app_config.json for the active project first
-    if os.path.exists(_APP_CONFIG_PATH):
-        try:
-            with open(_APP_CONFIG_PATH, encoding="utf-8") as f:
-                app_cfg = json.load(f)
-            active = app_cfg.get("active_project", "")
-            if active:
-                project_cfg = os.path.join(active, "config.json")
-                if os.path.exists(project_cfg):
-                    with open(project_cfg, encoding="utf-8") as f:
-                        return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    # Fallback: ROOT/config.json
-    if os.path.exists(_CONFIG_PATH):
-        try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    try:
+        return _pm.load_active_project_config(PROJECT_ROOT, _APP_CONFIG_PATH)
+    except _pm.ProjectSelectionError:
+        return {}
+
+
+def _require_config() -> dict:
+    try:
+        return _pm.load_active_project_config(PROJECT_ROOT, _APP_CONFIG_PATH)
+    except _pm.ProjectSelectionError as exc:
+        raise RuntimeError(
+            "No valid project selected. Complete Project Onboarding before running the pipeline."
+        ) from exc
 
 
 def _save_config(data: dict) -> None:
-    config_path = _CONFIG_PATH
-    if os.path.exists(_APP_CONFIG_PATH):
-        try:
-            with open(_APP_CONFIG_PATH, encoding="utf-8") as f:
-                app_cfg = json.load(f)
-            active = app_cfg.get("active_project", "")
-            if active and os.path.isdir(active):
-                config_path = os.path.join(active, "config.json")
-        except Exception:
-            pass
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    project = _pm.get_active_project(PROJECT_ROOT, _APP_CONFIG_PATH)
+    _pm.write_project_config(project, data)
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +148,6 @@ def get_condition_labels() -> tuple[str, str]:
 
     # Auto-detect from summary_table.csv
     results_dir = cfg.get("results_dir", "").strip()
-    if not results_dir:
-        results_dir = os.path.join(PROJECT_ROOT, "results")
     summary_path = os.path.join(results_dir, "comparison", "summary_table.csv")
     if os.path.exists(summary_path):
         try:
@@ -190,10 +173,10 @@ def get_condition_b_label() -> str:
 def get_primary_metric_label() -> str:
     """Return the primary scalar metric label.
     Reads cfg["primary_metric_label"].
-    Falls back to "Fear Index" if not set."""
+    Falls back to a generic label if not set."""
     cfg = _load_config()
     val = cfg.get("primary_metric_label", "").strip()
-    return val or "Fear Index"
+    return val or "Primary Metric"
 
 
 def get_optional_report_columns() -> list[str]:
@@ -203,13 +186,13 @@ def get_optional_report_columns() -> list[str]:
     for many projects and should never make the core report fail.
     """
     cfg = _load_config()
-    val = cfg.get("optional_report_columns", cfg.get("analysis_columns", ["fear"]))
+    val = cfg.get("optional_report_columns", cfg.get("analysis_columns", []))
     if isinstance(val, str):
         items = [x.strip() for x in val.split(",")]
     elif isinstance(val, (list, tuple)):
         items = [str(x).strip() for x in val]
     else:
-        items = ["fear"]
+        items = []
     return [x for x in items if x]
 
 
@@ -258,33 +241,18 @@ def normalize_metadata_columns(df) -> "pd.DataFrame":
 
 
 def get_raw_videos_dir() -> str:
-    """Return the raw-videos directory, reading 'raw_videos_dir' from config.json.
-    Falls back to PROJECT_ROOT/raw_videos when the key is absent or empty."""
-    cfg = _load_config()
-    val = cfg.get("raw_videos_dir")
-    if val and isinstance(val, str) and val.strip():
-        return val.strip()
-    return os.path.join(PROJECT_ROOT, "raw_videos")
+    """Return the active project's raw-videos directory."""
+    return str(_pm.resolve_project_path("raw_videos", PROJECT_ROOT, _APP_CONFIG_PATH))
 
 
 def get_results_dir() -> str:
-    """Return the results directory, reading 'results_dir' from config.json.
-    Falls back to PROJECT_ROOT/results when the key is absent or empty."""
-    cfg = _load_config()
-    val = cfg.get("results_dir")
-    if val and isinstance(val, str) and val.strip():
-        return val.strip()
-    return os.path.join(PROJECT_ROOT, "results")
+    """Return the active project's results directory."""
+    return str(_pm.resolve_project_path("results", PROJECT_ROOT, _APP_CONFIG_PATH))
 
 
 def get_metadata_path() -> str:
-    """Return the metadata CSV path, reading 'metadata_csv_path' from config.json.
-    Falls back to PROJECT_ROOT/metadata.csv when the key is absent or empty."""
-    cfg = _load_config()
-    val = cfg.get("metadata_csv_path")
-    if val and isinstance(val, str) and val.strip():
-        return val.strip()
-    return os.path.join(PROJECT_ROOT, "metadata.csv")
+    """Return the active project's metadata CSV path."""
+    return str(_pm.resolve_project_path("metadata", PROJECT_ROOT, _APP_CONFIG_PATH))
 
 
 def get_pose_source() -> str:
@@ -304,9 +272,12 @@ def get_use_wavelets() -> bool:
 
 def get_h5_path() -> str:
     """Return the configured H5 pose file path, or '' if unset."""
-    cfg = _load_config()
-    val = cfg.get("h5_path", "")
-    return val.strip() if isinstance(val, str) else ""
+    try:
+        return str(_pm.resolve_project_path("pose_h5", PROJECT_ROOT, _APP_CONFIG_PATH))
+    except Exception:
+        cfg = _load_config()
+        val = cfg.get("h5_path", "")
+        return val.strip() if isinstance(val, str) else ""
 
 
 def get_h5_key() -> str:

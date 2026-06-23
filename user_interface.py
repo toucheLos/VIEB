@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import project_manager as _pm
 
 try:
     from PyQt5.QtCore import QFileSystemWatcher, QObject, QThread, QTimer, Qt, pyqtSignal
@@ -114,12 +115,18 @@ APP_CONFIG_PATH = ROOT / "app_config.json"
 
 def _results_path() -> Path:
     import vieb_config
-    return Path(vieb_config.get_results_dir())
+    try:
+        return Path(vieb_config.get_results_dir())
+    except Exception:
+        return ROOT / "projects" / "_no_active_project" / "results"
 
 
 def _clips_path() -> Path:
     import vieb_config
-    return Path(vieb_config.get_clips_dir())
+    try:
+        return Path(vieb_config.get_clips_dir())
+    except Exception:
+        return ROOT / "projects" / "_no_active_project" / "clips"
 
 
 def _validation_path() -> Path:
@@ -129,6 +136,13 @@ def _validation_path() -> Path:
 RESULTS = _results_path()
 CLIPS = _clips_path()
 VALIDATION_DIR = _validation_path()
+
+
+def _refresh_global_paths() -> None:
+    global RESULTS, CLIPS, VALIDATION_DIR
+    RESULTS = _results_path()
+    CLIPS = _clips_path()
+    VALIDATION_DIR = _validation_path()
 
 try:
     from views.analysis import AnalysisView as _AnalysisView
@@ -583,7 +597,7 @@ _STAGE_BY_ID = {s["id"]: s for s in STAGES}
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
     "results_dir": str(RESULTS),
-    "raw_videos_dir": str(ROOT / "raw_videos"),
+    "raw_videos_dir": "",
     "fps": 30,
     "window_size": [1280, 800],
     "last_view": "Overview",
@@ -619,7 +633,7 @@ _DEFAULT_CFG = {
         "cohort":     "",
         "event":      "",
     },
-    "optional_report_columns": ["fear"],
+    "optional_report_columns": [],
     "metadata_schema": {
         "id_column": "filename",
         "column_map": {
@@ -629,7 +643,7 @@ _DEFAULT_CFG = {
             "day": "day",
             "experiment": "experiment",
         },
-        "optional_columns": {"fear": "fear"},
+        "optional_columns": {},
         "analysis_groups": [
             {
                 "name": "Context",
@@ -642,13 +656,6 @@ _DEFAULT_CFG = {
                 "column": "animal_id",
                 "enabled": True,
                 "plots": ["state_fraction", "trajectory"],
-            },
-            {
-                "name": "Fear",
-                "column": "fear",
-                "enabled": True,
-                "plots": ["state_fraction"],
-                "optional": True,
             },
         ],
         "correlations": [],
@@ -706,39 +713,28 @@ _NAV_ICONS = {
 
 
 def _load_app_config() -> dict:
-    if APP_CONFIG_PATH.exists():
-        try:
-            return json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"projects": [], "active_project": "", "default_project": ""}
+    return _pm.load_app_config(APP_CONFIG_PATH)
 
 
 def _save_app_config(app_cfg: dict) -> None:
-    APP_CONFIG_PATH.write_text(json.dumps(app_cfg, indent=2), encoding="utf-8")
+    _pm.save_app_config(app_cfg, APP_CONFIG_PATH)
 
 
-def _get_project_config_path() -> Path:
+def _get_project_config_path() -> Path | None:
     """Return the config.json path for the currently active project."""
-    if APP_CONFIG_PATH.exists():
-        try:
-            app_cfg = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
-            active = app_cfg.get("active_project", "")
-            if active:
-                p = Path(active)
-                if p.exists():
-                    return p / "config.json"
-        except Exception:
-            pass
-    return CONFIG_PATH
+    try:
+        return _pm.get_active_project(ROOT, APP_CONFIG_PATH) / "config.json"
+    except _pm.ProjectSelectionError:
+        return None
 
 
 def _load_cfg():
     cfg = json.loads(json.dumps(_DEFAULT_CFG))
     path = _get_project_config_path()
-    if path.exists():
+    if path is not None and path.exists():
         try:
             cfg.update(json.loads(path.read_text(encoding="utf-8")))
+            cfg.update(_pm.normalize_project_config(cfg, path.parent))
         except Exception:
             pass
     if "arena_bounds" not in cfg:
@@ -750,49 +746,10 @@ def _load_cfg():
 
 
 def _save_cfg(cfg):
-    _get_project_config_path().write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
-
-def _migrate_to_project() -> Path:
-    """Create projects/luna_fear_conditioning/ from the existing ROOT/config.json.
-
-    Called silently on first launch when no app_config.json exists.
-    Returns the new project directory path.
-    """
-    projects_dir = ROOT / "projects"
-    projects_dir.mkdir(exist_ok=True)
-
-    # Read existing config (or use defaults)
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            cfg = json.loads(json.dumps(_DEFAULT_CFG))
-    else:
-        cfg = json.loads(json.dumps(_DEFAULT_CFG))
-
-    # Ensure paths are absolute
-    for key in ("results_dir", "raw_videos_dir"):
-        val = cfg.get(key, "")
-        if val and not Path(val).is_absolute():
-            cfg[key] = str((ROOT / val).resolve())
-
-    # Derive project folder name from project_name or default
-    project_name = cfg.get("project_name", "VIEB Project")
-    import re as _re
-    slug = project_name.lower().strip()
-    slug = _re.sub(r"[^\w\s-]", "", slug)
-    slug = _re.sub(r"[\s_-]+", "_", slug)
-    slug = slug.strip("_") or "vieb_project"
-
-    project_dir = projects_dir / slug
-    # If directory already exists (e.g. a previous partial migration), use it
-    project_dir.mkdir(exist_ok=True)
-
-    project_cfg_path = project_dir / "config.json"
-    project_cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
-    return project_dir
+    path = _get_project_config_path()
+    if path is None:
+        return
+    _pm.write_project_config(path.parent, cfg)
 
 
 def _fmt_ts(ts):
@@ -1013,6 +970,12 @@ class PipelineRunner(QThread):
     def run(self):
         ok_all = True
         try:
+            try:
+                _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            except _pm.ProjectSelectionError:
+                self.log.emit("No valid project selected. Complete Project Onboarding before running the pipeline.\n")
+                self.all_done.emit(False)
+                return
             fps = float(self.cfg.get("fps", 30))
             mcs = int(self.cfg.get("min_cluster_size", 50))
             collapse_threshold = float(self.cfg.get("collapse_threshold", 0.5))
@@ -2234,12 +2197,352 @@ class StageRow(QFrame):
         self._from_btn.setEnabled(enabled)
 
 
+class ProjectOnboardingPanel(QFrame):
+    project_changed = pyqtSignal()
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self._path_inputs: dict[str, QLineEdit] = {}
+        self._setting_inputs: dict[str, QWidget] = {}
+        self.setObjectName("projectOnboarding")
+        self.setStyleSheet(
+            "QFrame#projectOnboarding{background:#FFFFFF;border:1px solid #D9E2EC;border-radius:6px;}"
+            "QLabel[muted='true']{color:#667085;}"
+        )
+        self._build()
+        self.refresh()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("Step 0: Project Onboarding")
+        title.setFont(QFont("Arial", 13, QFont.Bold))
+        header.addWidget(title)
+        header.addStretch()
+        self._status_badge = QLabel("checking")
+        self._status_badge.setStyleSheet("padding:3px 8px;border-radius:4px;background:#F2F4F7;color:#344054;")
+        header.addWidget(self._status_badge)
+        lay.addLayout(header)
+
+        self._project_label = QLabel("")
+        self._project_label.setWordWrap(True)
+        self._project_label.setProperty("muted", "true")
+        lay.addWidget(self._project_label)
+
+        actions = QHBoxLayout()
+        self._create_btn = QPushButton("Create New Project")
+        self._create_btn.clicked.connect(self._create_project)
+        self._open_btn = QPushButton("Open Existing Project")
+        self._open_btn.clicked.connect(self._open_existing)
+        self._detect_btn = QPushButton("Auto-detect Projects")
+        self._detect_btn.clicked.connect(self._auto_detect)
+        self._set_btn = QPushButton("Set Active Project")
+        self._set_btn.clicked.connect(self._set_active_from_field)
+        self._legacy_btn = QPushButton("Migrate/Register Legacy Project")
+        self._legacy_btn.clicked.connect(self._register_legacy)
+        for btn in (self._create_btn, self._open_btn, self._detect_btn, self._set_btn, self._legacy_btn):
+            actions.addWidget(btn)
+        actions.addStretch()
+        lay.addLayout(actions)
+
+        self._active_path = QLineEdit()
+        self._active_path.setPlaceholderText("Project folder path")
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(lambda: self._browse_dir(self._active_path))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Project:"))
+        row.addWidget(self._active_path, stretch=1)
+        row.addWidget(browse)
+        lay.addLayout(row)
+
+        self._checklist = QVBoxLayout()
+        lay.addLayout(self._checklist)
+
+        self._suggested = QLabel("")
+        self._suggested.setWordWrap(True)
+        self._suggested.setStyleSheet("color:#475467;font-weight:600;")
+        lay.addWidget(self._suggested)
+
+        paths_box = QGroupBox("Project Paths")
+        form = QFormLayout(paths_box)
+        for key, label, is_file in (
+            ("raw_videos", "Raw video folder", False),
+            ("pose_files", "Pose file folder", False),
+            ("pose_h5", "Shared H5 pose file", True),
+            ("metadata", "Metadata CSV", True),
+            ("results", "Results folder", False),
+            ("external_data_root", "External data root", False),
+        ):
+            le = QLineEdit()
+            btn = QPushButton("Browse...")
+            btn.clicked.connect(lambda _=False, target=le, file_mode=is_file: self._browse_file_or_dir(target, file_mode))
+            wrap = QWidget()
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(le)
+            h.addWidget(btn)
+            form.addRow(label + ":", wrap)
+            self._path_inputs[key] = le
+        lay.addWidget(paths_box)
+
+        meta_actions = QHBoxLayout()
+        for text, cb in (
+            ("Use Existing Metadata CSV", lambda: self._browse_file_or_dir(self._path_inputs["metadata"], True)),
+            ("Create Metadata From Filenames", self._create_metadata_from_manifest),
+            ("Create Metadata From Video/Pose Manifest", self._create_metadata_from_manifest),
+            ("Open Metadata Mapper", self._open_metadata_mapper),
+        ):
+            btn = QPushButton(text)
+            btn.clicked.connect(cb)
+            meta_actions.addWidget(btn)
+        meta_actions.addStretch()
+        lay.addLayout(meta_actions)
+
+        settings_box = QGroupBox("Core Settings")
+        sform = QFormLayout(settings_box)
+        self._fps = QDoubleSpinBox()
+        self._fps.setRange(1, 1000)
+        self._fps.setValue(float(self.cfg.get("fps", 30)))
+        self._confidence = QDoubleSpinBox()
+        self._confidence.setRange(0, 1)
+        self._confidence.setSingleStep(0.05)
+        self._confidence.setValue(float(self.cfg.get("min_confidence", 0.7)))
+        self._wavelets = QCheckBox("Enabled")
+        self._wavelets.setChecked(bool(self.cfg.get("use_wavelets", True)))
+        self._umap_dims = QSpinBox()
+        self._umap_dims.setRange(2, 100)
+        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
+        self._min_cluster = QSpinBox()
+        self._min_cluster.setRange(2, 1000000)
+        self._min_cluster.setValue(int(self.cfg.get("min_cluster_size", 2000)))
+        self._min_samples = QSpinBox()
+        self._min_samples.setRange(0, 1000000)
+        self._min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
+        self._sample_size = QSpinBox()
+        self._sample_size.setRange(0, 10000000)
+        self._sample_size.setValue(int(self.cfg.get("hdbscan_sample_size", 0)))
+        self._groups = QLineEdit(",".join(self.cfg.get("enabled_analysis_groups", [])))
+        self._panels = QLineEdit(",".join(k for k, v in (self.cfg.get("ui_panels") or {}).items() if isinstance(v, dict) and v.get("enabled")))
+        for label, widget in (
+            ("FPS", self._fps),
+            ("Confidence threshold", self._confidence),
+            ("Use wavelets", self._wavelets),
+            ("UMAP dims", self._umap_dims),
+            ("HDBSCAN min cluster size", self._min_cluster),
+            ("HDBSCAN min samples", self._min_samples),
+            ("HDBSCAN sample size", self._sample_size),
+            ("Enabled analysis groups", self._groups),
+            ("Enabled optional panels", self._panels),
+        ):
+            sform.addRow(label + ":", widget)
+        lay.addWidget(settings_box)
+
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        save = QPushButton("Save Project Setup")
+        save.setProperty("primary", "true")
+        save.clicked.connect(self._save_setup)
+        save_row.addWidget(save)
+        lay.addLayout(save_row)
+
+    def _clear_checklist(self):
+        while self._checklist.count():
+            item = self._checklist.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _add_check(self, check: _pm.Check):
+        colors = {
+            "green": ("#ECFDF3", "#027A48"),
+            "yellow": ("#FFFAEB", "#B54708"),
+            "red": ("#FEF3F2", "#B42318"),
+        }
+        bg, fg = colors.get(check.status, colors["yellow"])
+        row = QLabel(f"{check.label}: {check.message}")
+        row.setWordWrap(True)
+        row.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:5px 8px;")
+        self._checklist.addWidget(row)
+
+    def refresh(self):
+        selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        legacy = _pm.detect_legacy_project(ROOT)
+        self._legacy_btn.setVisible(bool(legacy.get("detected")))
+        self._clear_checklist()
+        if selected.active_project:
+            validation = _pm.validate_project(selected.active_project)
+            self._active_path.setText(str(selected.active_project))
+            self._project_label.setText(f"{validation.project_name}\n{validation.path}")
+            self._status_badge.setText(validation.status)
+            self._status_badge.setStyleSheet(
+                "padding:3px 8px;border-radius:4px;"
+                + ("background:#ECFDF3;color:#027A48;" if validation.valid else "background:#FEF3F2;color:#B42318;")
+            )
+            for check in validation.checks:
+                self._add_check(check)
+            self._suggested.setText("Suggested next action: continue with the next incomplete pipeline stage." if validation.valid else "Suggested next action: complete the red checklist items before running the pipeline.")
+            cfg = validation.config
+            for key, le in self._path_inputs.items():
+                value = (cfg.get("paths") or {}).get(key, "")
+                le.setText("" if value is None else str(value))
+        else:
+            self._project_label.setText("No valid project selected.")
+            self._status_badge.setText("onboarding required")
+            self._status_badge.setStyleSheet("padding:3px 8px;border-radius:4px;background:#FEF3F2;color:#B42318;")
+            self._add_check(_pm.Check("active_project", "project directory exists", "red", "No valid project selected."))
+            if selected.action == "picker_required":
+                self._suggested.setText("Suggested next action: choose one of the detected projects or set a project path explicitly.")
+            elif legacy.get("detected"):
+                self._suggested.setText("Suggested next action: migrate or register the detected legacy repo-root state.")
+            else:
+                self._suggested.setText("Suggested next action: create a new project or open an existing project.")
+
+    def _browse_dir(self, le: QLineEdit):
+        d = QFileDialog.getExistingDirectory(self, "Select Folder", le.text() or str(ROOT))
+        if d:
+            le.setText(d)
+
+    def _browse_file_or_dir(self, le: QLineEdit, file_mode: bool):
+        if file_mode:
+            p, _ = QFileDialog.getOpenFileName(self, "Select File", le.text() or str(ROOT), "All files (*)")
+            if p:
+                le.setText(p)
+        else:
+            self._browse_dir(le)
+
+    def _create_project(self):
+        from views.project_selector import NewProjectDialog
+        dlg = NewProjectDialog(_load_app_config(), self)
+        if dlg.exec_() == QDialog.Accepted and dlg.created_path:
+            self.project_changed.emit()
+            self.refresh()
+
+    def _open_existing(self):
+        d = QFileDialog.getExistingDirectory(self, "Open Existing Project", str(ROOT / "projects"))
+        if d:
+            self._active_path.setText(d)
+            self._set_active_from_field()
+
+    def _auto_detect(self):
+        detected = _pm.detect_projects(repo_root=ROOT, app_config_path=APP_CONFIG_PATH)
+        if len(detected) == 1:
+            app_cfg = _load_app_config()
+            app_cfg["active_project"] = str(detected[0].path)
+            _save_app_config(app_cfg)
+            self.project_changed.emit()
+        elif len(detected) > 1:
+            from views.project_selector import ProjectSelectorDialog
+            app_cfg = _load_app_config()
+            app_cfg["projects"] = [{"name": d.project_name, "path": str(d.path), "last_opened": ""} for d in detected]
+            dlg = ProjectSelectorDialog(app_cfg, self)
+            if dlg.exec_() == QDialog.Accepted:
+                self.project_changed.emit()
+        else:
+            QMessageBox.information(self, "Auto-detect Projects", "No valid projects were found.")
+        self.refresh()
+
+    def _set_active_from_field(self):
+        path = Path(self._active_path.text().strip()).expanduser()
+        validation = _pm.validate_project(path)
+        if not validation.valid:
+            QMessageBox.warning(self, "Set Active Project", "That folder is not a valid VIEB project yet.")
+            self.refresh()
+            return
+        app_cfg = _load_app_config()
+        app_cfg["active_project"] = str(validation.path)
+        _save_app_config(app_cfg)
+        self.project_changed.emit()
+        self.refresh()
+
+    def _register_legacy(self):
+        reply = QMessageBox.question(
+            self,
+            "Legacy Project",
+            "Register the repo root as a legacy project?\n\nThis writes config.json but does not move or delete existing data.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            _pm.register_legacy_project(ROOT, APP_CONFIG_PATH)
+            self.project_changed.emit()
+            self.refresh()
+
+    def _save_setup(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            QMessageBox.warning(self, "Project Setup", "No valid project selected. Complete Project Onboarding before running the pipeline.")
+            return
+        cfg = _pm.load_active_project_config(ROOT, APP_CONFIG_PATH)
+        paths = cfg.setdefault("paths", {})
+        for key, le in self._path_inputs.items():
+            text = le.text().strip()
+            paths[key] = text or None
+        cfg["fps"] = self._fps.value()
+        cfg["min_confidence"] = self._confidence.value()
+        cfg["use_wavelets"] = self._wavelets.isChecked()
+        cfg["umap_dims"] = self._umap_dims.value()
+        cfg["min_cluster_size"] = self._min_cluster.value()
+        cfg["hdbscan_min_samples"] = self._min_samples.value()
+        cfg["hdbscan_sample_size"] = self._sample_size.value()
+        cfg["enabled_analysis_groups"] = [x.strip() for x in self._groups.text().split(",") if x.strip()]
+        cfg["pipeline_settings"] = {
+            "fps": cfg["fps"],
+            "confidence_threshold": cfg["min_confidence"],
+            "use_wavelets": cfg["use_wavelets"],
+            "umap_dims": cfg["umap_dims"],
+            "hdbscan_min_cluster_size": cfg["min_cluster_size"],
+            "hdbscan_min_samples": cfg["hdbscan_min_samples"],
+            "hdbscan_sample_size": cfg["hdbscan_sample_size"],
+        }
+        _pm.write_project_config(project, cfg)
+        self.project_changed.emit()
+        self.refresh()
+
+    def _create_metadata_from_manifest(self):
+        try:
+            from metadata_generator import generate_metadata_template, write_metadata_csv
+            raw = self._path_inputs["raw_videos"].text().strip() or None
+            h5 = self._path_inputs["pose_h5"].text().strip() or None
+            df = generate_metadata_template(raw_videos_dir=raw, h5_path=h5)
+            target = self._path_inputs["metadata"].text().strip()
+            if not target:
+                project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+                target = str(project / "metadata.csv")
+                self._path_inputs["metadata"].setText(target)
+            write_metadata_csv(df, target)
+            QMessageBox.information(self, "Metadata", f"Metadata template created with {len(df)} row(s).")
+        except Exception as exc:
+            QMessageBox.warning(self, "Metadata", f"Could not create metadata:\n{exc}")
+
+    def _open_metadata_mapper(self):
+        try:
+            from views.metadata_mapper import MetadataMapperWidget
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Metadata Mapper")
+            dlg.resize(860, 620)
+            lay = QVBoxLayout(dlg)
+            widget = MetadataMapperWidget(self.cfg, dlg)
+            lay.addWidget(widget)
+            btns = QDialogButtonBox(QDialogButtonBox.Close)
+            btns.rejected.connect(dlg.reject)
+            lay.addWidget(btns)
+            dlg.exec_()
+            self.project_changed.emit()
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.information(self, "Metadata Mapper", f"Metadata mapper is unavailable:\n{exc}")
+
+
 class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
     navigate_dlc = pyqtSignal()
     cluster_finished = pyqtSignal()
     navigate_help = pyqtSignal(str)
+    project_changed = pyqtSignal()
 
     def __init__(self, cfg):
         super().__init__()
@@ -2290,6 +2593,10 @@ class RunPipelineView(QWidget):
         self._status = QLabel("")
         self._status.setStyleSheet("color:#666;")
         lay.addWidget(self._status)
+
+        self._project_panel = ProjectOnboardingPanel(self.cfg, self)
+        self._project_panel.project_changed.connect(self.project_changed.emit)
+        lay.addWidget(self._project_panel)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2476,7 +2783,20 @@ class RunPipelineView(QWidget):
             row.set_eta(f"~{mins} min")
 
     def update_from_cfg(self):
-        ss = self.cfg.get("stage_status", {})
+        ss = dict(self.cfg.get("stage_status", {}))
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            resume = _pm.resume_status(project)
+            if resume["features"]:
+                ss["2"] = "done"
+            if resume["clusters"]:
+                ss["3"] = "done"
+            if resume["reports"]:
+                ss["8"] = "done"
+            if resume["motifs"]:
+                ss["10"] = "done"
+        except _pm.ProjectSelectionError:
+            pass
         ts = self.cfg.get("stage_last_run", {})
         for sid, row in self._rows.items():
             row.set_status(ss.get(_state_key(sid), "pending"))
@@ -2512,6 +2832,20 @@ class RunPipelineView(QWidget):
 
     def _start_worker(self, stage_ids):
         if self._worker and self._worker.isRunning():
+            return
+        try:
+            _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._status.setText("No valid project selected. Complete Project Onboarding before running the pipeline.")
+            QMessageBox.warning(
+                self,
+                "Project Required",
+                "No valid project selected. Complete Project Onboarding before running the pipeline.",
+            )
+            self._project_panel.refresh()
+            return
+        if not stage_ids:
+            self._status.setText("All selected stages are already complete. Choose a stage explicitly to rerun.")
             return
         self._worker = PipelineRunner(stage_ids, self.cfg)
         self._active_stages = set(stage_ids)
@@ -2623,7 +2957,11 @@ class RunPipelineView(QWidget):
 
         if not self.cfg.get("enable_state_collapse", False):
             all_ids = [i for i in all_ids if i != 7]
-        if _has_pose_csvs(Path(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))):
+        try:
+            raw_dir = Path(_pm.resolve_project_path("raw_videos", ROOT, APP_CONFIG_PATH))
+        except _pm.ProjectSelectionError:
+            raw_dir = Path("__missing_project__")
+        if _has_pose_csvs(raw_dir):
             if 1 in all_ids:
                 all_ids.remove(1)
                 self._rows[1].set_status("done")
@@ -3265,7 +3603,12 @@ class ValidationView(QWidget):
         for idx, row in sub.iterrows():
             stem = row["stem"]
             info = fi.get(stem, {}) if isinstance(fi, dict) else {}
-            sub.at[idx, "video_path"] = info.get("video_path", str(ROOT / "raw_videos" / f"{stem}.mp4"))
+            try:
+                raw_dir = _pm.resolve_project_path("raw_videos", ROOT, APP_CONFIG_PATH)
+                default_video = str(raw_dir / f"{stem}.mp4")
+            except _pm.ProjectSelectionError:
+                default_video = ""
+            sub.at[idx, "video_path"] = info.get("video_path", default_video)
             sub.at[idx, "csv_path"] = info.get("csv_path", "")
         VALIDATION_DIR.mkdir(parents=True, exist_ok=True)
         sub.to_csv(VALIDATION_DIR / "current_sample.csv", index=False)
@@ -4519,6 +4862,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._init_project()
+        _refresh_global_paths()
         self.cfg = _load_cfg()
         self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
         self.setMinimumSize(1024, 768)
@@ -4729,6 +5073,7 @@ class MainWindow(QMainWindow):
         self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
         self._pv.cluster_finished.connect(self._show_cluster_runs)
         self._pv.navigate_help.connect(self._navigate_to_help)
+        self._pv.project_changed.connect(self._on_project_changed)
         add("Pipeline", self._pv)
 
         if _HAS_CLUSTER_RUNS_VIEW:
@@ -4792,6 +5137,8 @@ class MainWindow(QMainWindow):
                 )
                 self._setup_banner_btn.hide()
                 self._setup_banner.show()
+        elif getattr(self, "_project_onboarding_required", False):
+            self._switch("Pipeline")
         else:
             self._switch(self.cfg.get("last_view", "Overview"))
 
@@ -4899,6 +5246,15 @@ class MainWindow(QMainWindow):
         _save_cfg(self.cfg)
         self._refresh_view_labels()
         self._load_data()
+
+    def _on_project_changed(self):
+        _refresh_global_paths()
+        self.cfg = _load_cfg()
+        self._propagate_cfg()
+        self._refresh_project_label()
+        self._load_data()
+        if hasattr(self._pv, "_project_panel"):
+            self._pv._project_panel.refresh()
 
     def _refresh_view_labels(self) -> None:
         """Re-read vocabulary labels from config and push them to live views."""
@@ -5230,89 +5586,33 @@ class MainWindow(QMainWindow):
     # ── Project management ────────────────────────────────────────────────────
 
     def _init_project(self):
-        """Ensure an active project is selected before the window is built.
-
-        FIRST LAUNCH (no projects in app_config.json):
-          If a legacy ROOT/config.json exists, silently migrate it into
-          projects/<slug>/. Otherwise show the minimal two-screen
-          WelcomeDialog onboarding flow (no ProjectSelectorDialog).
-
-        SUBSEQUENT LAUNCHES:
-          Auto-load "default_project" if set, otherwise the project with the
-          most recent "last_opened" timestamp. No dialog is shown. The chosen
-          project's "last_opened" is updated on every launch.
-        """
+        """Resolve startup project without silently using legacy root state."""
         self._is_new_project = False
         self._new_project_pose_source = "none"
-
-        app_cfg = _load_app_config()
-
-        if not app_cfg.get("projects"):
-            # ── Legacy upgrade: silently migrate existing config.json ──────
-            if CONFIG_PATH.exists():
-                project_dir = _migrate_to_project()
-                now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                try:
-                    cfg_text = (project_dir / "config.json").read_text(encoding="utf-8")
-                    name = json.loads(cfg_text).get("project_name", "Luna Fear Conditioning")
-                except Exception:
-                    name = "Luna Fear Conditioning"
-                app_cfg = {
-                    "projects": [
-                        {"name": name, "path": str(project_dir), "last_opened": now}
-                    ],
-                    "active_project": str(project_dir),
-                    "default_project": "",
-                }
-                _save_app_config(app_cfg)
+        self._project_onboarding_required = False
+        self._startup_selection = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        if self._startup_selection.action in ("use_active", "auto_selected"):
+            return
+        if self._startup_selection.action == "picker_required":
+            from views.project_selector import ProjectSelectorDialog
+            dlg = ProjectSelectorDialog(_load_app_config(), None)
+            if dlg.exec_() == QDialog.Accepted and dlg.selected_path:
                 return
-
-            # ── True first launch: minimal onboarding ──────────────────────
-            from views.project_selector import WelcomeDialog
-            while True:
-                dlg = WelcomeDialog(app_cfg, None, first_launch=True)
-                if dlg.exec_() == QDialog.Accepted and dlg.created_path:
-                    self._is_new_project = True
-                    self._new_project_pose_source = dlg.pose_source
-                    return
-                # User cancelled — a project is required to continue.
-
-        # ── Subsequent launches: auto-load, no dialog ──────────────────────
-        projects = app_cfg.get("projects", [])
-        default = app_cfg.get("default_project", "")
-
-        if default and Path(default).exists():
-            active = default
-        else:
-            valid = [p for p in projects if Path(p.get("path", "")).exists()]
-            if valid:
-                def _last_opened_key(p):
-                    try:
-                        return datetime.strptime(p.get("last_opened", ""), "%Y-%m-%d %H:%M")
-                    except Exception:
-                        return datetime.min
-                active = max(valid, key=_last_opened_key)["path"]
-            else:
-                active = app_cfg.get("active_project", "")
-
-        app_cfg["active_project"] = active
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        for p in projects:
-            if p.get("path") == active:
-                p["last_opened"] = now
-        _save_app_config(app_cfg)
+        self._project_onboarding_required = True
 
     def _refresh_project_label(self):
         """Update the sidebar project name label from the active project's config."""
         app_cfg = _load_app_config()
         active = app_cfg.get("active_project", "")
         name = "—"
+        status = "No valid project"
         if active:
             cfg_path = Path(active) / "config.json"
             if cfg_path.exists():
                 try:
                     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
                     name = cfg.get("project_name", Path(active).name)
+                    status = _pm.validate_project(active).status
                 except Exception:
                     name = Path(active).name
             else:
@@ -5321,10 +5621,12 @@ class MainWindow(QMainWindow):
                     if p.get("path") == active:
                         name = p.get("name", name)
                         break
+                status = _pm.validate_project(active).status
         # Truncate with ellipsis
         if len(name) > 18:
             name = name[:15] + "..."
         self._proj_btn.setText(f"{name}  ▼")
+        self._proj_btn.setToolTip(f"{status}\n{active or 'No project selected'}")
 
     def _open_project_menu(self):
         app_cfg = _load_app_config()
@@ -5341,10 +5643,39 @@ class MainWindow(QMainWindow):
                 lambda checked=False, p=path: self._switch_project(p)
             )
         menu.addSeparator()
+        menu.addAction("Open Existing Project...").triggered.connect(self._open_existing_project_from_menu)
+        menu.addAction("Auto-detect Projects").triggered.connect(self._auto_detect_projects_from_menu)
         menu.addAction("＋  New Project...").triggered.connect(self._new_project_from_menu)
 
         btn_pos = self._proj_btn.mapToGlobal(self._proj_btn.rect().bottomLeft())
         menu.exec_(btn_pos)
+
+    def _open_existing_project_from_menu(self):
+        path = QFileDialog.getExistingDirectory(self, "Open Existing Project", str(ROOT / "projects"))
+        if not path:
+            return
+        validation = _pm.validate_project(path)
+        if not validation.valid:
+            QMessageBox.warning(self, "Open Project", "That folder is not a valid VIEB project yet.")
+            return
+        app_cfg = _load_app_config()
+        app_cfg["active_project"] = str(validation.path)
+        _save_app_config(app_cfg)
+        self._do_switch(str(validation.path))
+
+    def _auto_detect_projects_from_menu(self):
+        detected = _pm.detect_projects(repo_root=ROOT, app_config_path=APP_CONFIG_PATH)
+        if len(detected) == 1:
+            self._do_switch(str(detected[0].path))
+        elif len(detected) > 1:
+            from views.project_selector import ProjectSelectorDialog
+            app_cfg = _load_app_config()
+            app_cfg["projects"] = [{"name": d.project_name, "path": str(d.path), "last_opened": ""} for d in detected]
+            dlg = ProjectSelectorDialog(app_cfg, self)
+            if dlg.exec_() == QDialog.Accepted and dlg.selected_path:
+                self._do_switch(dlg.selected_path)
+        else:
+            QMessageBox.information(self, "Auto-detect Projects", "No valid projects were found.")
 
     def _switch_project(self, path: str):
         active = _load_app_config().get("active_project", "")
@@ -5372,6 +5703,7 @@ class MainWindow(QMainWindow):
                 p["last_opened"] = now
         _save_app_config(app_cfg)
 
+        _refresh_global_paths()
         self.cfg = _load_cfg()
         self._propagate_cfg()
         self._load_data()
@@ -5392,6 +5724,9 @@ class MainWindow(QMainWindow):
             self._pv.update_from_cfg()
         if hasattr(self._setv, "load_from_cfg"):
             self._setv.load_from_cfg()
+        if hasattr(self._pv, "_project_panel"):
+            self._pv._project_panel.cfg = self.cfg
+            self._pv._project_panel.refresh()
 
     def _new_project_from_menu(self):
         from views.project_selector import WelcomeDialog

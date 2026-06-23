@@ -6,6 +6,9 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+import csv
+
+import project_manager as _pm
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -32,6 +35,35 @@ from PyQt5.QtWidgets import (
 )
 
 from _utils import APP_CONFIG_PATH, ROOT
+
+
+def _ensure_project_scaffold(folder: Path) -> None:
+    (folder / "raw_videos").mkdir(exist_ok=True)
+    (folder / "results").mkdir(exist_ok=True)
+    (folder / "logs").mkdir(exist_ok=True)
+    template = folder / "metadata_template.csv"
+    if not template.exists():
+        with template.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                "session_id", "stem", "subject_id", "animal_id",
+                "context", "condition", "day", "timepoint",
+            ])
+
+
+def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
+    cfg["paths"] = {
+        "raw_videos": cfg.get("raw_videos_dir") or str(folder / "raw_videos"),
+        "pose_files": cfg.get("pose_files_dir", ""),
+        "pose_h5": cfg.get("h5_path") or None,
+        "metadata": cfg.get("metadata_csv_path") or str(folder / "metadata_template.csv"),
+        "results": cfg.get("results_dir") or str(folder / "results"),
+        "external_data_root": cfg.get("external_data_root", ""),
+    }
+    cfg.setdefault("metadata_schema", {})
+    cfg.setdefault("analysis_groups", [])
+    cfg.setdefault("ui_panels", {})
+    cfg.setdefault("pipeline_settings", {})
+    return _pm.normalize_project_config(cfg, folder)
 
 # Full default config for new projects (canonical set of keys)
 _NEW_PROJECT_DEFAULTS: dict = {
@@ -94,6 +126,10 @@ def load_app_config() -> dict:
 
 
 def save_app_config(app_cfg: dict) -> None:
+    active = app_cfg.get("active_project")
+    if active:
+        recent = [p for p in app_cfg.get("recent_projects", []) if p != active]
+        app_cfg["recent_projects"] = [active, *recent][:20]
     APP_CONFIG_PATH.write_text(json.dumps(app_cfg, indent=2), encoding="utf-8")
 
 
@@ -184,7 +220,7 @@ class WelcomeDialog(QDialog):
         v.addWidget(title)
 
         self._name = QLineEdit()
-        self._name.setPlaceholderText("e.g. Luna Fear Conditioning")
+        self._name.setPlaceholderText("e.g. Spence Lab Open Field")
         self._name.textChanged.connect(self._on_name_changed)
         v.addWidget(self._name)
 
@@ -265,7 +301,8 @@ class WelcomeDialog(QDialog):
         cfg["raw_videos_dir"] = str(folder / "raw_videos")
         cfg["pose_source"] = self.pose_source
 
-        (folder / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        _ensure_project_scaffold(folder)
+        _pm.write_project_config(folder, _apply_nested_paths(cfg, folder))
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.app_cfg.setdefault("projects", []).append(
@@ -428,7 +465,7 @@ class NewProjectDialog(QDialog):
         form.setVerticalSpacing(8)
 
         self._name = QLineEdit()
-        self._name.setPlaceholderText("e.g. Luna Fear Conditioning")
+        self._name.setPlaceholderText("e.g. Spence Lab Open Field")
         self._name.textChanged.connect(self._on_name_changed)
         form.addRow("Project name *:", self._name)
 
@@ -755,9 +792,8 @@ class NewProjectDialog(QDialog):
             if dlc_yaml:
                 cfg["dlc_project_path"] = str(Path(dlc_yaml).parent)
 
-        (folder / "config.json").write_text(
-            json.dumps(cfg, indent=2), encoding="utf-8"
-        )
+        _ensure_project_scaffold(folder)
+        _pm.write_project_config(folder, _apply_nested_paths(cfg, folder))
 
         # Register in app_config
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
