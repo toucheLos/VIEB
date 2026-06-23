@@ -87,6 +87,8 @@ class DataLoader(QThread):
             data["labels_per_frame"] = _csv("characterization/labels_per_frame.csv")
             data["validation_labels"] = _csv("validation/frame_labels.csv")
             data["validation_sample"] = _csv("validation/current_sample.csv")
+            data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
+            data["state_occupancy"] = _csv("diagnostics/state_occupancy.csv")
 
             meta_p = ROOT / "metadata.csv"
             data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
@@ -120,11 +122,12 @@ class PipelineRunner(QThread):
         self.stage_ids = stage_ids
         self.cfg = cfg
 
-    def _run_subprocess(self, args):
+    def _run_subprocess(self, args, python_exe: str | None = None):
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        python_exe = python_exe or sys.executable
         p = subprocess.Popen(
-            [sys.executable, "-u", *args],
+            [python_exe, "-u", *args],
             cwd=str(ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -138,6 +141,29 @@ class PipelineRunner(QThread):
             self.log.emit(line)
         rc = p.wait()
         return rc == 0
+
+    def _configured_python(self, key: str, fallback: str | None = None) -> str:
+        candidate = str(self.cfg.get(key) or "").strip()
+        if candidate and Path(candidate).exists():
+            return candidate
+        if key == "dlc_python":
+            dlc_python = ROOT / "venv-dlc" / "bin" / "python"
+            if dlc_python.exists():
+                return str(dlc_python)
+        return fallback or sys.executable
+
+    def _analysis_python(self) -> str:
+        configured = str(
+            self.cfg.get("analysis_python")
+            or self.cfg.get("gpu_python")
+            or ""
+        ).strip()
+        if configured and Path(configured).exists():
+            return configured
+        gpu_python = ROOT / "venv-gpu" / "bin" / "python"
+        if gpu_python.exists():
+            return str(gpu_python)
+        return sys.executable
 
     def _run_cluster_wsl(self, fps: float, mcs: int) -> bool:
         """Run compare.py --cluster inside WSL2 using venv_wsl (GPU via cuML)."""
@@ -204,7 +230,7 @@ class PipelineRunner(QThread):
                             ]
                             if hdbscan_min_samples:
                                 cluster_args += ["--hdbscan-min-samples", str(hdbscan_min_samples)]
-                            ok = self._run_subprocess(cluster_args)
+                            ok = self._run_subprocess(cluster_args, python_exe=self._analysis_python())
                         if ok:
                             for b in (3, 4, 5, 6):
                                 self.stage_done.emit(b, True)
@@ -221,7 +247,10 @@ class PipelineRunner(QThread):
                 self.stage_started.emit(sid)
                 try:
                     if sid == 1:
-                        ok = self._run_subprocess(["setup_dlc_training.py", "--analyze"])
+                        ok = self._run_subprocess(
+                            ["setup_dlc_training.py", "--analyze"],
+                            python_exe=self._configured_python("dlc_python"),
+                        )
                         if not ok:
                             raise RuntimeError("Pose estimation failed.")
                     elif sid == 2:
@@ -430,3 +459,85 @@ class _CohortWorker(QThread):
         for line in p.stdout:
             self.log.emit(line)
         self.done.emit(p.wait() == 0)
+
+
+class MotifClipWorker(QThread):
+    log = pyqtSignal(str)
+    done = pyqtSignal(bool)
+
+    def __init__(self, cfg: dict, top_motifs: int = 10,
+                 clips_per_motif: int = 5, clip_padding_sec: float = 1.0):
+        super().__init__()
+        self.cfg = cfg
+        self._top = top_motifs
+        self._per = clips_per_motif
+        self._pad = clip_padding_sec
+
+    def run(self):
+        cap = _Capture()
+        cap.text.connect(self.log)
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = cap
+        ok = False
+        try:
+            sys.path.insert(0, str(ROOT))
+            from generate_clips import cmd_motif_clips
+            cmd_motif_clips(
+                fps=float(self.cfg.get("fps", 30)),
+                top_motifs=self._top,
+                clips_per_motif=self._per,
+                clip_padding_sec=self._pad,
+            )
+            ok = True
+        except Exception:
+            print(traceback.format_exc())
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+        self.done.emit(ok)
+
+
+class ArtifactExportWorker(QThread):
+    log = pyqtSignal(str)
+    done = pyqtSignal(bool)
+
+    def __init__(self, mode: str, out_path: str, category: str | None = None,
+                 selected_paths: list[str] | None = None):
+        super().__init__()
+        self.mode = mode
+        self.out_path = out_path
+        self.category = category
+        self.selected_paths = selected_paths or []
+
+    def run(self):
+        try:
+            import zipfile
+            from artifact_scanner import scan_artifacts, build_publication_bundle
+
+            if self.mode == "publication":
+                build_publication_bundle(str(RESULTS), self.out_path)
+                self.log.emit("Publication bundle created.\n")
+            elif self.mode == "all":
+                artifacts = scan_artifacts(str(RESULTS))
+                with zipfile.ZipFile(self.out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for a in artifacts:
+                        zf.write(a["abs_path"], a["rel_path"])
+                        self.log.emit(f"Added: {a['rel_path']}\n")
+            elif self.mode == "category":
+                artifacts = scan_artifacts(str(RESULTS))
+                filtered = [a for a in artifacts
+                            if a["category"].lower() == (self.category or "").lower()]
+                with zipfile.ZipFile(self.out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for a in filtered:
+                        zf.write(a["abs_path"], a["rel_path"])
+                        self.log.emit(f"Added: {a['rel_path']}\n")
+            elif self.mode == "selected":
+                with zipfile.ZipFile(self.out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for p in self.selected_paths:
+                        if os.path.exists(p):
+                            rel = os.path.relpath(p, str(RESULTS))
+                            zf.write(p, rel)
+                            self.log.emit(f"Added: {rel}\n")
+            self.done.emit(True)
+        except Exception:
+            self.log.emit(traceback.format_exc())
+            self.done.emit(False)

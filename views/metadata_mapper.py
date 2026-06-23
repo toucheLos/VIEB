@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QComboBox,
+    QDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -253,10 +254,18 @@ class MetadataMapperWidget(QWidget):
         lay.addLayout(btn_row)
 
         # ── Preview table ─────────────────────────────────────────────────
+        preview_row = QHBoxLayout()
         preview_lbl = QLabel("Preview — first 5 rows (mapped columns only):")
         preview_lbl.setFont(QFont("Arial", 10, QFont.Bold))
         preview_lbl.setStyleSheet("margin-top: 6px;")
-        lay.addWidget(preview_lbl)
+        preview_row.addWidget(preview_lbl)
+        preview_row.addStretch()
+        popout_btn = QPushButton("Pop Out")
+        popout_btn.setFixedHeight(24)
+        popout_btn.setToolTip("Open preview in a separate window")
+        popout_btn.clicked.connect(self._popout_preview)
+        preview_row.addWidget(popout_btn)
+        lay.addLayout(preview_row)
 
         self._preview_table = QTableWidget()
         self._preview_table.setAlternatingRowColors(True)
@@ -326,13 +335,64 @@ class MetadataMapperWidget(QWidget):
         """Re-run auto-detection and update combos."""
         csv_path = self.cfg.get("metadata_csv_path", "")
         if not csv_path or not Path(csv_path).exists():
+            QMessageBox.warning(
+                self, "No CSV",
+                "No metadata CSV configured. Select one in Settings first."
+            )
             return
         headers = _read_csv_headers(csv_path)
+        if not headers:
+            QMessageBox.warning(
+                self, "Empty CSV",
+                f"Could not read headers from:\n{csv_path}"
+            )
+            return
         auto = _autodetect_columns(csv_path)
-        for concept, _, _ in _CONCEPTS:
+        matched: list[str] = []
+        for concept, label, _ in _CONCEPTS:
             combo = self._combos.get(concept)
             if combo and concept in auto and auto[concept] in headers:
                 combo.setCurrentText(auto[concept])
+                matched.append(f"{label} → {auto[concept]}")
+        if matched:
+            QMessageBox.information(
+                self, "Auto-Detect",
+                f"Matched {len(matched)} column(s):\n" + "\n".join(matched)
+            )
+        else:
+            QMessageBox.information(
+                self, "Auto-Detect",
+                "No columns could be auto-detected.\n"
+                "The CSV headers did not match any known aliases."
+            )
+
+    def _popout_preview(self) -> None:
+        """Open the preview table in a separate resizable window."""
+        csv_path = self.cfg.get("metadata_csv_path", "")
+        if not csv_path or not Path(csv_path).exists():
+            QMessageBox.warning(self, "No CSV", "No metadata CSV configured.")
+            return
+
+        all_headers, all_rows = _read_csv_preview(csv_path)
+        if not all_headers:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Metadata Preview — first 5 rows")
+        dlg.resize(900, 350)
+        dlg_lay = QVBoxLayout(dlg)
+
+        table = QTableWidget(len(all_rows), len(all_headers))
+        table.setHorizontalHeaderLabels(all_headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.horizontalHeader().setStretchLastSection(True)
+        for r, row_data in enumerate(all_rows):
+            for c, val in enumerate(row_data):
+                table.setItem(r, c, QTableWidgetItem(str(val)))
+        dlg_lay.addWidget(table)
+        dlg.show()
 
     def _save(self) -> None:
         # Validate required fields

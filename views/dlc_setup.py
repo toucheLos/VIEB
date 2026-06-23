@@ -1323,7 +1323,9 @@ class DLCSetupView(QWidget):
             return
         self._dlc_error_shown = False
         self._set_buttons_enabled(False)
-        dlc_python = self.cfg.get("dlc_python") or sys.executable
+        dlc_python = self.cfg.get("dlc_python") or str(ROOT / "venv-dlc" / "bin" / "python")
+        if not os.path.exists(dlc_python):
+            dlc_python = sys.executable
         self._worker = SubprocessWorker(args, python_exe=dlc_python)
         self._worker.log.connect(self._on_raw_log)
         self._worker.done.connect(self._on_worker_done)

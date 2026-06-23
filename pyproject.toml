@@ -28,6 +28,7 @@ dependencies = [
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",
     "pytest>=7.0",
+    "openpyxl"
 ]
 
 [project.optional-dependencies]

@@ -1464,7 +1464,10 @@ def cmd_cluster(
         test_indices = np.concatenate([
             np.arange(boundaries[s][0], boundaries[s][1]) for s in test_stems
         ]) if test_stems else np.array([], dtype=np.int64)
-        if len(train_fit_indices) > hdbscan_sample:
+        if use_gpu:
+            fit_indices = train_fit_indices
+            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} train frames...")
+        elif len(train_fit_indices) > hdbscan_sample:
             rng = np.random.default_rng(42)
             sampled_pos = np.sort(
                 rng.choice(len(train_fit_indices), hdbscan_sample, replace=False)
@@ -1482,15 +1485,6 @@ def cmd_cluster(
         predict_mask = np.ones(len(pooled_umap), dtype=bool)
         predict_mask[fit_indices] = False
         predict_indices = np.flatnonzero(predict_mask)
-
-        if use_gpu and len(train_fit_indices) > hdbscan_sample:
-            # cuML HDBSCAN has no approximate_predict equivalent, so when we
-            # subsample the fit set we fall back to CPU HDBSCAN for full-frame
-            # assignment. This preserves downstream outputs and avoids OOM.
-            print("  cuML HDBSCAN sampling requires CPU fallback for full-frame assignment...")
-            import hdbscan as _hdbscan_lib
-            use_gpu = False
-            HDBSCANClass = _hdbscan_lib.HDBSCAN
 
         if use_gpu:
             clusterer_model = HDBSCANClass(
@@ -1549,7 +1543,10 @@ def cmd_cluster(
 
     else:
         all_indices = np.arange(len(pooled_umap), dtype=np.int64)
-        if len(all_indices) > hdbscan_sample:
+        if use_gpu:
+            fit_indices = all_indices
+            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} embedded frames...")
+        elif len(all_indices) > hdbscan_sample:
             rng = np.random.default_rng(42)
             sampled_pos = np.sort(
                 rng.choice(len(all_indices), hdbscan_sample, replace=False)
@@ -1567,14 +1564,6 @@ def cmd_cluster(
         predict_mask = np.ones(len(pooled_umap), dtype=bool)
         predict_mask[fit_indices] = False
         predict_indices = np.flatnonzero(predict_mask)
-
-        if use_gpu and len(all_indices) > hdbscan_sample:
-            # cuML can fit the sample, but it cannot assign every withheld
-            # frame without a CPU-style approximate_predict path.
-            print("  cuML HDBSCAN sampling requires CPU fallback for full-frame assignment...")
-            import hdbscan as _hdbscan_lib
-            use_gpu = False
-            HDBSCANClass = _hdbscan_lib.HDBSCAN
 
         if use_gpu:
             clusterer_model = HDBSCANClass(
@@ -1709,6 +1698,17 @@ def cmd_cluster(
     )
     print(f"Run manifest → results/shared/run_manifest.json  (run_id: {_current_run_id})")
 
+    # ---- Clustering diagnostics ----
+    try:
+        _generate_diagnostics(
+            all_labels=np.concatenate(smoothed_labels_all),
+            all_probs=np.concatenate(raw_probs_all),
+            pooled_umap=pooled_umap,
+        )
+        print("Diagnostics → results/diagnostics/")
+    except Exception as _diag_err:
+        print(f"[warn] Diagnostics generation failed: {_diag_err}")
+
     # ---- Validation report ----
     if validate:
         _run_validation_report(
@@ -1716,6 +1716,342 @@ def cmd_cluster(
             smoothed_labels_all, raw_probs_all, n_found,
             min_cluster_size,
         )
+
+
+# ---------------------------------------------------------------------------
+# Clustering diagnostics
+# ---------------------------------------------------------------------------
+
+def _generate_diagnostics(
+    all_labels: np.ndarray | None = None,
+    all_probs: np.ndarray | None = None,
+    pooled_umap: np.ndarray | None = None,
+) -> dict:
+    """Generate clustering quality diagnostics to results/diagnostics/.
+
+    When called from cmd_cluster(), receives live arrays.
+    When called standalone (--diagnostics), loads from disk.
+    """
+    diag_dir = os.path.join(_res(), "diagnostics")
+    os.makedirs(diag_dir, exist_ok=True)
+
+    shared_dir = os.path.join(_res(), "shared")
+    ci_path = os.path.join(shared_dir, "cluster_info.json")
+    if not os.path.exists(ci_path):
+        print("[diagnostics] No cluster_info.json found. Run --cluster first.")
+        return {}
+
+    with open(ci_path) as f:
+        ci = json.load(f)
+    n_clusters = int(ci.get("n_clusters", 0))
+    if n_clusters == 0:
+        return {}
+
+    # ---- Load from disk if not passed ----
+    if all_labels is None:
+        label_arrays = []
+        prob_arrays = []
+        for fname in sorted(os.listdir(shared_dir)):
+            if fname.endswith("_labels.npy"):
+                label_arrays.append(np.load(os.path.join(shared_dir, fname)))
+                stem = fname.replace("_labels.npy", "")
+                prob_path = os.path.join(shared_dir, f"{stem}_probs.npy")
+                if os.path.exists(prob_path):
+                    prob_arrays.append(np.load(prob_path))
+                else:
+                    lbl = label_arrays[-1]
+                    prob_arrays.append(np.where(lbl >= 0, 1.0, 0.0).astype(np.float32))
+        if not label_arrays:
+            print("[diagnostics] No label files found.")
+            return {}
+        all_labels = np.concatenate(label_arrays)
+        all_probs = np.concatenate(prob_arrays)
+
+    if all_probs is None:
+        all_probs = np.where(all_labels >= 0, 1.0, 0.0).astype(np.float32)
+
+    total_frames = len(all_labels)
+    noise_count = int((all_labels == -1).sum())
+    noise_frac = noise_count / max(1, total_frames)
+
+    # ---- State occupancy ----
+    occ_rows = []
+    # Per-video presence counts
+    video_presence: dict[int, int] = {}
+    for fname in sorted(os.listdir(shared_dir)):
+        if not fname.endswith("_labels.npy"):
+            continue
+        lbl = np.load(os.path.join(shared_dir, fname))
+        present = set(int(s) for s in np.unique(lbl) if s >= 0)
+        for s in present:
+            video_presence[s] = video_presence.get(s, 0) + 1
+
+    for k in range(-1, n_clusters):
+        mask = all_labels == k
+        count = int(mask.sum())
+        if count == 0 and k >= 0:
+            continue
+        frac = count / max(1, total_frames)
+        occ_rows.append({
+            "state": k,
+            "frame_count": count,
+            "fraction": round(frac, 6),
+            "n_videos_present": video_presence.get(k, 0) if k >= 0 else 0,
+        })
+
+    occ_df = pd.DataFrame(occ_rows)
+    occ_df.to_csv(os.path.join(diag_dir, "state_occupancy.csv"), index=False)
+
+    valid_mask = all_labels >= 0
+    state_fracs = []
+    for k in range(n_clusters):
+        state_fracs.append(float((all_labels == k).sum()) / max(1, total_frames))
+    largest_frac = max(state_fracs) if state_fracs else 0.0
+    smallest_frac = min(f for f in state_fracs if f > 0) if any(f > 0 for f in state_fracs) else 0.0
+
+    non_noise_probs = all_probs[valid_mask]
+    mean_conf = float(non_noise_probs.mean()) if len(non_noise_probs) > 0 else 0.0
+    low_conf_frac = float((non_noise_probs < 0.5).sum() / max(1, len(non_noise_probs)))
+
+    # ---- Load index metadata for feature info ----
+    index_path = os.path.join(_res(), "features", "index.json")
+    n_features = 0
+    use_wavelets = True
+    semantic_features: list[str] = []
+    keypoint_groups: dict = {}
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            idx = json.load(f)
+        meta = idx.get("_meta", {})
+        n_features = int(meta.get("n_features", 0))
+        use_wavelets = bool(meta.get("use_wavelets", True))
+        semantic_features = meta.get("semantic_features", [])
+        keypoint_groups = meta.get("keypoint_groups", {})
+
+    # ---- Load run manifest for params ----
+    manifest_path = os.path.join(shared_dir, "run_manifest.json")
+    manifest: dict = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+    umap_dims = int(manifest.get("umap_dims", ci.get("umap_dims", 10)))
+    min_cluster_size = int(manifest.get("min_cluster_size", ci.get("min_cluster_size", 50)))
+    hdbscan_sample = int(manifest.get("hdbscan_sample", ci.get("hdbscan_sample", 0)))
+    hdbscan_min_samples = int(manifest.get("hdbscan_min_samples", 0))
+
+    # ---- Warnings ----
+    warnings: list[dict] = []
+    if n_clusters <= 3:
+        warnings.append({
+            "level": "warning",
+            "message": f"Only {n_clusters} states found. Try lowering --min-cluster-size.",
+            "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
+        })
+    if noise_frac == 0 and largest_frac > 0.85:
+        warnings.append({
+            "level": "warning",
+            "message": "0% noise and one dominant state (>85%) may indicate overly smooth clustering.",
+            "action": "Try increasing UMAP dims or lowering min_samples.",
+        })
+    if largest_frac > 0.90:
+        warnings.append({
+            "level": "error",
+            "message": f"Largest state occupies {largest_frac*100:.1f}% of frames.",
+            "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
+        })
+    if n_features > 0 and n_features < 20:
+        warnings.append({
+            "level": "warning",
+            "message": f"Low feature count ({n_features}). Consider enabling wavelets.",
+            "action": "python compare.py --extract  (without --no-wavelets)",
+        })
+    if not semantic_features:
+        skipped_groups = [g for g, info in keypoint_groups.items()
+                         if isinstance(info, dict) and not info.get("resolved", True)]
+        if skipped_groups:
+            warnings.append({
+                "level": "info",
+                "message": f"Semantic features skipped (missing keypoint groups: {', '.join(skipped_groups)}).",
+                "action": "Map keypoint groups in Settings > Column Mapping.",
+            })
+
+    diagnostics = {
+        "n_states": n_clusters,
+        "n_frames": total_frames,
+        "noise_frac": round(noise_frac, 4),
+        "largest_state_frac": round(largest_frac, 4),
+        "smallest_state_frac": round(smallest_frac, 4),
+        "mean_confidence": round(mean_conf, 4),
+        "low_confidence_frac": round(low_conf_frac, 4),
+        "n_features": n_features,
+        "use_wavelets": use_wavelets,
+        "umap_dims": umap_dims,
+        "min_cluster_size": min_cluster_size,
+        "hdbscan_sample": hdbscan_sample,
+        "hdbscan_min_samples": hdbscan_min_samples,
+        "warnings": warnings,
+    }
+
+    with open(os.path.join(diag_dir, "cluster_diagnostics.json"), "w") as f:
+        json.dump(diagnostics, f, indent=2)
+
+    # ---- UMAP 2D sample for scatter visualization ----
+    _save_umap_sample(all_labels, all_probs, pooled_umap, diag_dir, n_clusters)
+
+    # ---- Overview plot ----
+    _save_diagnostics_plot(diagnostics, occ_df, diag_dir)
+
+    return diagnostics
+
+
+def _save_umap_sample(
+    all_labels: np.ndarray,
+    all_probs: np.ndarray,
+    pooled_umap: np.ndarray | None,
+    diag_dir: str,
+    n_clusters: int,
+    max_points: int = 50_000,
+) -> None:
+    """Save a 2D UMAP scatter sample to umap_sample.csv."""
+    if pooled_umap is None:
+        return
+
+    n_total = len(all_labels)
+    if n_total == 0:
+        return
+
+    n_sample = min(max_points, n_total)
+    rng = np.random.default_rng(42)
+    idx = np.sort(rng.choice(n_total, n_sample, replace=False))
+
+    sampled_umap = pooled_umap[idx]
+    sampled_labels = all_labels[idx]
+    sampled_probs = all_probs[idx]
+
+    if sampled_umap.shape[1] == 2:
+        umap_2d = sampled_umap
+    else:
+        try:
+            import umap as umap_lib
+            reducer_2d = umap_lib.UMAP(
+                n_components=2, n_neighbors=30, min_dist=0.1,
+                random_state=42, low_memory=True, verbose=False,
+            )
+            umap_2d = reducer_2d.fit_transform(sampled_umap)
+        except Exception:
+            return
+
+    sample_df = pd.DataFrame({
+        "umap_1": umap_2d[:, 0],
+        "umap_2": umap_2d[:, 1],
+        "label": sampled_labels,
+        "prob": sampled_probs,
+    })
+    sample_df.to_csv(os.path.join(diag_dir, "umap_sample.csv"), index=False)
+
+
+def _save_diagnostics_plot(diagnostics: dict, occ_df: pd.DataFrame, diag_dir: str) -> None:
+    """Save a 2x2 diagnostic overview plot."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+    except ImportError:
+        return
+
+    n_clusters = diagnostics["n_states"]
+    fig, axes = _plt.subplots(2, 2, figsize=(12, 10))
+
+    # ---- [0,0] State occupancy bars ----
+    ax = axes[0, 0]
+    state_rows = occ_df[occ_df["state"] >= 0].sort_values("state")
+    if not state_rows.empty:
+        states = state_rows["state"].values
+        fracs = state_rows["fraction"].values * 100
+        colors = _plt.cm.tab20(np.linspace(0, 1, max(n_clusters, 1)))
+        bar_colors = [colors[int(s) % len(colors)] for s in states]
+        ax.barh(range(len(states)), fracs, color=bar_colors, alpha=0.85)
+        ax.set_yticks(range(len(states)))
+        ax.set_yticklabels([f"S{s}" for s in states], fontsize=8)
+        ax.set_xlabel("Occupancy (%)")
+        ax.invert_yaxis()
+        noise_row = occ_df[occ_df["state"] == -1]
+        if not noise_row.empty:
+            noise_pct = float(noise_row["fraction"].values[0]) * 100
+            ax.set_title(f"State Occupancy (noise: {noise_pct:.1f}%)", fontsize=10, fontweight="bold")
+        else:
+            ax.set_title("State Occupancy", fontsize=10, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # ---- [0,1] UMAP scatter ----
+    ax2 = axes[0, 1]
+    umap_path = os.path.join(diag_dir, "umap_sample.csv")
+    if os.path.exists(umap_path):
+        umap_df = pd.read_csv(umap_path)
+        valid = umap_df[umap_df["label"] >= 0]
+        noise = umap_df[umap_df["label"] < 0]
+        if not noise.empty:
+            ax2.scatter(noise["umap_1"], noise["umap_2"], c="#CCCCCC", s=1, alpha=0.3, rasterized=True)
+        if not valid.empty:
+            scatter = ax2.scatter(
+                valid["umap_1"], valid["umap_2"],
+                c=valid["label"], cmap="tab20", s=1, alpha=0.5, rasterized=True,
+            )
+        ax2.set_title("UMAP Embedding (sampled)", fontsize=10, fontweight="bold")
+    else:
+        ax2.text(0.5, 0.5, "No UMAP sample available", ha="center", va="center",
+                 transform=ax2.transAxes, color="#999")
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+
+    # ---- [1,0] Confidence histogram ----
+    ax3 = axes[1, 0]
+    if os.path.exists(umap_path):
+        umap_df = pd.read_csv(umap_path)
+        probs = umap_df["prob"].values
+        ax3.hist(probs, bins=50, color="#4E79A7", alpha=0.8, edgecolor="white", linewidth=0.3)
+        ax3.axvline(0.5, color="#E63946", linewidth=1.5, linestyle="--", label="0.5 threshold")
+        ax3.set_xlabel("HDBSCAN Probability")
+        ax3.set_ylabel("Count")
+        ax3.legend(fontsize=8)
+    ax3.set_title("Confidence Distribution", fontsize=10, fontweight="bold")
+    ax3.spines["top"].set_visible(False)
+    ax3.spines["right"].set_visible(False)
+
+    # ---- [1,1] Parameter summary + warnings ----
+    ax4 = axes[1, 1]
+    ax4.axis("off")
+    lines = [
+        f"States: {diagnostics['n_states']}",
+        f"Frames: {diagnostics['n_frames']:,}",
+        f"Noise: {diagnostics['noise_frac']*100:.1f}%",
+        f"Largest state: {diagnostics['largest_state_frac']*100:.1f}%",
+        f"Mean confidence: {diagnostics['mean_confidence']:.3f}",
+        f"Low confidence (<0.5): {diagnostics['low_confidence_frac']*100:.1f}%",
+        "",
+        f"UMAP dims: {diagnostics['umap_dims']}",
+        f"min_cluster_size: {diagnostics['min_cluster_size']}",
+        f"Features: {diagnostics['n_features']}",
+        f"Wavelets: {'yes' if diagnostics['use_wavelets'] else 'no'}",
+    ]
+    if diagnostics["warnings"]:
+        lines.append("")
+        lines.append("WARNINGS:")
+        for w in diagnostics["warnings"]:
+            icon = "!" if w["level"] == "error" else "*"
+            lines.append(f"  {icon} {w['message']}")
+
+    ax4.text(0.05, 0.95, "\n".join(lines), transform=ax4.transAxes,
+             fontsize=9, verticalalignment="top", fontfamily="monospace",
+             bbox=dict(boxstyle="round", facecolor="#F5F5F5", alpha=0.8))
+    ax4.set_title("Run Parameters", fontsize=10, fontweight="bold")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(diag_dir, "cluster_overview.png"), dpi=150)
+    _plt.close(fig)
+
 
 # ---------------------------------------------------------------------------
 # Step 2b: Apply the existing shared cluster model to new videos only
@@ -2978,11 +3314,21 @@ def main():
                         help="Mark the cluster run as saved after --cluster completes")
     parser.add_argument("--event-align", action="store_true",
                         help="Peri-event behavioral state analysis (discrete experiments only)")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Generate clustering quality diagnostics to results/diagnostics/")
+    parser.add_argument("--motif-clips", action="store_true",
+                        help="Generate exemplar video clips for top motifs")
+    parser.add_argument("--top-motifs", type=int, default=10,
+                        help="Number of top motifs to generate clips for (default: 10)")
+    parser.add_argument("--clips-per-motif", type=int, default=5,
+                        help="Max clips per motif (default: 5)")
+    parser.add_argument("--clip-padding-sec", type=float, default=1.0,
+                        help="Padding in seconds around motif clip boundaries (default: 1.0)")
     args = parser.parse_args()
 
     if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
                 args.report, args.summarize, args.quantify, args.motifs, args.save_run,
-                args.event_align]):
+                args.event_align, args.diagnostics, args.motif_clips]):
         parser.print_help()
         sys.exit(1)
 
@@ -3029,6 +3375,16 @@ def main():
         cmd_quantify(cohort=args.cohort, min_confidence=args.min_confidence)
     if args.event_align:
         cmd_event_align(min_confidence=args.min_confidence)
+    if args.diagnostics:
+        _generate_diagnostics()
+    if args.motif_clips:
+        from generate_clips import cmd_motif_clips
+        cmd_motif_clips(
+            fps=args.fps,
+            top_motifs=args.top_motifs,
+            clips_per_motif=args.clips_per_motif,
+            clip_padding_sec=args.clip_padding_sec,
+        )
 
 
 if __name__ == "__main__":

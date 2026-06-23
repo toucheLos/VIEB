@@ -344,7 +344,7 @@ def run(args):
         print("  [WARNING] No pairwise comparisons possible (need ≥2 animals per group in ≥2 groups).")
 
     # ===== Task 6: cohort_state_profiles.png ================================
-    if not dry:
+    if not dry and not df_profiles.empty:
         print("\nGenerating cohort_state_profiles.png...")
         colors_by_state = _state_colors(len(non_dominant_ids))
         state_color_map = {sid: colors_by_state[i] for i, sid in enumerate(non_dominant_ids)}
@@ -379,7 +379,7 @@ def run(args):
         _savefig(fig, out_dir, "cohort_state_profiles.png")
 
     # ===== Task 7: cohort_comparison.png ====================================
-    if not dry and n_cohorts >= 2:
+    if not dry and n_cohorts >= 2 and not df_profiles.empty:
         print("\nGenerating cohort_comparison.png...")
 
         # Per-state between-cohort spread (max mean – min mean)

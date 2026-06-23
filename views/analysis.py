@@ -72,16 +72,16 @@ class TerminalBox(QWidget):
         )
         lay.addWidget(self._edit, stretch=1)
 
-        copy_btn = QToolButton()
-        copy_btn.setText("⧉")   # ⧉
-        copy_btn.setFixedSize(26, 26)
-        copy_btn.setToolTip("Copy command to clipboard")
-        copy_btn.clicked.connect(self._copy)
-        copy_btn.setStyleSheet(
+        self._copy_btn = QToolButton()
+        self._copy_btn.setText("⧉")   # ⧉
+        self._copy_btn.setFixedSize(26, 26)
+        self._copy_btn.setToolTip("Copy command to clipboard")
+        self._copy_btn.clicked.connect(self._copy)
+        self._copy_btn.setStyleSheet(
             "QToolButton { background:#2A2A2A; color:#AAA; border:none; font-size:13px; }"
             "QToolButton:hover { background:#3A3A3A; }"
         )
-        lay.addWidget(copy_btn, alignment=Qt.AlignTop)
+        lay.addWidget(self._copy_btn, alignment=Qt.AlignTop)
 
     def set_command(self, cmd: str) -> None:
         self._cmd = cmd
@@ -109,6 +109,9 @@ class TerminalBox(QWidget):
     def _copy(self) -> None:
         if self._cmd:
             QApplication.clipboard().setText(self._cmd)
+            self._copy_btn.setText("✓")
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(1200, lambda: self._copy_btn.setText("⧉"))
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +347,7 @@ class AnalysisView(QWidget):
         t2_title.setFont(QFont("Arial", 14, QFont.Bold))
         top.addWidget(t2_title)
         top.addStretch()
-        self._t2_export_btn = QPushButton("Export CSV")
+        self._t2_export_btn = QPushButton("Download Table")
         self._t2_export_btn.setFixedHeight(30)
         self._t2_export_btn.clicked.connect(self._export_motifs_csv)
         top.addWidget(self._t2_export_btn)
@@ -391,6 +394,38 @@ class AnalysisView(QWidget):
         self._t2_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         cl.addWidget(self._t2_table, stretch=1)
 
+        # Motif exemplar clips section
+        cl.addWidget(_section_title("Motif Exemplar Clips"))
+        clip_row = QHBoxLayout()
+        self._t2_gen_clips_btn = QPushButton("Generate Motif Clips")
+        self._t2_gen_clips_btn.setFixedHeight(30)
+        self._t2_gen_clips_btn.clicked.connect(self._generate_motif_clips)
+        clip_row.addWidget(self._t2_gen_clips_btn)
+        self._t2_open_clips_btn = QPushButton("Open Clips Folder")
+        self._t2_open_clips_btn.setFixedHeight(30)
+        self._t2_open_clips_btn.clicked.connect(self._open_motif_clips_folder)
+        clip_row.addWidget(self._t2_open_clips_btn)
+        clip_row.addStretch()
+        cl.addLayout(clip_row)
+
+        self._t2_clips_placeholder = _placeholder(
+            "No motif clips generated yet.\n"
+            "Click 'Generate Motif Clips' after running motif discovery."
+        )
+        cl.addWidget(self._t2_clips_placeholder)
+
+        self._t2_clips_table = QTableWidget(0, 6)
+        self._t2_clips_table.setHorizontalHeaderLabels(
+            ["Motif", "Type", "Clip", "Animal", "Context", "Duration"]
+        )
+        self._t2_clips_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._t2_clips_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._t2_clips_table.setSortingEnabled(True)
+        self._t2_clips_table.setMaximumHeight(250)
+        self._t2_clips_table.doubleClicked.connect(self._open_motif_clip)
+        self._t2_clips_table.hide()
+        cl.addWidget(self._t2_clips_table)
+
         scroll.setWidget(content)
         lay.addWidget(scroll, stretch=1)
         return page
@@ -432,6 +467,10 @@ class AnalysisView(QWidget):
         top.addWidget(change_btn)
 
         top.addStretch()
+        self._t3_export_btn = QPushButton("Export CSV")
+        self._t3_export_btn.setFixedHeight(30)
+        self._t3_export_btn.clicked.connect(self._export_cohort_csv)
+        top.addWidget(self._t3_export_btn)
         run3_btn = QPushButton("Run Cohort Analysis")
         run3_btn.setFixedHeight(30)
         run3_btn.clicked.connect(
@@ -943,13 +982,126 @@ class AnalysisView(QWidget):
         canvas.fig.tight_layout()
         canvas.draw()
 
+        # Load motif clips index
+        self._load_motif_clips()
+
+    def _load_motif_clips(self) -> None:
+        idx_path = RESULTS / "motifs" / "motif_clip_index.csv"
+        if not idx_path.exists():
+            self._t2_clips_placeholder.show()
+            self._t2_clips_table.hide()
+            return
+
+        try:
+            df = pd.read_csv(idx_path)
+        except Exception:
+            self._t2_clips_placeholder.show()
+            self._t2_clips_table.hide()
+            return
+
+        if df.empty:
+            self._t2_clips_placeholder.show()
+            self._t2_clips_table.hide()
+            return
+
+        self._t2_clips_placeholder.hide()
+        self._t2_clips_table.show()
+        self._t2_clips_table.setSortingEnabled(False)
+        self._t2_clips_table.setRowCount(len(df))
+        for ri, (_, row) in enumerate(df.iterrows()):
+            self._t2_clips_table.setItem(ri, 0, QTableWidgetItem(str(row.get("motif", ""))))
+            self._t2_clips_table.setItem(ri, 1, QTableWidgetItem(str(row.get("motif_type", ""))))
+            clip_path = str(row.get("clip_path", ""))
+            self._t2_clips_table.setItem(ri, 2, QTableWidgetItem(os.path.basename(clip_path)))
+            self._t2_clips_table.setItem(ri, 3, QTableWidgetItem(str(row.get("animal_id", ""))))
+            self._t2_clips_table.setItem(ri, 4, QTableWidgetItem(str(row.get("context", ""))))
+            dur = row.get("duration_sec", "")
+            self._t2_clips_table.setItem(ri, 5, QTableWidgetItem(
+                f"{dur:.1f}s" if isinstance(dur, (int, float)) else str(dur)
+            ))
+        self._t2_clips_table.setSortingEnabled(True)
+
+    def _generate_motif_clips(self) -> None:
+        self._run_command(
+            ["generate_clips.py", "--motif-clips"],
+            self._t2_terminal,
+        )
+
+    def _open_motif_clips_folder(self) -> None:
+        from _utils import _open_folder
+        clips_dir = RESULTS / "motifs" / "clips"
+        if clips_dir.exists():
+            _open_folder(str(clips_dir))
+        else:
+            QMessageBox.information(
+                self, "No Clips",
+                "No motif clips found. Generate them first."
+            )
+
+    def _open_motif_clip(self, index) -> None:
+        row = index.row()
+        clip_rel = self._t2_clips_table.item(row, 2)
+        if not clip_rel:
+            return
+        idx_path = RESULTS / "motifs" / "motif_clip_index.csv"
+        if not idx_path.exists():
+            return
+        try:
+            df = pd.read_csv(idx_path)
+            if row < len(df):
+                clip_path = RESULTS / str(df.iloc[row]["clip_path"])
+                if clip_path.exists():
+                    from PyQt5.QtCore import QUrl
+                    from PyQt5.QtGui import QDesktopServices
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(clip_path)))
+        except Exception:
+            pass
+
     def _export_motifs_csv(self) -> None:
-        p = RESULTS / "comparison" / "motifs.csv"
-        if not p.exists():
-            QMessageBox.warning(self, "No Data", "motifs.csv not found.")
+        table = self._t2_table
+        if table.rowCount() == 0:
+            p = RESULTS / "comparison" / "motifs.csv"
+            if not p.exists():
+                QMessageBox.warning(self, "No Data", "No motif enrichment data. Run Motifs first.")
+                return
+            dest, _ = QFileDialog.getSaveFileName(
+                self, "Download Enrichment Table", "motif_enrichment.csv", "CSV (*.csv)"
+            )
+            if dest:
+                shutil.copy2(str(p), dest)
+                QMessageBox.information(self, "Exported", f"Saved to {dest}")
             return
         dest, _ = QFileDialog.getSaveFileName(
-            self, "Export Motifs", "motifs.csv", "CSV (*.csv)"
+            self, "Download Enrichment Table", "motif_enrichment.csv", "CSV (*.csv)"
+        )
+        if not dest:
+            return
+        import csv as _csv
+        headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+        with open(dest, "w", newline="", encoding="utf-8") as fh:
+            writer = _csv.writer(fh)
+            writer.writerow(headers)
+            for r in range(table.rowCount()):
+                row = [
+                    table.item(r, c).text() if table.item(r, c) else ""
+                    for c in range(table.columnCount())
+                ]
+                writer.writerow(row)
+        QMessageBox.information(self, "Exported", f"Saved to {dest}")
+
+    def _export_cohort_csv(self) -> None:
+        cohort_dir = RESULTS / "cohort"
+        candidates = [
+            cohort_dir / "cohort_significant_states.csv",
+            cohort_dir / "cohort_state_profiles.csv",
+            cohort_dir / "cohort_statistics.csv",
+        ]
+        p = next((c for c in candidates if c.exists()), None)
+        if p is None:
+            QMessageBox.warning(self, "No Data", "No cohort results found. Run Cohort Analysis first.")
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export Cohort Results", p.name, "CSV (*.csv)"
         )
         if dest:
             shutil.copy2(str(p), dest)

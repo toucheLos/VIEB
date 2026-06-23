@@ -20,6 +20,7 @@ import sys
 import glob
 import argparse
 import yaml
+import inspect
 from contextlib import contextmanager
 
 
@@ -71,6 +72,28 @@ HW = detect_hardware()
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 import vieb_config
+
+
+def _call_with_supported_kwargs(func, *args, **kwargs):
+    """Call a DLC function while tolerating version-specific keyword support."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func(*args, **kwargs)
+
+    has_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
+    if not has_var_kwargs:
+        kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return func(*args, **kwargs)
+
+
+def _gpu_kwargs():
+    if HW.get("device") == "cuda":
+        return {"gputouse": 0}
+    return {}
 
 
 def _get_dlc_config():
@@ -269,13 +292,17 @@ def analyze_videos():
 
     video_files = glob.glob(os.path.join(_get_raw_videos_dir(), "*.mp4"))
     print(f"\nAnalyzing {len(video_files)} video(s)...")
+    if HW.get("device") == "cuda":
+        print("Using CUDA device 0 for pose estimation.")
     with prevent_sleep():
-        deeplabcut.analyze_videos(
+        _call_with_supported_kwargs(
+            deeplabcut.analyze_videos,
             _get_dlc_config(),
             video_files,
             shuffle=2,
             save_as_csv=True,
             batchsize=HW["batch_size"],
+            **_gpu_kwargs(),
         )
     print("Analysis complete. CSV outputs saved alongside videos.")
 

@@ -427,7 +427,12 @@ class AddVideosView(QWidget):
             self._step_results.pop(self._active_step_num, None)
         self._set_buttons_enabled(False)
         self.worker_running.emit(True)
-        python_exe = (self.cfg.get("dlc_python") or sys.executable) if use_dlc_python else sys.executable
+        if use_dlc_python:
+            python_exe = self.cfg.get("dlc_python") or str(ROOT / "venv-dlc" / "bin" / "python")
+            if not os.path.exists(python_exe):
+                python_exe = sys.executable
+        else:
+            python_exe = sys.executable
         self._worker = SubprocessWorker(args, python_exe=python_exe)
         self._worker.log.connect(self._on_raw_log)
         self._worker.done.connect(self._on_worker_done)

@@ -144,6 +144,13 @@ except Exception:
     _ClusterRunsView = None
     _HAS_CLUSTER_RUNS_VIEW = False
 
+try:
+    from views.artifacts import ArtifactsView as _ArtifactsView
+    _HAS_ARTIFACTS_VIEW = True
+except Exception:
+    _ArtifactsView = None
+    _HAS_ARTIFACTS_VIEW = False
+
 from views.state_characterization import StateCharacterizationView
 
 from views.help import HelpView
@@ -679,6 +686,7 @@ _NAV_VIEWS = [
     "Cluster Runs",
     "State Characterization",
     "Analysis",
+    "Results",
     "Settings",
     "Help",
 ]
@@ -691,6 +699,7 @@ _NAV_ICONS = {
     "State Characterization": "▣",
     "Analysis":               "◈",
     "Validation":             "✓",
+    "Results":                "◪",
     "Settings":               "≡",
     "Help":                   "?",
 }
@@ -4754,6 +4763,13 @@ class MainWindow(QMainWindow):
         self._qv = QuantificationView(self.cfg)
         add("Quantification", self._qv)
 
+        if _HAS_ARTIFACTS_VIEW:
+            self._artv = _ArtifactsView(self.cfg)
+            self._artv.worker_running.connect(self._set_running)
+            add("Results", self._artv)
+        else:
+            self._artv = None
+
         self._setv = SettingsView(self.cfg)
         self._setv.settings_changed.connect(self._settings_changed)
         self._setv.navigate_help.connect(self._navigate_to_help)
@@ -5103,6 +5119,7 @@ class MainWindow(QMainWindow):
         self._pv.estimate_times(data)
         self._pv.update_from_cfg()
         self._pv.update_cluster_quality(data)
+        self._pv.update_diagnostics(data)
         if not self._initial_load_done:
             self._initial_load_done = True
             has_results = any(data.get(k) is not None for k in ("summary", "state_summary", "motifs", "animal_scalars"))
@@ -5118,6 +5135,8 @@ class MainWindow(QMainWindow):
             self._av.refresh(data)
         if hasattr(self._sv, "refresh"):
             self._sv.refresh(data)
+        if self._artv is not None:
+            self._artv.update_data(data)
 
     def _load_session(self):
         if self._cached_data:

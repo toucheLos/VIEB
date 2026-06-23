@@ -439,6 +439,7 @@ _NAV_VIEWS = [
     "Cluster Runs",
     "Browse States",
     "Analysis",
+    "Results",
     "Validation",
     "Settings",
 ]
@@ -449,6 +450,7 @@ _NAV_ICONS = {
     "Cluster Runs":   "⊙",
     "Browse States":  "▣",
     "Analysis":       "◈",
+    "Results":        "◪",
     "Validation":     "✓",
     "Settings":       "≡",
 }

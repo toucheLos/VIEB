@@ -29,7 +29,7 @@ def load_cohort_excel(path: str) -> pd.DataFrame:
     col_map: dict[str, str] = {}
     for col in df.columns:
         low = col.lower().strip()
-        if low in ("animal", "animal_id"):
+        if low in ("animal", "animal_id", "animal id"):
             col_map[col] = "animal_id"
         elif low == "treatment":
             col_map[col] = "treatment"

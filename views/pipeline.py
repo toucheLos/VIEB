@@ -130,6 +130,57 @@ class RunPipelineView(QWidget):
                 gpu_layout.addStretch()
                 gpu_layout.addWidget(self._gpu_setup_btn)
                 v.addWidget(gpu_widget)
+        # ── Clustering Diagnostics panel ──
+        self._diag_frame = QFrame()
+        self._diag_frame.setFrameShape(QFrame.StyledPanel)
+        self._diag_frame.setStyleSheet(
+            "QFrame { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 6px; }"
+        )
+        df_lay = QVBoxLayout(self._diag_frame)
+        df_lay.setContentsMargins(16, 12, 16, 12)
+        df_lay.setSpacing(8)
+
+        diag_hdr = QHBoxLayout()
+        diag_title = QLabel("Clustering Diagnostics")
+        diag_title.setFont(QFont("Arial", 12, QFont.Bold))
+        diag_hdr.addWidget(diag_title)
+        diag_hdr.addStretch()
+        self._diag_regen_btn = QPushButton("Regenerate")
+        self._diag_regen_btn.setFixedHeight(26)
+        self._diag_regen_btn.clicked.connect(self._regen_diagnostics)
+        diag_hdr.addWidget(self._diag_regen_btn)
+        df_lay.addLayout(diag_hdr)
+
+        self._diag_params = QLabel("")
+        self._diag_params.setWordWrap(True)
+        self._diag_params.setStyleSheet("font-size: 11px; color: #444; font-family: monospace;")
+        df_lay.addWidget(self._diag_params)
+
+        self._diag_warnings_lay = QVBoxLayout()
+        self._diag_warnings_lay.setSpacing(4)
+        df_lay.addLayout(self._diag_warnings_lay)
+
+        if _MPL:
+            from _widgets import MplCanvas
+            self._diag_occ_canvas = MplCanvas(figsize=(8, 2.5))
+            self._diag_occ_canvas.setMinimumHeight(180)
+            df_lay.addWidget(self._diag_occ_canvas)
+
+            self._diag_umap_canvas = MplCanvas(figsize=(5, 4))
+            self._diag_umap_canvas.setMinimumHeight(280)
+            df_lay.addWidget(self._diag_umap_canvas)
+
+            self._diag_conf_canvas = MplCanvas(figsize=(5, 2.5))
+            self._diag_conf_canvas.setMinimumHeight(180)
+            df_lay.addWidget(self._diag_conf_canvas)
+        else:
+            self._diag_occ_canvas = None
+            self._diag_umap_canvas = None
+            self._diag_conf_canvas = None
+
+        self._diag_frame.hide()
+        v.addWidget(self._diag_frame)
+
         v.addStretch()
         scroll.setWidget(holder)
         lay.addWidget(scroll)
@@ -382,6 +433,143 @@ class RunPipelineView(QWidget):
         dom_state_id = int(dom_col.split("_")[1])
         dom_frac = float(means[dom_col])
         stage5_row.set_cluster_quality(dom_frac, dom_state_id)
+
+    def update_diagnostics(self, data: dict):
+        """Populate the diagnostics panel from loaded data."""
+        diag = data.get("diagnostics")
+        occ = data.get("state_occupancy")
+        if not diag:
+            self._diag_frame.hide()
+            return
+
+        self._diag_frame.show()
+
+        # Parameters summary
+        lines = [
+            f"States: {diag.get('n_states', '?')}   "
+            f"Frames: {diag.get('n_frames', 0):,}   "
+            f"Noise: {diag.get('noise_frac', 0)*100:.1f}%",
+            f"Largest state: {diag.get('largest_state_frac', 0)*100:.1f}%   "
+            f"Mean confidence: {diag.get('mean_confidence', 0):.3f}   "
+            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0)*100:.1f}%",
+            f"UMAP dims: {diag.get('umap_dims', '?')}   "
+            f"min_cluster_size: {diag.get('min_cluster_size', '?')}   "
+            f"Features: {diag.get('n_features', '?')}   "
+            f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
+        ]
+        self._diag_params.setText("\n".join(lines))
+
+        # Clear old warnings
+        while self._diag_warnings_lay.count():
+            item = self._diag_warnings_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        warnings = diag.get("warnings", [])
+        if not warnings:
+            ok_lbl = QLabel("No warnings.")
+            ok_lbl.setStyleSheet("color: #2e7d32; font-size: 11px; padding: 2px 0;")
+            self._diag_warnings_lay.addWidget(ok_lbl)
+        for w in warnings:
+            level = w.get("level", "info")
+            if level == "error":
+                color, icon = "#c62828", "!"
+            elif level == "warning":
+                color, icon = "#e65100", "*"
+            else:
+                color, icon = "#1565c0", "i"
+            lbl = QLabel(f"  {icon}  {w.get('message', '')}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color: {color}; font-size: 11px; padding: 2px 0;")
+            if w.get("action"):
+                lbl.setToolTip(w["action"])
+            self._diag_warnings_lay.addWidget(lbl)
+
+        if not _MPL or not occ is not None:
+            return
+
+        import numpy as np
+
+        # State occupancy bar chart
+        if self._diag_occ_canvas and occ is not None and not occ.empty:
+            canvas = self._diag_occ_canvas
+            canvas.fig.clf()
+            ax = canvas.fig.add_subplot(111)
+            state_rows = occ[occ["state"] >= 0].sort_values("state")
+            if not state_rows.empty:
+                states = state_rows["state"].values
+                fracs = state_rows["fraction"].values * 100
+                from _utils import _state_colors
+                colors = _state_colors(max(len(states), 1))
+                bar_colors = [colors[int(s) % len(colors)] for s in states]
+                ax.barh(range(len(states)), fracs, color=bar_colors, alpha=0.85)
+                ax.set_yticks(range(len(states)))
+                ax.set_yticklabels([f"S{s}" for s in states], fontsize=7)
+                ax.set_xlabel("Occupancy (%)", fontsize=9)
+                ax.invert_yaxis()
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.set_title("State Occupancy", fontsize=10, fontweight="bold", loc="left")
+            canvas.fig.tight_layout()
+            canvas.draw()
+
+        # UMAP scatter
+        umap_path = RESULTS / "diagnostics" / "umap_sample.csv"
+        if self._diag_umap_canvas and umap_path.exists():
+            import pandas as pd
+            canvas = self._diag_umap_canvas
+            canvas.fig.clf()
+            ax = canvas.fig.add_subplot(111)
+            try:
+                udf = pd.read_csv(umap_path)
+                valid = udf[udf["label"] >= 0]
+                noise = udf[udf["label"] < 0]
+                if not noise.empty:
+                    ax.scatter(noise["umap_1"], noise["umap_2"],
+                               c="#CCCCCC", s=1, alpha=0.3, rasterized=True)
+                if not valid.empty:
+                    ax.scatter(valid["umap_1"], valid["umap_2"],
+                               c=valid["label"], cmap="tab20", s=1, alpha=0.5, rasterized=True)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_title("UMAP Embedding (sampled)", fontsize=10, fontweight="bold", loc="left")
+            except Exception:
+                ax.text(0.5, 0.5, "Error loading UMAP sample", ha="center", va="center",
+                        transform=ax.transAxes, color="#999")
+            canvas.fig.tight_layout()
+            canvas.draw()
+
+        # Confidence histogram
+        if self._diag_conf_canvas and umap_path.exists():
+            import pandas as pd
+            canvas = self._diag_conf_canvas
+            canvas.fig.clf()
+            ax = canvas.fig.add_subplot(111)
+            try:
+                udf = pd.read_csv(umap_path)
+                ax.hist(udf["prob"].values, bins=50, color="#4E79A7", alpha=0.8,
+                        edgecolor="white", linewidth=0.3)
+                ax.axvline(0.5, color="#E63946", linewidth=1.5, linestyle="--", label="0.5")
+                ax.set_xlabel("HDBSCAN Probability", fontsize=9)
+                ax.set_ylabel("Count", fontsize=9)
+                ax.legend(fontsize=8)
+                ax.set_title("Confidence Distribution", fontsize=10, fontweight="bold", loc="left")
+            except Exception:
+                pass
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            canvas.fig.tight_layout()
+            canvas.draw()
+
+    def _regen_diagnostics(self):
+        if self._worker and self._worker.isRunning():
+            QMessageBox.information(self, "Pipeline busy",
+                                    "Wait for the current pipeline step to finish.")
+            return
+        self._start_worker_cmd(
+            [sys.executable, "compare.py", "--diagnostics"],
+            label="Regenerating diagnostics…",
+        )
 
     def _run_diagnose(self):
         """Launch diagnose_clusters.py in a background thread; show output in a dialog."""

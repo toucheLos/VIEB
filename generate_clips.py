@@ -417,11 +417,396 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     print(f"\nDone: {clips_written}/{clips_attempted} clips saved under {base_clips_dir}/state_<id>/")
 
 
+# ---------------------------------------------------------------------------
+# C: Motif exemplar clip generation
+# ---------------------------------------------------------------------------
+
+def _safe_path_part(value: str, default: str = "motif") -> str:
+    """Return a filesystem-safe path component with no traversal."""
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_-")
+    return safe or default
+
+
+def _parse_motif_items(motif_str: str) -> list[str]:
+    """Parse a motif tuple/list without assuming labels have project meaning."""
+    import ast
+    try:
+        value = ast.literal_eval(str(motif_str))
+    except (ValueError, SyntaxError):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def _motif_dir_name(motif_str: str, motif_type: str) -> str:
+    """Convert '(55, 66)' + 'bigram' -> 'bigram_55_66' safely."""
+    items = _parse_motif_items(motif_str)
+    if items:
+        motif_part = "_".join(_safe_path_part(item, "state") for item in items)
+    else:
+        motif_part = _safe_path_part(motif_str)
+    return _safe_path_part(f"{motif_type}_{motif_part}", "motif")
+
+
+def _empty_index_row(motif, motif_type, rank, selection_reason, skipped_reason=""):
+    return {
+        "motif": motif,
+        "type": motif_type,
+        "clip_path": "",
+        "stem": "",
+        "subject_id": "",
+        "animal_id": "",
+        "context": "",
+        "group": "",
+        "start_frame": "",
+        "end_frame": "",
+        "duration_sec": "",
+        "source_video": "",
+        "rank": rank,
+        "selection_reason": selection_reason,
+        "skipped_reason": skipped_reason,
+    }
+
+
+def _first_present(row, names, default=""):
+    for name in names:
+        if name in row:
+            value = row.get(name)
+            if pd.notna(value) and str(value) != "nan":
+                return value
+    return default
+
+
+def _select_diverse_candidates(candidates, limit):
+    """Greedily spread selections across videos, subjects, and groups."""
+    selected = []
+    remaining = list(candidates)
+    seen_stems = set()
+    seen_subjects = set()
+    seen_groups = set()
+
+    while remaining and len(selected) < limit:
+        best_idx = 0
+        best_score = None
+        for i, cand in enumerate(remaining):
+            score = (
+                int(cand.get("stem", "") in seen_stems),
+                int(cand.get("subject_id", "") in seen_subjects or cand.get("animal_id", "") in seen_subjects),
+                int(cand.get("group", "") in seen_groups),
+                -float(cand.get("duration_sec", 0) or 0),
+                str(cand.get("stem", "")),
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_idx = i
+        cand = remaining.pop(best_idx)
+        selected.append(cand)
+        if cand.get("stem"):
+            seen_stems.add(cand["stem"])
+        subject = cand.get("subject_id") or cand.get("animal_id")
+        if subject:
+            seen_subjects.add(subject)
+        if cand.get("group"):
+            seen_groups.add(cand["group"])
+    return selected
+
+
+def cmd_motif_clips(
+    fps=None, top_motifs=10, clips_per_motif=5,
+    clip_padding_sec=1.0, output_dir=None,
+    motif_source=None,
+):
+    """Generate exemplar video clips for top motif occurrences.
+
+    Reads motif occurrence rows and bout boundaries, then exports short clips
+    spanning the full behavior sequence represented by the motif.
+    """
+    import cv2  # noqa: F401 - fail fast if not installed
+
+    cfg = {}
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        pass
+    if fps is None:
+        fps = float(cfg.get("fps", 30))
+
+    seqs_csv = motif_source or os.path.join(_res(), "motifs", "motif_sequences.csv")
+    bouts_csv = os.path.join(_res(), "motifs", "bouts.csv")
+    if not os.path.exists(bouts_csv):
+        bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
+    index_path = os.path.join(_res(), "features", "index.json")
+
+    for path, label in [
+        (seqs_csv, "motif occurrence source (default: results/motifs/motif_sequences.csv)"),
+        (bouts_csv, "bouts.csv (motifs/ or characterization/)"),
+        (index_path, "results/features/index.json"),
+    ]:
+        if not os.path.exists(path):
+            sys.exit(f"Missing {label}: {path}. Run motif discovery first, then re-run with --motif-clips.")
+
+    seqs_df = pd.read_csv(seqs_csv)
+    bouts_df = pd.read_csv(bouts_csv)
+    with open(index_path) as f:
+        index = {k: v for k, v in json.load(f).items() if isinstance(v, dict) and "features_path" in v}
+
+    required = {"stem", "motif", "position"}
+    missing_cols = required - set(seqs_df.columns)
+    if missing_cols:
+        sys.exit(f"Missing required columns in {seqs_csv}: {sorted(missing_cols)}")
+    if "type" not in seqs_df.columns:
+        seqs_df["type"] = "motif"
+
+    video_map = {}
+    for stem, info in index.items():
+        vp = info.get("video_path")
+        if vp:
+            video_map[stem] = _resolve_video_path(vp)
+
+    meta_by_stem = {}
+    if os.path.exists(_meta()):
+        try:
+            meta = _vc.normalize_metadata_columns(pd.read_csv(_meta()))
+            if "stem" not in meta.columns and "filename" in meta.columns:
+                meta["stem"] = meta["filename"].astype(str).str.replace(r"\.[^.]+$", "", regex=True)
+            for _, row in meta.iterrows():
+                meta_by_stem[str(row.get("stem", ""))] = row
+        except Exception:
+            meta_by_stem = {}
+
+    motif_scores = (
+        seqs_df.groupby(["motif", "type"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+    motif_scores["selection_reason"] = "common motif occurrence count"
+    for summary_path in [
+        os.path.join(_res(), "motifs", "motif_context_enrichment.csv"),
+        os.path.join(_res(), "comparison", "motifs.csv"),
+        os.path.join(_res(), "motifs", "motif_summary.csv"),
+    ]:
+        if not os.path.exists(summary_path):
+            continue
+        try:
+            summary = pd.read_csv(summary_path)
+        except Exception:
+            continue
+        if not {"motif", "type"}.issubset(summary.columns):
+            continue
+        keep = ["motif", "type"]
+        for col in ["abs_log2_enrichment", "enrichment_ratio", "count", "frequency"]:
+            if col in summary.columns and col not in keep:
+                keep.append(col)
+        motif_scores = motif_scores.merge(
+            summary[keep], on=["motif", "type"], how="left", suffixes=("", "_summary")
+        )
+        if "abs_log2_enrichment" in motif_scores.columns:
+            motif_scores["selection_reason"] = "enriched motif ranked by abs_log2_enrichment"
+        elif "enrichment_ratio" in motif_scores.columns:
+            motif_scores["selection_reason"] = "enriched motif ranked by enrichment_ratio"
+        break
+
+    sort_cols = []
+    ascending = []
+    for col in ["abs_log2_enrichment", "enrichment_ratio", "count_summary", "count"]:
+        if col in motif_scores.columns:
+            sort_cols.append(col)
+            ascending.append(False)
+    sort_cols.extend(["motif", "type"])
+    ascending.extend([True, True])
+    top = motif_scores.sort_values(sort_cols, ascending=ascending).head(top_motifs)
+    if top.empty:
+        print(f"No motifs found in {seqs_csv}.")
+        return
+
+    base_dir = output_dir or os.path.join(_res(), "motifs", "clips")
+    pad_frames = int(clip_padding_sec * fps)
+    index_rows = []
+    total_written = 0
+    total_attempted = 0
+
+    # Build per-stem bout lists (sorted by start_frame)
+    stem_bouts: dict[str, list[dict]] = {}
+    for _, row in bouts_df.iterrows():
+        stem = str(row.get("stem", ""))
+        if stem not in stem_bouts:
+            stem_bouts[stem] = []
+        stem_bouts[stem].append(row.to_dict())
+    for stem in stem_bouts:
+        stem_bouts[stem].sort(key=lambda b: b.get("start_frame", 0))
+
+    print(f"Generating motif clips for top {len(top)} motifs...")
+    for rank, (_, mrow) in enumerate(top.iterrows()):
+        motif_str = str(mrow["motif"])
+        motif_type = str(mrow.get("type", "bigram"))
+        dir_name = _motif_dir_name(motif_str, motif_type)
+        out_dir = os.path.join(base_dir, dir_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        motif_items = _parse_motif_items(motif_str)
+        if not motif_items:
+            index_rows.append(_empty_index_row(
+                motif_str, motif_type, rank + 1,
+                str(mrow.get("selection_reason", "selected motif")),
+                "could not parse motif sequence",
+            ))
+            print(f"  SKIP: cannot parse motif {motif_str!r}")
+            continue
+
+        motif_len = len(motif_items)
+
+        # Find occurrences from motif_sequences.csv
+        matches = seqs_df[
+            (seqs_df["motif"].astype(str) == motif_str) &
+            (seqs_df["type"].astype(str) == motif_type)
+        ].copy()
+
+        if matches.empty:
+            print(f"  {dir_name}: no occurrences in motif_sequences.csv")
+            index_rows.append(_empty_index_row(
+                motif_str, motif_type, rank + 1,
+                str(mrow.get("selection_reason", "selected motif")),
+                "no occurrences in motif source",
+            ))
+            continue
+
+        # Resolve frame ranges from bout positions
+        clip_candidates = []
+        for _, occ in matches.iterrows():
+            stem = str(occ.get("stem", ""))
+            try:
+                pos = int(occ.get("position", -1))
+            except (TypeError, ValueError):
+                pos = -1
+            meta_row = meta_by_stem.get(stem, {})
+            subject_id = str(_first_present(occ, ["subject_id"], _first_present(meta_row, ["subject_id"], "")))
+            animal_id = str(_first_present(occ, ["animal_id"], _first_present(meta_row, ["animal_id"], "")))
+            group = str(_first_present(occ, ["group"], _first_present(meta_row, ["group", "cohort"], "")))
+            context = str(_first_present(occ, ["context"], _first_present(meta_row, ["context"], "")))
+            video_path = video_map.get(stem, "")
+            skipped_reason = ""
+            if stem not in stem_bouts:
+                skipped_reason = "stem not found in bouts.csv"
+            elif not video_path:
+                skipped_reason = "source video not listed in feature index"
+            elif not os.path.exists(str(video_path)):
+                skipped_reason = "source video missing"
+            bouts = stem_bouts.get(stem, [])
+            if not skipped_reason and pos < 0:
+                skipped_reason = "invalid motif bout position"
+            elif not skipped_reason and pos + motif_len - 1 >= len(bouts):
+                skipped_reason = "motif bout position outside available bouts"
+
+            if skipped_reason:
+                index_rows.append({
+                    "motif": motif_str,
+                    "type": motif_type,
+                    "clip_path": "",
+                    "stem": stem,
+                    "subject_id": subject_id,
+                    "animal_id": animal_id,
+                    "context": context,
+                    "group": group,
+                    "start_frame": "",
+                    "end_frame": "",
+                    "duration_sec": "",
+                    "source_video": video_path,
+                    "rank": rank + 1,
+                    "selection_reason": str(mrow.get("selection_reason", "selected motif")),
+                    "skipped_reason": skipped_reason,
+                })
+                continue
+
+            first_bout = bouts[pos]
+            last_bout = bouts[pos + motif_len - 1]
+            start_frame = max(0, int(first_bout["start_frame"]) - pad_frames)
+            end_frame = int(last_bout["end_frame"]) + pad_frames
+            duration = (end_frame - start_frame + 1) / fps
+
+            clip_candidates.append({
+                "stem": stem,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "duration_sec": round(duration, 2),
+                "subject_id": subject_id or str(first_bout.get("subject_id", "")),
+                "animal_id": animal_id or str(first_bout.get("animal_id", "")),
+                "context": context or str(first_bout.get("context", "")),
+                "group": group or str(first_bout.get("group", "")),
+                "video_path": video_path,
+                "selection_reason": str(mrow.get("selection_reason", "selected motif")),
+            })
+
+        # Rank by duration descending, then greedily diversify across videos/subjects/groups.
+        clip_candidates.sort(key=lambda c: (-c["duration_sec"], c["stem"]))
+        selected = _select_diverse_candidates(clip_candidates, clips_per_motif)
+
+        n_ok = 0
+        for ci, cand in enumerate(selected):
+            clip_path = os.path.join(out_dir, f"clip_{ci+1:03d}.mp4")
+            total_attempted += 1
+            ok = _export_clip(
+                cand["video_path"], cand["start_frame"], cand["end_frame"],
+                clip_path, fps=fps,
+                pad_to_secs=cand["duration_sec"], max_secs=cand["duration_sec"] + 2,
+            )
+            if ok:
+                total_written += 1
+                n_ok += 1
+            index_rows.append({
+                "motif": motif_str,
+                "type": motif_type,
+                "clip_path": os.path.relpath(clip_path, _res()) if ok else "",
+                "stem": cand["stem"],
+                "subject_id": cand["subject_id"],
+                "animal_id": cand["animal_id"],
+                "context": cand["context"],
+                "group": cand["group"],
+                "start_frame": cand["start_frame"],
+                "end_frame": cand["end_frame"],
+                "duration_sec": cand["duration_sec"],
+                "source_video": cand["video_path"],
+                "rank": ci + 1,
+                "selection_reason": cand["selection_reason"],
+                "skipped_reason": "" if ok else "clip export failed",
+            })
+
+        print(f"  {dir_name}: {n_ok}/{len(selected)} clips written")
+
+    # Write index CSV
+    idx_path = os.path.join(_res(), "motifs", "motif_clip_index.csv")
+    if index_rows:
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        pd.DataFrame(index_rows).to_csv(idx_path, index=False)
+        print(f"\nMotif clip index: {idx_path}")
+    else:
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        pd.DataFrame(columns=list(_empty_index_row("", "", "", "").keys())).to_csv(idx_path, index=False)
+        print(f"\nMotif clip index: {idx_path} (empty)")
+
+    failed = total_attempted - total_written
+    if total_attempted == 0:
+        print("\nNo motif clips attempted. Check motif_sequences.csv and video availability.")
+    elif total_written == 0:
+        print(f"\nAll {total_attempted} clips failed. Check video paths.")
+    else:
+        if failed:
+            print(f"\nWARNING: {failed}/{total_attempted} clips failed to export.")
+        print(f"\nDone: {total_written}/{total_attempted} motif clips saved under {base_dir}/")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Export exemplar video clips for each behavioral state",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--motif-clips", action="store_true",
+        help="Generate exemplar clips for top motifs instead of per-state clips",
     )
     parser.add_argument(
         "--n-clips", type=int, default=15,
@@ -436,19 +821,55 @@ def main():
         "--output", type=str, default=None,
         help="Output directory for clips (default: clips/ from vieb_config)",
     )
-    parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--fps", type=float, default=None)
     parser.add_argument(
         "--max-clip-frames", type=int, default=300,
         help="Hard cap on clip length in frames (default: 300 = 10 s at 30 fps).",
     )
-    args = parser.parse_args()
-    cmd_clips(
-        fps=args.fps,
-        n_clips=args.n_clips,
-        clip_purity=args.clip_purity,
-        max_clip_frames=args.max_clip_frames,
-        output_dir=args.output,
+    parser.add_argument(
+        "--top-motifs", type=int, default=10,
+        help="Number of top motifs to generate clips for (default: 10)",
     )
+    parser.add_argument(
+        "--clips-per-motif", type=int, default=5,
+        help="Max clips per motif (default: 5)",
+    )
+    parser.add_argument(
+        "--clip-padding-sec", type=float, default=1.0,
+        help="Padding in seconds around motif clip boundaries (default: 1.0)",
+    )
+    parser.add_argument(
+        "--motif-source", type=str, default=None,
+        help="Motif occurrence CSV (default: results/motifs/motif_sequences.csv)",
+    )
+    args = parser.parse_args()
+
+    resolved_fps = args.fps
+    if resolved_fps is None:
+        try:
+            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            with open(cfg_path, encoding="utf-8") as f:
+                resolved_fps = float(json.load(f).get("fps", 30))
+        except Exception:
+            resolved_fps = 30.0
+
+    if args.motif_clips:
+        cmd_motif_clips(
+            fps=resolved_fps,
+            top_motifs=args.top_motifs,
+            clips_per_motif=args.clips_per_motif,
+            clip_padding_sec=args.clip_padding_sec,
+            output_dir=args.output,
+            motif_source=args.motif_source,
+        )
+    else:
+        cmd_clips(
+            fps=resolved_fps,
+            n_clips=args.n_clips,
+            clip_purity=args.clip_purity,
+            max_clip_frames=args.max_clip_frames,
+            output_dir=args.output,
+        )
 
 
 if __name__ == "__main__":
