@@ -84,11 +84,26 @@ def _setup_motif_project(tmp_path, monkeypatch):
         json.dump(index, f)
 
     # Config
-    cfg = {"fps": 30, "results_dir": str(results)}
+    cfg = {
+        "fps": 30,
+        "results_dir": str(results),
+        "paths": {
+            "raw_videos": str(tmp_path / "raw"),
+            "pose_files": "",
+            "pose_h5": None,
+            "metadata": str(tmp_path / "metadata.csv"),
+            "results": str(results),
+        },
+    }
     with open(tmp_path / "config.json", "w") as f:
         json.dump(cfg, f)
+    with open(tmp_path / "app_config.json", "w") as f:
+        json.dump({"active_project": str(tmp_path)}, f)
 
     import vieb_config
+    monkeypatch.setattr(vieb_config, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(vieb_config, "_APP_CONFIG_PATH", str(tmp_path / "app_config.json"))
+    monkeypatch.setattr(vieb_config, "_CONFIG_PATH", str(tmp_path / "config.json"))
     monkeypatch.setattr(vieb_config, "get_results_dir", lambda: str(results))
 
     # Monkeypatch _export_clip to always return True (no real video)

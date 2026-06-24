@@ -318,8 +318,8 @@ def create_or_reuse_venv(python_cmd, venv_name, plat, label):
         print("ERROR: Could not find venv Python at: {0}".format(venv_python))
         sys.exit(1)
 
-    print("Upgrading pip in ./{0}...".format(venv_name))
-    subprocess.call([venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
+    print("Upgrading pip and setuptools in ./{0}...".format(venv_name))
+    subprocess.call([venv_python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "--quiet"])
 
     return venv_python
 

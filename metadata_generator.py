@@ -25,6 +25,7 @@ META_COLUMNS = [
     "filename", "date", "box", "experiment", "day", "context",
     "no_shock", "animal_id", "fear",
 ]
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv")
 
 # Only a session identifier is universally required. animal_id/context/day are
 # optional but unlock additional reports when present.
@@ -154,10 +155,27 @@ def scan_raw_videos(raw_videos_dir: str) -> list[dict]:
     if not raw_videos_dir or not os.path.isdir(raw_videos_dir):
         return []
 
-    videos = sorted(glob.glob(os.path.join(raw_videos_dir, "*.mp4")))
+    videos: list[str] = []
+    for ext in VIDEO_EXTENSIONS:
+        videos.extend(glob.glob(os.path.join(raw_videos_dir, f"*{ext}")))
+        videos.extend(glob.glob(os.path.join(raw_videos_dir, f"*{ext.upper()}")))
+    videos = sorted(set(videos))
     rows = []
     for video_path in videos:
         filename = os.path.basename(video_path)
+        rows.append(_row_from_name(filename, filename=filename))
+    return rows
+
+
+def scan_pose_csvs(pose_files_dir: str) -> list[dict]:
+    """Scan a folder of pose CSVs and infer metadata fields from filenames."""
+    if not pose_files_dir or not os.path.isdir(pose_files_dir):
+        return []
+    rows = []
+    for csv_path in sorted(glob.glob(os.path.join(pose_files_dir, "*.csv"))):
+        filename = os.path.basename(csv_path)
+        if filename.lower() == "metadata.csv":
+            continue
         rows.append(_row_from_name(filename, filename=filename))
     return rows
 
@@ -174,12 +192,13 @@ def scan_h5_keys(h5_path: str) -> list[dict]:
     info = inspect_h5(h5_path)
     rows = []
     for key in info["keys"]:
-        rows.append(_row_from_name(key, filename=""))
+        rows.append(_row_from_name(key, filename=str(key)))
     return rows
 
 
 def generate_metadata_template(
     raw_videos_dir: str | None = None,
+    pose_files_dir: str | None = None,
     h5_path: str | None = None,
     filename_regex: str | None = None,
 ) -> pd.DataFrame:
@@ -192,10 +211,15 @@ def generate_metadata_template(
             rows.extend(scan_raw_videos_with_regex(raw_videos_dir, filename_regex))
         else:
             rows.extend(scan_raw_videos(raw_videos_dir))
+    if pose_files_dir:
+        existing_filenames = {r["filename"] for r in rows if r.get("filename")}
+        for row in scan_pose_csvs(pose_files_dir):
+            if row["filename"] not in existing_filenames:
+                rows.append(row)
     if h5_path:
-        existing_ids = {r["animal_id"] for r in rows if r["animal_id"]}
+        existing_filenames = {r["filename"] for r in rows if r.get("filename")}
         for row in scan_h5_keys(h5_path):
-            if not row["animal_id"] or row["animal_id"] not in existing_ids:
+            if row["filename"] not in existing_filenames:
                 rows.append(row)
 
     if not rows:

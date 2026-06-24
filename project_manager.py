@@ -22,6 +22,7 @@ KNOWN_RESULT_FILES = (
     Path("results/shared/cluster_info.json"),
     Path("results/comparison/summary_table.csv"),
 )
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 
 LEGACY_MARKERS = (
     Path("metadata.csv"),
@@ -186,7 +187,7 @@ def validate_project(path: Path | str) -> ProjectValidation:
     checks: list[Check] = []
 
     exists = project.exists() and project.is_dir()
-    checks.append(Check("project_dir", "project directory exists", "green" if exists else "red", str(project)))
+    checks.append(Check("active_project", "active project exists", "green" if exists else "red", str(project)))
     if not exists:
         return ProjectValidation(project, False, checks, {})
 
@@ -201,13 +202,11 @@ def validate_project(path: Path | str) -> ProjectValidation:
     cfg = normalize_project_config(cfg, project)
     meta = Path(cfg["metadata_csv_path"])
     meta_parent_ok = meta.exists() or meta.parent.exists()
-    checks.append(Check("metadata", "metadata path exists or can be created", "green" if meta.exists() else ("yellow" if meta_parent_ok else "red"), str(meta)))
+    checks.append(Check("metadata", "metadata exists or can be generated", "green" if meta.exists() else ("yellow" if meta_parent_ok else "red"), str(meta)))
 
-    raw = Path(cfg["raw_videos_dir"]) if cfg.get("raw_videos_dir") else None
-    pose_files = Path(cfg["pose_files_dir"]) if cfg.get("pose_files_dir") else None
-    pose_h5 = Path(cfg["h5_path"]) if cfg.get("h5_path") else None
-    source_ok = any(p and p.exists() for p in (raw, pose_files, pose_h5))
-    checks.append(Check("pose_source", "raw video / pose source exists", "green" if source_ok else "yellow", "set raw_videos, pose_files, or pose_h5"))
+    source = session_source_status(project, cfg)
+    source_msg = source["message"] if source["valid"] else "import raw videos, pose CSVs, H5 pose data, or metadata CSV"
+    checks.append(Check("pose_source", "session-defining data source detected", "green" if source["valid"] else "red", source_msg))
 
     results = Path(cfg["results_dir"])
     results_ok = results.exists() and os.access(results, os.W_OK)
@@ -218,16 +217,73 @@ def validate_project(path: Path | str) -> ProjectValidation:
     cluster = results / "shared" / "cluster_info.json"
     report = results / "comparison" / "summary_table.csv"
     motif = (results / "comparison" / "motifs.csv").exists() or (results / "motifs" / "motif_summary.csv").exists()
-    checks.append(Check("features", "previous feature results detected", "green" if feature.exists() else "yellow", str(feature)))
-    checks.append(Check("clusters", "previous cluster results detected", "green" if cluster.exists() else "yellow", str(cluster)))
+    checks.append(Check("features", "previous feature outputs detected", "green" if feature.exists() else "yellow", str(feature)))
+    checks.append(Check("clusters", "previous clustering outputs detected", "green" if cluster.exists() else "yellow", str(cluster)))
     checks.append(Check("reports", "previous report outputs detected", "green" if report.exists() else "yellow", str(report)))
     checks.append(Check("motifs", "motif outputs detected", "green" if motif else "yellow", "optional"))
-    checks.append(Check("metadata_schema", "metadata schema status", "green" if cfg.get("metadata_schema") or cfg.get("column_map") else "yellow", "configure canonical column mapping"))
-    groups = cfg.get("analysis_groups") or cfg.get("metadata_schema", {}).get("analysis_groups") or []
-    checks.append(Check("analysis_groups", "configured analysis groups", "green" if groups else "yellow", f"{len(groups)} group(s)"))
-
     valid = bool(project_indicators(project))
     return ProjectValidation(project, valid, checks, cfg)
+
+
+def _count_files(folder: Path | str | None, suffixes: set[str]) -> int:
+    if not folder:
+        return 0
+    path = Path(folder)
+    if not path.exists() or not path.is_dir():
+        return 0
+    return sum(1 for p in path.iterdir() if p.is_file() and p.suffix.lower() in suffixes)
+
+
+def _metadata_row_count(path: Path | str | None) -> int:
+    if not path:
+        return 0
+    meta = Path(path)
+    if not meta.exists() or not meta.is_file():
+        return 0
+    try:
+        with meta.open(newline="", encoding="utf-8") as f:
+            return max(0, sum(1 for row in csv.reader(f) if any(cell.strip() for cell in row)) - 1)
+    except Exception:
+        return 0
+
+
+def session_source_status(project_path: Path | str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return whether the project has at least one source that defines sessions."""
+    project = Path(project_path).resolve()
+    cfg = normalize_project_config(config if config is not None else _read_project_config(project), project)
+    raw_count = _count_files(cfg.get("raw_videos_dir"), VIDEO_EXTENSIONS)
+    pose_csv_count = _count_files(cfg.get("pose_files_dir"), {".csv"})
+    h5_path = Path(cfg["h5_path"]) if cfg.get("h5_path") else None
+    h5_exists = bool(h5_path and h5_path.exists() and h5_path.is_file())
+    metadata_rows = _metadata_row_count(cfg.get("metadata_csv_path"))
+    metadata_valid = False
+    if metadata_rows:
+        try:
+            from metadata_generator import validate_metadata_csv
+
+            metadata_valid = bool(validate_metadata_csv(cfg.get("metadata_csv_path", "")).get("valid"))
+        except Exception:
+            metadata_valid = False
+
+    parts = []
+    if raw_count:
+        parts.append(f"{raw_count} raw video(s)")
+    if pose_csv_count:
+        parts.append(f"{pose_csv_count} pose CSV(s)")
+    if h5_exists:
+        parts.append("H5 pose file")
+    if metadata_valid:
+        parts.append(f"{metadata_rows} metadata row(s)")
+
+    return {
+        "valid": bool(raw_count or pose_csv_count or h5_exists or metadata_valid),
+        "raw_videos": raw_count,
+        "pose_csvs": pose_csv_count,
+        "h5": h5_exists,
+        "metadata_rows": metadata_rows,
+        "metadata_valid": metadata_valid,
+        "message": ", ".join(parts) if parts else "no session-defining source detected",
+    }
 
 
 def _candidate_paths(app_cfg: dict[str, Any], repo_root: Path) -> list[Path]:
@@ -333,13 +389,13 @@ def select_startup_project(repo_root: Path | str = REPO_ROOT, app_config_path: P
         return StartupSelection("auto_selected", validation.path, paths, validation, legacy)
     if len(candidates) > 1:
         return StartupSelection("picker_required", None, paths, None, legacy, "Multiple valid projects found.")
-    return StartupSelection("onboarding_required", None, [], None, legacy, "No valid project selected. Complete Project Onboarding before running the pipeline.")
+    return StartupSelection("onboarding_required", None, [], None, legacy, "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.")
 
 
 def get_active_project(repo_root: Path | str = REPO_ROOT, app_config_path: Path | str | None = None) -> Path:
     selected = select_startup_project(repo_root, app_config_path)
     if selected.active_project is None:
-        raise ProjectSelectionError(selected.message or "No valid project selected. Complete Project Onboarding before running the pipeline.")
+        raise ProjectSelectionError(selected.message or "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.")
     return selected.active_project
 
 
@@ -369,9 +425,154 @@ def resolve_project_path(key: str, repo_root: Path | str = REPO_ROOT, app_config
     root = Path(repo_root).resolve()
     if resolved in (root / "metadata.csv", root / "raw_videos", root / "results") and project != root:
         raise ProjectSelectionError(
-            f"Refusing repo-root fallback for {key}. Complete Project Onboarding before running the pipeline."
+            f"Refusing repo-root fallback for {key}. Complete Stage 0: Onboarding before running the pipeline."
         )
     return resolved
+
+
+def set_active_project(
+    project_path: Path | str,
+    repo_root: Path | str = REPO_ROOT,
+    app_config_path: Path | str | None = None,
+) -> ProjectValidation:
+    """Validate, remember, and return the active project."""
+    root = Path(repo_root).resolve()
+    project = Path(project_path).expanduser()
+    if not project.is_absolute():
+        project = root / project
+    validation = validate_project(project)
+    if not validation.valid:
+        raise ProjectSelectionError(f"Not a valid VIEB project: {project}")
+    app_path = Path(app_config_path) if app_config_path else root / "app_config.json"
+    app_cfg = load_app_config(app_path)
+    _remember_project(app_cfg, validation.path, validation.project_name)
+    save_app_config(app_cfg, app_path)
+    return validation
+
+
+def ensure_project_metadata(project_path: Path | str, *, overwrite: bool = False) -> dict[str, Any]:
+    """Validate existing metadata or create metadata.csv from detected sources."""
+    project = Path(project_path).resolve()
+    validation = validate_project(project)
+    cfg = validation.config
+    meta = Path(cfg["metadata_csv_path"])
+    source = session_source_status(project, cfg)
+    if not source["valid"]:
+        return {"created": False, "path": meta, "valid": False, "messages": ["Stage 0 requires raw videos, pose CSVs, an H5 pose file, or an existing metadata CSV."]}
+    if meta.exists() and not overwrite:
+        from metadata_generator import validate_metadata_csv
+
+        report = validate_metadata_csv(str(meta))
+        if report.get("valid") and source["valid"]:
+            return {"created": False, "path": meta, "valid": True, "messages": report.get("messages", [])}
+
+    raw = cfg.get("raw_videos_dir") or ""
+    pose_files = cfg.get("pose_files_dir") or ""
+    h5 = cfg.get("h5_path") or ""
+    from metadata_generator import generate_metadata_template, validate_metadata, write_metadata_csv
+
+    df = generate_metadata_template(raw_videos_dir=raw, pose_files_dir=pose_files, h5_path=h5)
+    if df.empty:
+        return {
+            "created": False,
+            "path": meta,
+            "valid": False,
+            "messages": ["Could not generate metadata automatically; import raw videos, pose CSVs, an H5 pose file, or an existing metadata CSV."],
+        }
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    write_metadata_csv(df, str(meta))
+    report = validate_metadata(df)
+    return {"created": True, "path": meta, "valid": bool(report.get("valid")), "messages": report.get("messages", [])}
+
+
+def import_data_source(
+    project_path: Path | str,
+    source_type: str,
+    source_path: Path | str,
+) -> dict[str, Any]:
+    """Save a session-defining source path and create/validate project metadata."""
+    project = Path(project_path).resolve()
+    cfg = normalize_project_config(_read_project_config(project), project)
+    paths = cfg.setdefault("paths", {})
+    source = Path(source_path).expanduser()
+    if not source.is_absolute():
+        source = (project / source).resolve()
+    else:
+        source = source.resolve()
+
+    if source_type == "raw_videos":
+        if not source.is_dir():
+            raise ProjectSelectionError("Raw videos source must be a folder.")
+        paths["raw_videos"] = str(source)
+        cfg["pose_source"] = "none"
+        write_project_config(project, cfg)
+        report = ensure_project_metadata(project, overwrite=True)
+    elif source_type == "pose_csvs":
+        if not source.is_dir():
+            raise ProjectSelectionError("Pose CSV source must be a folder.")
+        paths["pose_files"] = str(source)
+        cfg["pose_source"] = "csv"
+        write_project_config(project, cfg)
+        report = ensure_project_metadata(project, overwrite=True)
+    elif source_type == "pose_h5":
+        if not source.is_file():
+            raise ProjectSelectionError("H5 pose source must be a file.")
+        paths["pose_h5"] = str(source)
+        cfg["pose_source"] = "h5"
+        write_project_config(project, cfg)
+        report = ensure_project_metadata(project, overwrite=True)
+    elif source_type == "metadata":
+        if not source.is_file():
+            raise ProjectSelectionError("Metadata source must be a CSV file.")
+        target = project / "metadata.csv"
+        from metadata_generator import generate_metadata_from_manifest, validate_metadata
+
+        normalized = generate_metadata_from_manifest(str(source), cfg, str(target))
+        paths["metadata"] = str(target)
+        report = {"created": source.resolve() != target.resolve(), "path": target, **validate_metadata(normalized)}
+    else:
+        raise ProjectSelectionError(f"Unknown data source type: {source_type}")
+
+    if source_type == "metadata":
+        write_project_config(project, cfg)
+    status = session_source_status(project)
+    ok = bool(report.get("valid")) and status["valid"]
+    return {
+        "valid": ok,
+        "metadata": report,
+        "source": status,
+        "messages": report.get("messages", []),
+    }
+
+
+def onboarding_complete(project_path: Path | str) -> bool:
+    """Return True when metadata and at least one session source are valid."""
+    project = Path(project_path).resolve()
+    cfg = normalize_project_config(_read_project_config(project), project)
+    source = session_source_status(project, cfg)
+    meta = Path(cfg["metadata_csv_path"])
+    if not source["valid"] or not meta.exists():
+        return False
+    try:
+        from metadata_generator import validate_metadata_csv
+
+        return bool(validate_metadata_csv(str(meta)).get("valid"))
+    except Exception:
+        return False
+
+
+def onboard_project(
+    repo_root: Path | str = REPO_ROOT,
+    app_config_path: Path | str | None = None,
+) -> StartupSelection:
+    """Resolve the startup project and validate/create metadata when possible."""
+    selected = select_startup_project(repo_root, app_config_path)
+    if selected.active_project is not None:
+        meta_report = ensure_project_metadata(selected.active_project)
+        selected.validation = validate_project(selected.active_project)
+        if not meta_report.get("valid"):
+            selected.message = "; ".join(meta_report.get("messages", []))
+    return selected
 
 
 def create_project(project_path: Path | str, project_name: str, paths: dict[str, Any] | None = None, repo_root: Path | str = REPO_ROOT, app_config_path: Path | str | None = None) -> Path:
@@ -383,9 +584,9 @@ def create_project(project_path: Path | str, project_name: str, paths: dict[str,
     (project / "raw_videos").mkdir(exist_ok=True)
     (project / "results").mkdir(exist_ok=True)
     (project / "logs").mkdir(exist_ok=True)
-    template = project / "metadata_template.csv"
-    if not template.exists():
-        with template.open("w", newline="", encoding="utf-8") as f:
+    metadata = project / "metadata.csv"
+    if not metadata.exists():
+        with metadata.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(["session_id", "stem", "subject_id", "animal_id", "context", "condition", "day", "timepoint"])
     cfg = {
         "project_name": project_name,
@@ -393,7 +594,7 @@ def create_project(project_path: Path | str, project_name: str, paths: dict[str,
             "raw_videos": str((project / "raw_videos").resolve()),
             "pose_files": "",
             "pose_h5": None,
-            "metadata": str(template.resolve()),
+            "metadata": str(metadata.resolve()),
             "results": str((project / "results").resolve()),
             **(paths or {}),
         },

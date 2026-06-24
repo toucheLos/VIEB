@@ -338,18 +338,16 @@ class _Card(QFrame):
 
 
 _STAGE_HELP: dict[int, str] = {
+    0:  "stage_0_onboarding",
     1:  "stage_1_dlc",
     2:  "stage_2_features",
     3:  "stage_3_clustering",
-    4:  "stage_3_clustering",
-    5:  "stage_3_clustering",
-    6:  "stage_3_clustering",
-    7:  "stage_4_collapse",
-    8:  "stage_5_comparison",
-    9:  "stage_5_comparison",
-    10: "stage_5_comparison",
-    11: "stage_6_clips",
-    12: "stage_5_comparison",
+    4:  "stage_4_collapse",
+    5:  "stage_5_comparison",
+    6:  "stage_6_quantification",
+    7:  "stage_7_motifs",
+    8:  "stage_8_clips",
+    9:  "stage_9_add_videos",
 }
 
 

@@ -122,8 +122,91 @@ def test_create_new_project_writes_scaffold(tmp_path):
     assert (project / "config.json").exists()
     assert (project / "results").is_dir()
     assert (project / "logs").is_dir()
-    assert (project / "metadata_template.csv").exists()
+    assert (project / "metadata.csv").exists()
     assert json.loads(app.read_text())["active_project"] == str(project)
+
+
+def test_onboarding_generates_missing_metadata_from_raw_videos(tmp_path):
+    project = tmp_path / "projects" / "raw_project"
+    raw = project / "raw_videos"
+    results = project / "results"
+    raw.mkdir(parents=True)
+    results.mkdir()
+    (raw / "session_001.mp4").write_bytes(b"")
+    _write_json(project / "config.json", {
+        "project_name": "raw_project",
+        "paths": {
+            "raw_videos": str(raw),
+            "pose_files": "",
+            "pose_h5": None,
+            "metadata": str(project / "metadata.csv"),
+            "results": str(results),
+        },
+    })
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    selected = pm.onboard_project(tmp_path, app)
+
+    assert selected.active_project == project.resolve()
+    assert (project / "metadata.csv").exists()
+    assert "session_001.mp4" in (project / "metadata.csv").read_text(encoding="utf-8")
+
+
+def test_onboarding_without_sources_does_not_require_advanced_settings(tmp_path):
+    project = tmp_path / "projects" / "empty_project"
+    project.mkdir(parents=True)
+    (project / "results").mkdir()
+    _write_json(project / "config.json", {
+        "project_name": "empty_project",
+        "paths": {
+            "raw_videos": str(project / "raw_videos"),
+            "pose_files": "",
+            "pose_h5": None,
+            "metadata": str(project / "metadata.csv"),
+            "results": str(project / "results"),
+        },
+    })
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    selected = pm.onboard_project(tmp_path, app)
+
+    assert selected.active_project == project.resolve()
+    assert "Stage 0 requires raw videos" in selected.message
+    assert pm.onboarding_complete(project) is False
+
+
+def test_import_pose_csv_source_generates_metadata_and_skips_dlc(tmp_path):
+    app = tmp_path / "app_config.json"
+    project = pm.create_project(tmp_path / "projects" / "pose_project", "Pose Project", app_config_path=app, repo_root=tmp_path)
+    pose_dir = tmp_path / "pose"
+    pose_dir.mkdir()
+    (pose_dir / "session_A_DLC.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+
+    result = pm.import_data_source(project, "pose_csvs", pose_dir)
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+
+    assert result["valid"] is True
+    assert cfg["pose_source"] == "csv"
+    assert cfg["paths"]["pose_files"] == str(pose_dir.resolve())
+    assert "session_A_DLC.csv" in (project / "metadata.csv").read_text(encoding="utf-8")
+    assert pm.onboarding_complete(project) is True
+
+
+def test_import_existing_metadata_csv_normalizes_into_project(tmp_path):
+    app = tmp_path / "app_config.json"
+    project = pm.create_project(tmp_path / "projects" / "manifest_project", "Manifest Project", app_config_path=app, repo_root=tmp_path)
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text("source_file,animal\nvid1.mp4,a1\nvid2.mp4,a2\n", encoding="utf-8")
+
+    result = pm.import_data_source(project, "metadata", manifest)
+
+    assert result["valid"] is True
+    text = (project / "metadata.csv").read_text(encoding="utf-8")
+    assert "session_id" in text
+    assert "vid1.mp4" in text
+    assert pm.onboarding_complete(project) is True
 
 
 def test_external_metadata_and_raw_video_paths(tmp_path):

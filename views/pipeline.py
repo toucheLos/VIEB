@@ -71,7 +71,7 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
-        self._run_full = QPushButton("Run Full Pipeline (Stages 2–11)")
+        self._run_full = QPushButton("Run Full Pipeline")
         self._run_full.setToolTip(
             "Run all behavioral analysis stages in order."
         )
@@ -312,18 +312,18 @@ class RunPipelineView(QWidget):
                 mins = max(5, int(n_videos * 0.4))
             elif sid == 2:
                 mins = max(2, int(n_frames / 120000))
-            elif sid in (3, 4, 5, 6):
+            elif sid == 3:
                 mins = max(5, int(n_frames / 90000))
-            elif sid == 7:
+            elif sid == 4:
                 mins = 2
-            elif sid == 8:
+            elif sid == 5:
                 mins = 2
-            elif sid == 9:
+            elif sid == 6:
                 mins = 1
-            elif sid == 10:
+            elif sid == 7:
                 mins = 1
             else:
-                mins = 8 if sid == 11 else 3
+                mins = 8 if sid == 8 else 3
             row.set_eta(f"~{mins} min")
 
     def update_from_cfg(self, statuses: dict | None = None):
@@ -413,9 +413,9 @@ class RunPipelineView(QWidget):
             self.pipeline_done.emit()
 
     def update_cluster_quality(self, data: dict):
-        """Update the Stage 5 quality badge from loaded cluster/summary data."""
-        stage5_row = self._rows.get(5)
-        if stage5_row is None:
+        """Update the Stage 3 quality badge from loaded cluster/summary data."""
+        stage3_row = self._rows.get(3)
+        if stage3_row is None:
             return
         ci = data.get("cluster_info")
         summary = data.get("summary")
@@ -432,7 +432,7 @@ class RunPipelineView(QWidget):
         dom_col = means.idxmax()
         dom_state_id = int(dom_col.split("_")[1])
         dom_frac = float(means[dom_col])
-        stage5_row.set_cluster_quality(dom_frac, dom_state_id)
+        stage3_row.set_cluster_quality(dom_frac, dom_state_id)
 
     def update_diagnostics(self, data: dict):
         """Populate the diagnostics panel from loaded data."""
@@ -653,7 +653,7 @@ class RunPipelineView(QWidget):
 
         # Filter out collapse stage if not enabled
         if not self.cfg.get("enable_state_collapse", False):
-            ids = [i for i in ids if i != 7]
+            ids = [i for i in ids if i != 4]
 
         # Filter out DLC stage if pose CSVs already exist
         try:
@@ -668,10 +668,10 @@ class RunPipelineView(QWidget):
         if 1 in ids and from_here:
             ids.remove(1)
 
-        return ids
+        return [i for i in ids if i not in (0, 9)]
 
     def run_full_pipeline(self):
-        self._start_worker(self._build_sequence(2, from_here=True))
+        self._start_worker(self._build_sequence(1, from_here=True))
 
     def _run_stage(self, sid):
         self._start_worker(self._build_sequence(sid, from_here=False))

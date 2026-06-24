@@ -10,13 +10,16 @@ from PyQt5.QtWidgets import (
 _SECTIONS = [
     ("what_is_vieb",           "What is VIEB?"),
     ("how_vieb_works",         "How VIEB Works — The Big Picture"),
+    ("stage_0_onboarding",     "Stage 0 — Onboarding"),
     ("stage_1_dlc",            "Stage 1 — DLC Setup (Pose Estimation)"),
     ("stage_2_features",       "Stage 2 — Feature Extraction"),
     ("stage_3_clustering",     "Stage 3 — Preprocessing, UMAP, Clustering & Smoothing"),
     ("stage_4_collapse",       "Stage 4 — State Collapse (optional)"),
     ("stage_5_comparison",     "Stage 5 — Comparison Report"),
-    ("stage_6_clips",          "Stage 6 — Generate Clips"),
-    ("stage_7_quantification", "Stage 7 — Quantification"),
+    ("stage_6_quantification", "Stage 6 — Quantification"),
+    ("stage_7_motifs",         "Stage 7 — Motif Discovery"),
+    ("stage_8_clips",          "Stage 8 — Generate Clips"),
+    ("stage_9_add_videos",     "Stage 9 — Add Videos"),
     ("diagnose",               "Diagnose Clustering Parameters"),
     ("split_dominant",         "Split Dominant State"),
     ("clip_reviewer",          "Clip Reviewer"),
@@ -59,13 +62,26 @@ unsupervised machine learning pipeline to discover behavioral states. No human l
 The pipeline consists of six stages:</p>
 
 <ul>
+<li><b>Stage 0 — Onboarding:</b> Selects or creates the active project and prepares metadata.</li>
 <li><b>Stage 1 — DLC Setup:</b> Trains and runs DeepLabCut to generate pose CSV files.</li>
 <li><b>Stage 2 — Feature Extraction:</b> Converts pose coordinates into 51–91 kinematic features per frame.</li>
-<li><b>Stages 3–6 — Preprocessing, UMAP, Clustering, Smoothing:</b> Discovers behavioral states across all videos.</li>
-<li><b>Stage 7 — State Collapse (optional):</b> Merges highly similar states.</li>
-<li><b>Stage 8 — Comparison Report:</b> Generates state occupancy plots and tables.</li>
-<li><b>Stage 11 — Generate Clips:</b> Exports exemplar video clips per state.</li>
+<li><b>Stage 3 — Preprocessing, UMAP, Clustering, Smoothing:</b> Discovers behavioral states across all videos.</li>
+<li><b>Stage 4 — State Collapse (optional):</b> Merges highly similar states.</li>
+<li><b>Stage 5 — Comparison Report:</b> Generates state occupancy plots and tables.</li>
+<li><b>Stage 8 — Generate Clips:</b> Exports exemplar video clips per state.</li>
 </ul>
+""",
+
+"stage_0_onboarding": """
+<p><b>What it does:</b> Finds or creates the active VIEB project, validates the compact project checklist,
+and creates or validates metadata from a session-defining source.</p>
+
+<p><b>Why it comes first:</b> Every later stage needs a valid project path. If pose files already exist,
+you can skip DLC and continue directly to feature extraction.</p>
+
+<p><b>Accepted inputs:</b> Raw videos, pose CSVs, an H5 pose file, or an existing metadata/manifest CSV.
+Raw videos create metadata from filenames and leave Stage 1 available. Pose CSVs and H5 pose data create
+metadata from pose filenames or keys and may let you skip DLC.</p>
 """,
 
 "stage_1_dlc": """
@@ -223,7 +239,7 @@ learning trajectories</li>
 <p><b>Time:</b> 1–2 minutes.</p>
 """,
 
-"stage_6_clips": """
+"stage_8_clips": """
 <p><b>What it does:</b> Exports short video clips illustrating each behavioral state. Two types of
 clips are generated per state:</p>
 
@@ -245,7 +261,7 @@ less certain state assignments.</p>
 <p><b>Time:</b> 5–20 minutes depending on number of states and video length.</p>
 """,
 
-"stage_7_quantification": """
+"stage_6_quantification": """
 <p><b>What it does:</b> Computes per-animal behavioral scalars that summarize each animal's
 behavioral profile across all sessions. These scalars are the primary output for statistical
 analysis and correlation with biological measurements.</p>
@@ -282,6 +298,22 @@ stereotyped behavioral sequences.</p>
 <p><b>Output:</b> master_table.csv with one row per animal and all scalar columns.</p>
 
 <p><b>Time:</b> 1–2 minutes.</p>
+""",
+
+"stage_7_motifs": """
+<p><b>What it does:</b> Finds enriched bigram and trigram behavioral motifs across the discovered
+state sequence.</p>
+
+<p><b>When to use:</b> Run after report generation when you want sequence-level summaries in addition
+to state occupancy summaries.</p>
+""",
+
+"stage_9_add_videos": """
+<p><b>What it does:</b> Opens the Add Videos workflow for expanding the active project after an
+initial pass.</p>
+
+<p><b>Why it is last:</b> Users often add more videos after confirming that the first project pass
+has valid metadata, pose sources, and results.</p>
 """,
 
 "diagnose": """

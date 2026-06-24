@@ -38,9 +38,6 @@ results/
 clips/
 videos/
 
-# Project data
-projects/
-
 # Config files state
 app_config.json
 config.json
@@ -55,3 +52,4 @@ results/
 
 # Projects
 projects/*
+metadata.csv

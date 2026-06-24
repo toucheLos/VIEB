@@ -36,14 +36,68 @@ from PyQt5.QtWidgets import (
 
 from _utils import APP_CONFIG_PATH, ROOT
 
+LIGHT_DIALOG_STYLE = """
+QDialog, QWidget {
+    background: #ffffff;
+    color: #202124;
+}
+QLabel {
+    color: #202124;
+    background: transparent;
+}
+QLineEdit, QComboBox, QTableWidget, QScrollArea {
+    background: #ffffff;
+    color: #202124;
+    border: 1px solid #DADCE0;
+}
+QRadioButton, QCheckBox {
+    color: #202124;
+    background: transparent;
+}
+QPushButton {
+    background: #F8F9FA;
+    color: #202124;
+    border: 1px solid #DADCE0;
+    border-radius: 4px;
+    padding: 5px 10px;
+}
+QPushButton:hover {
+    background: #F1F3F4;
+}
+QPushButton[primary="true"] {
+    background: #1A73E8;
+    color: #ffffff;
+    border-color: #1A73E8;
+}
+"""
+
+
+def _existing_directory(parent, title: str, start: str) -> str:
+    return QFileDialog.getExistingDirectory(
+        parent,
+        title,
+        start,
+        QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog,
+    )
+
+
+def _open_file(parent, title: str, start: str, filter_str: str):
+    return QFileDialog.getOpenFileName(
+        parent,
+        title,
+        start,
+        filter_str,
+        options=QFileDialog.DontUseNativeDialog,
+    )
+
 
 def _ensure_project_scaffold(folder: Path) -> None:
     (folder / "raw_videos").mkdir(exist_ok=True)
     (folder / "results").mkdir(exist_ok=True)
     (folder / "logs").mkdir(exist_ok=True)
-    template = folder / "metadata_template.csv"
-    if not template.exists():
-        with template.open("w", newline="", encoding="utf-8") as f:
+    metadata = folder / "metadata.csv"
+    if not metadata.exists():
+        with metadata.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
                 "session_id", "stem", "subject_id", "animal_id",
                 "context", "condition", "day", "timepoint",
@@ -55,7 +109,7 @@ def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
         "raw_videos": cfg.get("raw_videos_dir") or str(folder / "raw_videos"),
         "pose_files": cfg.get("pose_files_dir", ""),
         "pose_h5": cfg.get("h5_path") or None,
-        "metadata": cfg.get("metadata_csv_path") or str(folder / "metadata_template.csv"),
+        "metadata": cfg.get("metadata_csv_path") or str(folder / "metadata.csv"),
         "results": cfg.get("results_dir") or str(folder / "results"),
         "external_data_root": cfg.get("external_data_root", ""),
     }
@@ -155,6 +209,7 @@ class WelcomeDialog(QDialog):
         self.pose_source: str = "none"
         self.setWindowTitle("Welcome to VIEB" if first_launch else "New Project")
         self.setMinimumWidth(480)
+        self.setStyleSheet(LIGHT_DIALOG_STYLE)
         self._build()
 
     def _build(self):
@@ -324,6 +379,7 @@ class ProjectSelectorDialog(QDialog):
         self.selected_path: str = ""
         self.setWindowTitle("Select Project")
         self.setMinimumSize(620, 420)
+        self.setStyleSheet(LIGHT_DIALOG_STYLE)
         self._build()
 
     def _build(self):
@@ -431,6 +487,7 @@ class NewProjectDialog(QDialog):
         self.created_path: str = ""
         self.setWindowTitle("New Project")
         self.setMinimumWidth(540)
+        self.setStyleSheet(LIGHT_DIALOG_STYLE)
         self._build()
 
     def _build(self):
@@ -587,15 +644,12 @@ class NewProjectDialog(QDialog):
             self._folder_preview.setText("")
 
     def _browse_dir(self, le: QLineEdit):
-        d = QFileDialog.getExistingDirectory(self, "Select Directory",
-                                              le.text() or str(ROOT))
+        d = _existing_directory(self, "Select Directory", le.text() or str(ROOT))
         if d:
             le.setText(d)
 
     def _browse_file(self, le: QLineEdit, filter_str: str):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "Select File", le.text() or str(ROOT), filter_str
-        )
+        p, _ = _open_file(self, "Select File", le.text() or str(ROOT), filter_str)
         if p:
             le.setText(p)
 

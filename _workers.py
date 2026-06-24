@@ -204,7 +204,7 @@ class PipelineRunner(QThread):
             try:
                 _pm.get_active_project(ROOT, ROOT / "app_config.json")
             except _pm.ProjectSelectionError:
-                self.log.emit("No valid project selected. Complete Project Onboarding before running the pipeline.\n")
+                self.log.emit("No valid project selected. Complete Stage 0: Onboarding before running the pipeline.\n")
                 self.all_done.emit(False)
                 return
             fps = float(self.cfg.get("fps", 30))
@@ -217,16 +217,15 @@ class PipelineRunner(QThread):
             hdbscan_min_samples = int(self.cfg.get("hdbscan_min_samples", 0)) or None
 
             for sid in self.stage_ids:
-                if sid == 7 and not enable_collapse:
-                    self.stage_done.emit(7, True)
+                if sid == 4 and not enable_collapse:
+                    self.stage_done.emit(4, True)
                     continue
 
-                if sid in (3, 4, 5, 6):
+                if sid == 3:
                     if cluster_bundle_ran:
                         continue
                     cluster_bundle_ran = True
-                    for b in (3, 4, 5, 6):
-                        self.stage_started.emit(b)
+                    self.stage_started.emit(3)
 
                     try:
                         if wsl_cuml_available():
@@ -243,14 +242,12 @@ class PipelineRunner(QThread):
                                 cluster_args += ["--hdbscan-min-samples", str(hdbscan_min_samples)]
                             ok = self._run_subprocess(cluster_args, python_exe=self._analysis_python())
                         if ok:
-                            for b in (3, 4, 5, 6):
-                                self.stage_done.emit(b, True)
+                            self.stage_done.emit(3, True)
                         else:
                             raise RuntimeError("Clustering subprocess returned non-zero exit code.")
                     except Exception as _exc:
                         self.log.emit(traceback.format_exc())
-                        for b in (3, 4, 5, 6):
-                            self.stage_done.emit(b, False)
+                        self.stage_done.emit(3, False)
                         ok_all = False
                         break
                     continue
@@ -275,29 +272,29 @@ class PipelineRunner(QThread):
                         ok = self._run_subprocess(extract_args)
                         if not ok:
                             raise RuntimeError("Feature extraction failed.")
-                    elif sid == 7:
+                    elif sid == 4:
                         ok = self._run_subprocess([
                             "compare.py", "--collapse",
                             "--collapse-threshold", str(collapse_threshold),
                         ])
                         if not ok:
                             raise RuntimeError("State collapsing failed.")
-                    elif sid == 8:
+                    elif sid == 5:
                         ok = self._run_subprocess(["compare.py", "--report", "--fps", str(fps)])
                         if not ok:
                             raise RuntimeError("Report generation failed.")
-                    elif sid == 9:
+                    elif sid == 6:
                         ok = self._run_subprocess(["compare.py", "--summarize"])
                         if not ok:
                             raise RuntimeError("Per-animal scalar computation failed.")
-                    elif sid == 10:
+                    elif sid == 7:
                         ok = self._run_subprocess([
                             "compare.py", "--motifs",
                             "--min-confidence", str(min_confidence),
                         ])
                         if not ok:
                             raise RuntimeError("Motif discovery failed.")
-                    elif sid == 11:
+                    elif sid == 8:
                         clips_args = ["generate_clips.py", "--fps", str(fps)]
                         ok = self._run_subprocess(clips_args)
                         if not ok:

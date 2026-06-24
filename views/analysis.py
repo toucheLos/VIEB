@@ -41,6 +41,7 @@ _TAB_LABELS = [
     "Fear Index",
     "Jess Correlation",
     "Event Alignment",
+    "State Characterization",
 ]
 
 
@@ -149,7 +150,7 @@ class AnalysisView(QWidget):
         self._current_tab = 0
         # Each entry is True when that tab needs a redraw.
         # Starts True so the first visit always renders.
-        self._tab_dirty = [True] * 8
+        self._tab_dirty = [True] * 9
         import vieb_config as _vc
         self._cond_a = _vc.get_condition_a_label()
         self._cond_b = _vc.get_condition_b_label()
@@ -168,6 +169,7 @@ class AnalysisView(QWidget):
             self._metric_label,
             "Jess Correlation",
             "Event Alignment",
+            "State Characterization",
         ]
 
     def _build(self) -> None:
@@ -217,6 +219,7 @@ class AnalysisView(QWidget):
             self._build_tab5,
             self._build_tab6,
             self._build_tab7,
+            self._build_tab8,
         ]
         for build in builders:
             page = build()
@@ -736,7 +739,7 @@ class AnalysisView(QWidget):
             self._load_tab0,
             self._load_tab1, self._load_tab2, self._load_tab3,
             self._load_tab4, self._load_tab5, self._load_tab6,
-            self._load_tab7,
+            self._load_tab7, self._load_tab8,
         ]
 
     def _switch_tab(self, idx: int) -> None:
@@ -758,7 +761,7 @@ class AnalysisView(QWidget):
 
     def _mark_all_dirty(self) -> None:
         """Flag every tab for redraw on next visit."""
-        self._tab_dirty = [True] * 8
+        self._tab_dirty = [True] * 9
 
     # ────────────────────────────────────────────────── Data loading ──
 
@@ -1794,6 +1797,18 @@ class AnalysisView(QWidget):
         ax.yaxis.grid(True, color="#EEEEEE", zorder=0)
         canvas.fig.tight_layout()
         canvas.draw()
+
+    # ──────────────────────────────── Tab 8: State Characterization ──
+
+    def _build_tab8(self) -> QWidget:
+        from views.state_characterization import StateCharacterizationView
+        self._scv_widget = StateCharacterizationView(self.cfg)
+        self._scv_widget.worker_running.connect(self.worker_running.emit)
+        return self._scv_widget
+
+    def _load_tab8(self) -> None:
+        if self._data:
+            self._scv_widget.update_data(self._data)
 
     # ───────────────────────────────────────── Label refresh ──
 
