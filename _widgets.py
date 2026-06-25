@@ -376,6 +376,12 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ARROW_COLLAPSED = "›"
+    _ARROW_EXPANDED = "⌄"
+    _ARROW_STYLE = (
+        "color:#9aa0a6;background:transparent;border:none;"
+        "font-size:18px;font-weight:400;"
+    )
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -434,10 +440,10 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
-        self._arrow.setStyleSheet(
-            "color:#999;background:transparent;border:none;"
-        )
+        self._arrow = QLabel(self._ARROW_COLLAPSED)
+        self._arrow.setAlignment(Qt.AlignCenter)
+        self._arrow.setFixedWidth(18)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -570,7 +576,8 @@ class StageRow(QFrame):
         expanded = not self._body.isVisible()
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setText(self._ARROW_EXPANDED if expanded else self._ARROW_COLLAPSED)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -589,11 +596,12 @@ class StageRow(QFrame):
         if status == "running":
             self._body.setVisible(True)
             self._desc.setVisible(True)
-            self._arrow.setText("▾")
+            self._arrow.setText(self._ARROW_EXPANDED)
         else:
             self._body.setVisible(False)
             self._desc.setVisible(False)
-            self._arrow.setText("▸")
+            self._arrow.setText(self._ARROW_COLLAPSED)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)

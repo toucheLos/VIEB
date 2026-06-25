@@ -206,7 +206,7 @@ def validate_project(path: Path | str) -> ProjectValidation:
 
     source = session_source_status(project, cfg)
     source_msg = source["message"] if source["valid"] else "import raw videos, pose CSVs, H5 pose data, or metadata CSV"
-    checks.append(Check("pose_source", "session-defining data source detected", "green" if source["valid"] else "red", source_msg))
+    checks.append(Check("pose_source", "session-defining data source detected", "green" if source["valid"] else "yellow", source_msg))
 
     results = Path(cfg["results_dir"])
     results_ok = results.exists() and os.access(results, os.W_OK)

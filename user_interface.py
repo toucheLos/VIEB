@@ -1924,6 +1924,12 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ARROW_COLLAPSED = "▸"
+    _ARROW_EXPANDED = "▾"
+    _ARROW_STYLE = (
+        "color:#5f6368;background:transparent;border:none;"
+        "font-size:14px;font-weight:bold;"
+    )
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -1982,10 +1988,10 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
-        self._arrow.setStyleSheet(
-            "color:#999;background:transparent;border:none;"
-        )
+        self._arrow = QLabel(self._ARROW_COLLAPSED)
+        self._arrow.setAlignment(Qt.AlignCenter)
+        self._arrow.setFixedWidth(18)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -2155,7 +2161,8 @@ class StageRow(QFrame):
         expanded = not self._body.isVisible()
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setText(self._ARROW_EXPANDED if expanded else self._ARROW_COLLAPSED)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -2174,11 +2181,12 @@ class StageRow(QFrame):
         if status == "running":
             self._body.setVisible(True)
             self._desc.setVisible(True)
-            self._arrow.setText("▾")
+            self._arrow.setText(self._ARROW_EXPANDED)
         else:
             self._body.setVisible(False)
             self._desc.setVisible(False)
-            self._arrow.setText("▸")
+            self._arrow.setText(self._ARROW_COLLAPSED)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
@@ -2238,6 +2246,9 @@ class ProjectOnboardingPanel(QFrame):
         self.setStyleSheet(
             "QFrame#projectOnboarding{background:transparent;border:none;}"
             "QLabel[muted='true']{color:#667085;}"
+            "QPushButton{background:#fff;color:#202124;border:1px solid #d0d5dd;border-radius:4px;padding:5px 10px;}"
+            "QPushButton:hover{background:#f8fafc;}"
+            "QPushButton[primary='true']{background:#1a73e8;color:#fff;border-color:#1a73e8;font-weight:600;}"
         )
         self._build()
         self.refresh()
@@ -2269,7 +2280,9 @@ class ProjectOnboardingPanel(QFrame):
         self._source_help.setProperty("muted", "true")
         lay.addWidget(self._source_help)
 
-        actions = QHBoxLayout()
+        actions = QGridLayout()
+        actions.setHorizontalSpacing(8)
+        actions.setVerticalSpacing(8)
         self._create_btn = QPushButton("Create New Project")
         self._create_btn.clicked.connect(self._create_project)
         self._open_btn = QPushButton("Open Existing Project")
@@ -2282,9 +2295,11 @@ class ProjectOnboardingPanel(QFrame):
             "Optional: choose raw videos, pose CSVs, an H5 file, or metadata CSV "
             "when VIEB cannot infer sessions from the project."
         )
-        for btn in (self._create_btn, self._open_btn, self._detect_btn, self._set_btn):
-            actions.addWidget(btn)
-        actions.addStretch()
+        for idx, btn in enumerate((self._create_btn, self._open_btn, self._detect_btn, self._set_btn)):
+            btn.setMinimumHeight(30)
+            actions.addWidget(btn, idx // 2, idx % 2)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         lay.addLayout(actions)
 
         self._active_path = QLineEdit()
@@ -2415,7 +2430,7 @@ class ProjectOnboardingPanel(QFrame):
         bg, fg = colors.get(check.status, colors["yellow"])
         row = QLabel(f"{check.label}: {check.message}")
         row.setWordWrap(True)
-        row.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:5px 8px;")
+        row.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:5px 8px;border:none;")
         self._checklist.addWidget(row)
 
     def refresh(self):
@@ -2678,6 +2693,9 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
+        self._expand_all_btn = QPushButton("Expand All")
+        self._expand_all_btn.clicked.connect(self._toggle_expand_all)
+        top.addWidget(self._expand_all_btn)
         self._run_full = QPushButton("Run Full Pipeline")
         self._run_full.clicked.connect(self.run_full_pipeline)
         top.addWidget(self._run_full)
@@ -2854,6 +2872,16 @@ class RunPipelineView(QWidget):
             dlg = LinuxGpuSetupDialog(_linux_gpu_name, self)
             dlg.exec_()
             self._probe_gpu_async()
+
+    def _toggle_expand_all(self):
+        any_expanded = any(row._body.isVisible() for row in self._rows.values())
+        for row in self._rows.values():
+            row._body.setVisible(not any_expanded)
+            row._desc.setVisible(not any_expanded)
+            row._arrow.setText(
+                row._ARROW_EXPANDED if not any_expanded else row._ARROW_COLLAPSED
+            )
+        self._expand_all_btn.setText("Collapse All" if not any_expanded else "Expand All")
 
     def _param_changed(self, key, value):
         self.cfg[key] = value
