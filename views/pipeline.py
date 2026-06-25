@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from _utils import (
-    ROOT, RESULTS, STAGES, _has_pose_csvs, _open_folder, _save_cfg,
+    ROOT, RESULTS, STAGES, APP_CONFIG_PATH, _has_pose_csvs, _open_folder, _save_cfg,
     wsl_cuml_available, wsl_cuml_reset_cache, _probe_wsl_cuml, _state_key, _MPL,
 )
 from _workers import PipelineRunner, SubprocessWorker
@@ -104,11 +104,10 @@ class RunPipelineView(QWidget):
                 continue
             row = StageRow(stage, self.cfg)
             if stage["id"] == 0:
-                row.run_stage.connect(lambda _: self._open_env_setup())
-                row._run_btn.setText("Open Setup ▶")
+                row.run_stage.connect(lambda _: self._check_stage0_readiness())
+                row._run_btn.setText("Check Project Readiness")
                 row._from_btn.hide()
-                # Auto-complete if venv already exists
-                if self._venv_exists():
+                if self._stage0_complete():
                     row.set_status("done")
             else:
                 row.run_stage.connect(self._run_stage)
@@ -267,8 +266,32 @@ class RunPipelineView(QWidget):
             return (venv / "Scripts" / "python.exe").exists()
         return (venv / "bin" / "python").exists()
 
+    def _stage0_complete(self) -> bool:
+        try:
+            import project_manager as _pm
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            return _pm.onboarding_complete(project)
+        except Exception:
+            return False
+
+    def _check_stage0_readiness(self):
+        """Stage 0 action: lightweight project readiness check."""
+        try:
+            import project_manager as _pm
+            _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except Exception:
+            QMessageBox.information(
+                self, "Stage 0: Onboarding",
+                "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.\n\n"
+                "Use the Pipeline view to create or open a project.",
+            )
+            return
+        row = self._rows.get(0)
+        if row and self._stage0_complete():
+            row.set_status("done")
+
     def _open_env_setup(self):
-        """Stage 0 action: open GPU setup on Windows; show terminal instructions elsewhere."""
+        """GPU/environment setup — separate from Stage 0 project readiness."""
         if sys.platform == "win32":
             dlg = WslSetupDialog(self)
             dlg.exec_()
@@ -282,10 +305,6 @@ class RunPipelineView(QWidget):
                 "The script will create the venv and optionally install GPU extras.\n"
                 "Once complete, restart the application.",
             )
-        # Refresh Stage 0 completion indicator
-        row = self._rows.get(0)
-        if row and self._venv_exists():
-            row.set_status("done")
 
     def _param_changed(self, key, value):
         self.cfg[key] = value
