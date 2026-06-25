@@ -2758,6 +2758,35 @@ class RunPipelineView(QWidget):
                 row.navigate_cluster_runs.connect(self.navigate_cluster_runs.emit)
             self._rows[stage["id"]] = row
             v.addWidget(row)
+        # ── Clustering Diagnostics panel ──
+        self._diag_frame = QFrame()
+        self._diag_frame.setFrameShape(QFrame.StyledPanel)
+        self._diag_frame.setStyleSheet(
+            "QFrame { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 6px; }"
+        )
+        df_lay = QVBoxLayout(self._diag_frame)
+        df_lay.setContentsMargins(16, 12, 16, 12)
+        df_lay.setSpacing(8)
+
+        diag_hdr = QHBoxLayout()
+        diag_title = QLabel("Clustering Diagnostics")
+        diag_title.setFont(QFont("Arial", 12, QFont.Bold))
+        diag_hdr.addWidget(diag_title)
+        diag_hdr.addStretch()
+        df_lay.addLayout(diag_hdr)
+
+        self._diag_params = QLabel("")
+        self._diag_params.setWordWrap(True)
+        self._diag_params.setStyleSheet("font-size: 11px; color: #444; font-family: monospace;")
+        df_lay.addWidget(self._diag_params)
+
+        self._diag_warnings_lay = QVBoxLayout()
+        self._diag_warnings_lay.setSpacing(4)
+        df_lay.addLayout(self._diag_warnings_lay)
+
+        self._diag_frame.hide()
+        v.addWidget(self._diag_frame)
+
         v.addStretch()
         scroll.setWidget(holder)
         lay.addWidget(scroll)
@@ -3045,6 +3074,54 @@ class RunPipelineView(QWidget):
         means = summary[state_cols].mean()
         dom_col = means.idxmax()
         row.set_cluster_quality(float(means[dom_col]), int(dom_col.split("_")[1]))
+
+    def update_diagnostics(self, data: dict):
+        """Populate the diagnostics panel from loaded cluster data."""
+        diag = data.get("diagnostics")
+        if not diag:
+            self._diag_frame.hide()
+            return
+
+        self._diag_frame.show()
+
+        lines = [
+            f"States: {diag.get('n_states', '?')}   "
+            f"Frames: {diag.get('n_frames', 0):,}   "
+            f"Noise: {diag.get('noise_frac', 0)*100:.1f}%",
+            f"Largest state: {diag.get('largest_state_frac', 0)*100:.1f}%   "
+            f"Mean confidence: {diag.get('mean_confidence', 0):.3f}   "
+            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0)*100:.1f}%",
+            f"UMAP dims: {diag.get('umap_dims', '?')}   "
+            f"min_cluster_size: {diag.get('min_cluster_size', '?')}   "
+            f"Features: {diag.get('n_features', '?')}   "
+            f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
+        ]
+        self._diag_params.setText("\n".join(lines))
+
+        while self._diag_warnings_lay.count():
+            item = self._diag_warnings_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        warnings = diag.get("warnings", [])
+        if not warnings:
+            ok_lbl = QLabel("No warnings.")
+            ok_lbl.setStyleSheet("color: #2e7d32; font-size: 11px; padding: 2px 0;")
+            self._diag_warnings_lay.addWidget(ok_lbl)
+        for w in warnings:
+            level = w.get("level", "info")
+            if level == "error":
+                color, icon = "#c62828", "!"
+            elif level == "warning":
+                color, icon = "#e65100", "*"
+            else:
+                color, icon = "#1565c0", "i"
+            lbl = QLabel(f"  {icon}  {w.get('message', '')}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color: {color}; font-size: 11px; padding: 2px 0;")
+            if w.get("action"):
+                lbl.setToolTip(w["action"])
+            self._diag_warnings_lay.addWidget(lbl)
 
     def _run_diagnose(self):
         dlg = DiagnoseDialog(self)
