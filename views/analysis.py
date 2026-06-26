@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
@@ -21,6 +21,8 @@ from PyQt5.QtWidgets import (
 import vieb_config as _vc
 from _utils import CLIPS, RESULTS, ROOT, _MPL, _state_colors
 from _workers import SubprocessWorker
+
+from _widgets import _Card
 
 if _MPL:
     from _utils import Figure, FigureCanvas, mpl_cm, mpimg
@@ -1056,7 +1058,7 @@ class AnalysisView(QWidget):
         self._t2_clips_table.setRowCount(len(df))
         for ri, (_, row) in enumerate(df.iterrows()):
             self._t2_clips_table.setItem(ri, 0, QTableWidgetItem(str(row.get("motif", ""))))
-            self._t2_clips_table.setItem(ri, 1, QTableWidgetItem(str(row.get("motif_type", ""))))
+            self._t2_clips_table.setItem(ri, 1, QTableWidgetItem(str(row.get("motif_type", row.get("type", "")))))
             clip_path = str(row.get("clip_path", ""))
             self._t2_clips_table.setItem(ri, 2, QTableWidgetItem(os.path.basename(clip_path)))
             self._t2_clips_table.setItem(ri, 3, QTableWidgetItem(str(row.get("animal_id", ""))))
@@ -1857,9 +1859,19 @@ class AnalysisView(QWidget):
 
     def _build_tab_diagnostics(self) -> QWidget:
         page = QWidget()
-        lay = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(12)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
 
         hdr = QHBoxLayout()
         title = QLabel("Diagnostics")
@@ -1899,6 +1911,29 @@ class AnalysisView(QWidget):
         dcl.setContentsMargins(0, 0, 0, 0)
         dcl.setSpacing(12)
 
+        # -- Health status banner --
+        self._diag_health_lbl = QLabel("")
+        self._diag_health_lbl.setAlignment(Qt.AlignCenter)
+        self._diag_health_lbl.setFont(QFont("Arial", 13, QFont.Bold))
+        self._diag_health_lbl.setFixedHeight(38)
+        self._diag_health_lbl.setStyleSheet(
+            "border-radius:6px; padding:4px 12px;"
+        )
+        dcl.addWidget(self._diag_health_lbl)
+
+        # -- Metric cards row --
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(8)
+        self._card_states     = _Card("States")
+        self._card_noise      = _Card("Noise")
+        self._card_dominant   = _Card("Dominant")
+        self._card_confidence = _Card("Confidence")
+        for card in (self._card_states, self._card_noise,
+                     self._card_dominant, self._card_confidence):
+            cards_row.addWidget(card)
+        dcl.addLayout(cards_row)
+
+        # -- Params line (monospace) --
         self._diag_params_lbl = QLabel("")
         self._diag_params_lbl.setWordWrap(True)
         self._diag_params_lbl.setStyleSheet(
@@ -1907,11 +1942,47 @@ class AnalysisView(QWidget):
         )
         dcl.addWidget(self._diag_params_lbl)
 
+        # -- Overview image --
+        self._diag_img_lbl = QLabel()
+        self._diag_img_lbl.setAlignment(Qt.AlignCenter)
+        self._diag_img_lbl.setMaximumHeight(220)
+        self._diag_img_lbl.hide()
+        dcl.addWidget(self._diag_img_lbl)
+
+        # -- Per-state duration table --
+        self._diag_dur_section = QLabel("Per-State Bout Durations")
+        self._diag_dur_section.setFont(QFont("Arial", 11, QFont.Bold))
+        self._diag_dur_section.setStyleSheet("color:#333; padding-top:4px;")
+        self._diag_dur_section.hide()
+        dcl.addWidget(self._diag_dur_section)
+
+        self._diag_dur_table = QTableWidget(0, 6)
+        self._diag_dur_table.setHorizontalHeaderLabels(
+            ["State", "Bouts", "Mean (s)", "Median (s)", "Std (s)", "Short %"]
+        )
+        self._diag_dur_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._diag_dur_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._diag_dur_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._diag_dur_table.setMaximumHeight(200)
+        self._diag_dur_table.hide()
+        dcl.addWidget(self._diag_dur_table)
+
+        # -- Warnings --
         self._diag_warnings_widget = QWidget()
         self._diag_warnings_lay = QVBoxLayout(self._diag_warnings_widget)
         self._diag_warnings_lay.setContentsMargins(0, 0, 0, 0)
         self._diag_warnings_lay.setSpacing(4)
         dcl.addWidget(self._diag_warnings_widget)
+
+        # -- Recommended action --
+        self._diag_action_lbl = QLabel("")
+        self._diag_action_lbl.setWordWrap(True)
+        self._diag_action_lbl.setStyleSheet(
+            "background:#FFF3E0; border:1px solid #FFB74D; border-radius:4px;"
+            "padding:8px 12px; font-family:monospace; font-size:11px; color:#4a2500;"
+        )
+        self._diag_action_lbl.hide()
+        dcl.addWidget(self._diag_action_lbl)
 
         dcl.addStretch()
         self._diag_content.hide()
@@ -1929,13 +2000,33 @@ class AnalysisView(QWidget):
         self._diag_placeholder.hide()
         self._diag_content.show()
 
+        # -- Health banner --
+        health = diag.get("health_status", "")
+        if health == "failed":
+            banner_bg, banner_fg, banner_text = "#c62828", "white", "FAILED — Clustering needs attention"
+        elif health == "suspicious":
+            banner_bg, banner_fg, banner_text = "#e65100", "white", "SUSPICIOUS — Review warnings below"
+        elif health == "good":
+            banner_bg, banner_fg, banner_text = "#2e7d32", "white", "GOOD — Clustering looks healthy"
+        else:
+            banner_bg, banner_fg, banner_text = "#616161", "white", "Status unknown"
+        self._diag_health_lbl.setText(banner_text)
+        self._diag_health_lbl.setStyleSheet(
+            f"background:{banner_bg}; color:{banner_fg}; border-radius:6px; padding:4px 12px;"
+        )
+
+        # -- Metric cards --
+        self._card_states.set(str(diag.get("n_states", "?")))
+        self._card_noise.set(f"{diag.get('noise_frac', 0) * 100:.1f}%")
+        self._card_dominant.set(f"{diag.get('largest_state_frac', 0) * 100:.1f}%")
+        self._card_confidence.set(f"{diag.get('mean_confidence', 0):.3f}")
+
+        # -- Params line --
         lines = [
-            f"States: {diag.get('n_states', '?')}   |   "
             f"Frames: {diag.get('n_frames', 0):,}   |   "
-            f"Noise: {diag.get('noise_frac', 0) * 100:.1f}%",
-            f"Largest state: {diag.get('largest_state_frac', 0) * 100:.1f}%   |   "
-            f"Mean confidence: {diag.get('mean_confidence', 0):.3f}   |   "
-            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0) * 100:.1f}%",
+            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0) * 100:.1f}%   |   "
+            f"Entropy: {diag.get('state_entropy', 0):.3f}   |   "
+            f"Imbalance: {diag.get('imbalance_score', 0):.3f}",
             f"UMAP dims: {diag.get('umap_dims', '?')}   |   "
             f"min_cluster_size: {diag.get('min_cluster_size', '?')}   |   "
             f"Features: {diag.get('n_features', '?')}   |   "
@@ -1943,6 +2034,43 @@ class AnalysisView(QWidget):
         ]
         self._diag_params_lbl.setText("\n".join(lines))
 
+        # -- Overview image --
+        png_path = RESULTS / "diagnostics" / "cluster_overview.png"
+        if png_path.exists():
+            pix = QPixmap(str(png_path))
+            if not pix.isNull():
+                scaled = pix.scaledToHeight(210, Qt.SmoothTransformation)
+                self._diag_img_lbl.setPixmap(scaled)
+                self._diag_img_lbl.show()
+            else:
+                self._diag_img_lbl.hide()
+        else:
+            self._diag_img_lbl.hide()
+
+        # -- Per-state duration table --
+        dur_df = self._data.get("state_duration_summary") if self._data else None
+        if dur_df is not None and not dur_df.empty:
+            self._diag_dur_section.show()
+            self._diag_dur_table.show()
+            self._diag_dur_table.setRowCount(0)
+            for _, row in dur_df.iterrows():
+                ri = self._diag_dur_table.rowCount()
+                self._diag_dur_table.insertRow(ri)
+                vals = [
+                    f"S{int(row.get('state', ri))}",
+                    str(int(row.get("n_bouts", 0))),
+                    f"{float(row.get('mean_dur_s', 0)):.2f}",
+                    f"{float(row.get('median_dur_s', 0)):.2f}",
+                    f"{float(row.get('std_dur_s', 0)):.2f}",
+                    f"{float(row.get('short_bout_frac', 0)) * 100:.1f}%",
+                ]
+                for ci, txt in enumerate(vals):
+                    self._diag_dur_table.setItem(ri, ci, QTableWidgetItem(txt))
+        else:
+            self._diag_dur_section.hide()
+            self._diag_dur_table.hide()
+
+        # -- Warnings --
         while self._diag_warnings_lay.count():
             item = self._diag_warnings_lay.takeAt(0)
             if item.widget():
@@ -1951,9 +2079,7 @@ class AnalysisView(QWidget):
         warnings = diag.get("warnings", [])
         if not warnings:
             ok_lbl = QLabel("✓  No cluster health warnings.")
-            ok_lbl.setStyleSheet(
-                "color:#2e7d32; font-size:12px; padding:8px 0;"
-            )
+            ok_lbl.setStyleSheet("color:#2e7d32; font-size:12px; padding:8px 0;")
             self._diag_warnings_lay.addWidget(ok_lbl)
         for w in warnings:
             level = w.get("level", "info")
@@ -1965,12 +2091,22 @@ class AnalysisView(QWidget):
                 color, icon = "#1565c0", "ℹ"
             lbl = QLabel(f"{icon}  {w.get('message', '')}")
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                f"color:{color}; font-size:12px; padding:4px 0;"
-            )
+            lbl.setStyleSheet(f"color:{color}; font-size:12px; padding:4px 0;")
             if w.get("action"):
                 lbl.setToolTip(w["action"])
             self._diag_warnings_lay.addWidget(lbl)
+
+        # -- Recommended action (first error or warning with an action) --
+        action_text = None
+        for w in warnings:
+            if w.get("level") in ("error", "warning") and w.get("action"):
+                action_text = w["action"]
+                break
+        if action_text:
+            self._diag_action_lbl.setText(f"Suggested next step:\n{action_text}")
+            self._diag_action_lbl.show()
+        else:
+            self._diag_action_lbl.hide()
 
     def _open_diagnostics_folder(self) -> None:
         from PyQt5.QtGui import QDesktopServices

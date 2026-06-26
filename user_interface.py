@@ -879,6 +879,7 @@ class DataLoader(QThread):
             }
             data["cluster_info"] = _json("shared/cluster_info.json")
             data["feature_index"] = _json("features/index.json")
+            data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
             if not self._lightweight:
                 data["summary"] = _csv("comparison/summary_table.csv")
                 data["state_summary"] = _csv("characterization/state_summary.csv")
@@ -886,6 +887,7 @@ class DataLoader(QThread):
                 data["feature_profiles"] = _csv("characterization/state_feature_profiles.csv")
                 data["feature_zscores"] = _csv("characterization/state_feature_zscores.csv")
                 data["duration_summary"] = _csv("characterization/state_duration_summary.csv")
+                data["state_duration_summary"] = _csv("diagnostics/state_duration_summary.csv")
                 data["group_enrichment"] = _csv("characterization/state_group_enrichment.csv")
                 data["transition_table"] = _csv("comparison/transition_table.csv")
                 data["bouts"] = _csv("characterization/bouts.csv")

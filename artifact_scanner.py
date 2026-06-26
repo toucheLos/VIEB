@@ -41,6 +41,7 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("metadata_schema_report.json", "Summary"),
     # States
     ("characterization/state_summary.csv", "States"),
+    ("characterization/state_exemplars.csv", "States"),
     ("characterization/labels_per_frame.csv", "States"),
     ("characterization/context_report.csv", "States"),
     ("validation/state_labels.csv", "States"),
@@ -147,6 +148,7 @@ def scan_artifacts(
 _PUBLICATION_FILES = [
     "comparison/summary_table.csv",
     "characterization/state_summary.csv",
+    "characterization/state_exemplars.csv",
     "comparison/motifs.csv",
     "comparison/transition_table.csv",
     "motifs/motif_summary.csv",

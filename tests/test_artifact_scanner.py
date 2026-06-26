@@ -25,6 +25,7 @@ def test_categorize_csv_png_json_mp4():
 
 def test_categorize_states():
     assert categorize_file("characterization/state_summary.csv") == ("States", "CSV")
+    assert categorize_file("characterization/state_exemplars.csv") == ("States", "CSV")
     assert categorize_file("characterization/context_report.csv") == ("States", "CSV")
     assert categorize_file("validation/state_labels.csv") == ("States", "CSV")
 

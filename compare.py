@@ -1722,6 +1722,33 @@ def cmd_cluster(
 # Clustering diagnostics
 # ---------------------------------------------------------------------------
 
+def _compute_state_bouts(labels_1d: np.ndarray) -> dict[int, list[int]]:
+    """Return {state_id: [bout_len_frames, ...]} for one video. Skips noise (-1)."""
+    if len(labels_1d) == 0:
+        return {}
+    changes = np.where(np.diff(labels_1d) != 0)[0] + 1
+    starts = np.concatenate([[0], changes])
+    ends = np.concatenate([changes, [len(labels_1d)]])
+    bouts: dict[int, list[int]] = {}
+    for s, e in zip(starts, ends):
+        state = int(labels_1d[s])
+        if state >= 0:
+            bouts.setdefault(state, []).append(int(e - s))
+    return bouts
+
+
+def _gini(values: list[float]) -> float:
+    """Gini coefficient of a list of non-negative values. 0 = equal, 1 = maximal inequality."""
+    if not values or sum(values) == 0:
+        return 0.0
+    arr = sorted(values)
+    n = len(arr)
+    cumsum = 0.0
+    for i, v in enumerate(arr):
+        cumsum += (2 * (i + 1) - n - 1) * v
+    return cumsum / (n * sum(arr))
+
+
 def _generate_diagnostics(
     all_labels: np.ndarray | None = None,
     all_probs: np.ndarray | None = None,
@@ -1747,25 +1774,49 @@ def _generate_diagnostics(
     if n_clusters == 0:
         return {}
 
-    # ---- Load from disk if not passed ----
+    # ---- FPS for converting frames → seconds ----
+    try:
+        import vieb_config as _vc_diag
+        _cfg_diag = _vc_diag._load_config()
+        fps = float(_cfg_diag.get("fps", 30))
+    except Exception:
+        fps = 30.0
+    fps = max(1.0, fps)
+    min_short_frames = max(1, int(fps * 0.5))  # bouts shorter than 0.5 s are "short"
+
+    # ---- Load per-video label files; compute bout metrics in the same pass ----
+    all_bout_lists: dict[int, list[int]] = {}  # state → list of bout lengths (frames)
+    video_presence: dict[int, int] = {}
+    label_arrays_disk: list[np.ndarray] = []
+    prob_arrays_disk: list[np.ndarray] = []
+
+    for fname in sorted(os.listdir(shared_dir)):
+        if not fname.endswith("_labels.npy"):
+            continue
+        lbl = np.load(os.path.join(shared_dir, fname))
+        # video presence
+        present = set(int(s) for s in np.unique(lbl) if s >= 0)
+        for s in present:
+            video_presence[s] = video_presence.get(s, 0) + 1
+        # bout metrics (per-video, no cross-video artifacts)
+        for state, lengths in _compute_state_bouts(lbl).items():
+            all_bout_lists.setdefault(state, []).extend(lengths)
+        # for disk-load path
+        if all_labels is None:
+            label_arrays_disk.append(lbl)
+            stem = fname.replace("_labels.npy", "")
+            prob_path = os.path.join(shared_dir, f"{stem}_probs.npy")
+            if os.path.exists(prob_path):
+                prob_arrays_disk.append(np.load(prob_path))
+            else:
+                prob_arrays_disk.append(np.where(lbl >= 0, 1.0, 0.0).astype(np.float32))
+
     if all_labels is None:
-        label_arrays = []
-        prob_arrays = []
-        for fname in sorted(os.listdir(shared_dir)):
-            if fname.endswith("_labels.npy"):
-                label_arrays.append(np.load(os.path.join(shared_dir, fname)))
-                stem = fname.replace("_labels.npy", "")
-                prob_path = os.path.join(shared_dir, f"{stem}_probs.npy")
-                if os.path.exists(prob_path):
-                    prob_arrays.append(np.load(prob_path))
-                else:
-                    lbl = label_arrays[-1]
-                    prob_arrays.append(np.where(lbl >= 0, 1.0, 0.0).astype(np.float32))
-        if not label_arrays:
+        if not label_arrays_disk:
             print("[diagnostics] No label files found.")
             return {}
-        all_labels = np.concatenate(label_arrays)
-        all_probs = np.concatenate(prob_arrays)
+        all_labels = np.concatenate(label_arrays_disk)
+        all_probs = np.concatenate(prob_arrays_disk)
 
     if all_probs is None:
         all_probs = np.where(all_labels >= 0, 1.0, 0.0).astype(np.float32)
@@ -1776,16 +1827,6 @@ def _generate_diagnostics(
 
     # ---- State occupancy ----
     occ_rows = []
-    # Per-video presence counts
-    video_presence: dict[int, int] = {}
-    for fname in sorted(os.listdir(shared_dir)):
-        if not fname.endswith("_labels.npy"):
-            continue
-        lbl = np.load(os.path.join(shared_dir, fname))
-        present = set(int(s) for s in np.unique(lbl) if s >= 0)
-        for s in present:
-            video_presence[s] = video_presence.get(s, 0) + 1
-
     for k in range(-1, n_clusters):
         mask = all_labels == k
         count = int(mask.sum())
@@ -1808,10 +1849,61 @@ def _generate_diagnostics(
         state_fracs.append(float((all_labels == k).sum()) / max(1, total_frames))
     largest_frac = max(state_fracs) if state_fracs else 0.0
     smallest_frac = min(f for f in state_fracs if f > 0) if any(f > 0 for f in state_fracs) else 0.0
+    dominant_state_id = int(np.argmax(state_fracs)) if state_fracs else 0
 
     non_noise_probs = all_probs[valid_mask]
     mean_conf = float(non_noise_probs.mean()) if len(non_noise_probs) > 0 else 0.0
     low_conf_frac = float((non_noise_probs < 0.5).sum() / max(1, len(non_noise_probs)))
+
+    # ---- Bout metrics ----
+    # Global short-bout fraction: frames in short bouts / total non-noise frames
+    total_short_frames = 0
+    total_non_noise_frames = int(valid_mask.sum())
+    bout_metrics: dict[str, dict] = {}
+    dur_rows = []
+    for k in range(n_clusters):
+        lengths = all_bout_lists.get(k, [])
+        if not lengths:
+            continue
+        arr = np.array(lengths, dtype=np.float64)
+        short_count = int((arr < min_short_frames).sum())
+        total_short_frames += int((arr[arr < min_short_frames]).sum())
+        bm = {
+            "n_bouts": len(lengths),
+            "mean_dur_frames": round(float(arr.mean()), 2),
+            "mean_dur_s": round(float(arr.mean()) / fps, 3),
+            "median_dur_s": round(float(np.median(arr)) / fps, 3),
+            "std_dur_s": round(float(arr.std()) / fps, 3),
+            "short_bout_frac": round(short_count / max(1, len(lengths)), 4),
+        }
+        bout_metrics[str(k)] = bm
+        dur_rows.append({
+            "state": k,
+            "n_bouts": bm["n_bouts"],
+            "mean_dur_frames": bm["mean_dur_frames"],
+            "mean_dur_s": bm["mean_dur_s"],
+            "median_dur_s": bm["median_dur_s"],
+            "std_dur_s": bm["std_dur_s"],
+            "short_bout_frac": bm["short_bout_frac"],
+        })
+
+    global_short_frac = total_short_frames / max(1, total_non_noise_frames)
+
+    if dur_rows:
+        pd.DataFrame(dur_rows).to_csv(
+            os.path.join(diag_dir, "state_duration_summary.csv"), index=False
+        )
+
+    # ---- Cluster balance metrics ----
+    pos_fracs = [f for f in state_fracs if f > 0]
+    if len(pos_fracs) > 1:
+        import math
+        ent = -sum(f * math.log(f) for f in pos_fracs if f > 0)
+        max_ent = math.log(len(pos_fracs))
+        state_entropy = round(ent / max_ent, 4) if max_ent > 0 else 1.0
+    else:
+        state_entropy = 0.0
+    imbalance_score = round(_gini(pos_fracs), 4)
 
     # ---- Load index metadata for feature info ----
     index_path = os.path.join(_res(), "features", "index.json")
@@ -1860,6 +1952,39 @@ def _generate_diagnostics(
             "message": f"Largest state occupies {largest_frac*100:.1f}% of frames.",
             "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
         })
+    if noise_frac > 0.50:
+        warnings.append({
+            "level": "error",
+            "message": f"Over 50% of frames are noise ({noise_frac*100:.1f}%). HDBSCAN may be too aggressive.",
+            "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
+        })
+    if n_clusters > 15:
+        warnings.append({
+            "level": "warning",
+            "message": f"Many states discovered ({n_clusters}). Consider raising --min-cluster-size to merge similar states.",
+            "action": f"python compare.py --cluster --min-cluster-size {min_cluster_size * 2}",
+        })
+    if umap_dims < 5:
+        warnings.append({
+            "level": "warning",
+            "message": f"UMAP dimension is very low ({umap_dims}). May compress behavioral structure. Try --umap-dims 10.",
+            "action": "python compare.py --cluster --umap-dims 10",
+        })
+    if global_short_frac > 0.35:
+        warnings.append({
+            "level": "warning",
+            "message": f"More than 35% of frames are in very short bouts (<0.5 s). States may be over-split.",
+            "action": f"python compare.py --cluster --min-cluster-size {min_cluster_size * 2}",
+        })
+    if hdbscan_sample > 0 and hdbscan_sample < total_frames // 20:
+        warnings.append({
+            "level": "info",
+            "message": (
+                f"HDBSCAN fit on {hdbscan_sample:,} of {total_frames:,} frames. "
+                "Generalization may be limited."
+            ),
+            "action": "python compare.py --cluster --hdbscan-sample 0  (to use all frames)",
+        })
     if n_features > 0 and n_features < 20:
         warnings.append({
             "level": "warning",
@@ -1876,20 +2001,35 @@ def _generate_diagnostics(
                 "action": "Map keypoint groups in Settings > Column Mapping.",
             })
 
+    # ---- Health verdict ----
+    levels = {w["level"] for w in warnings}
+    if "error" in levels:
+        health_status = "failed"
+    elif "warning" in levels:
+        health_status = "suspicious"
+    else:
+        health_status = "good"
+
     diagnostics = {
         "n_states": n_clusters,
         "n_frames": total_frames,
         "noise_frac": round(noise_frac, 4),
         "largest_state_frac": round(largest_frac, 4),
         "smallest_state_frac": round(smallest_frac, 4),
+        "dominant_state_id": dominant_state_id,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
+        "state_entropy": state_entropy,
+        "imbalance_score": imbalance_score,
+        "short_bout_frac": round(global_short_frac, 4),
+        "bout_metrics": bout_metrics,
         "n_features": n_features,
         "use_wavelets": use_wavelets,
         "umap_dims": umap_dims,
         "min_cluster_size": min_cluster_size,
         "hdbscan_sample": hdbscan_sample,
         "hdbscan_min_samples": hdbscan_min_samples,
+        "health_status": health_status,
         "warnings": warnings,
     }
 

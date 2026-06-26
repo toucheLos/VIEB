@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +90,7 @@ class StateCharacterizationView(QWidget):
         self._state_ids: list[int] = []
         self._heuristic_labels: dict[int, str] = {}
         self._kin_metrics: dict[str, float] = {}
+        self._exemplar_df: pd.DataFrame | None = None
         self._ref_width = 900
         self._build()
 
@@ -347,10 +347,15 @@ class StateCharacterizationView(QWidget):
 
         # ── Clip controls ──
         clip_row = QHBoxLayout()
-        self._load_clip_btn = QPushButton("Load Clip")
+        self._load_clip_btn = QPushButton("Load Selected Exemplar")
         self._load_clip_btn.setEnabled(False)
         self._load_clip_btn.clicked.connect(self._load_clip)
         clip_row.addWidget(self._load_clip_btn)
+        self._gen_exemplars_btn = QPushButton("Generate State Exemplars")
+        self._gen_exemplars_btn.clicked.connect(
+            lambda: self._run_command(["generate_clips.py"], self._terminal)
+        )
+        clip_row.addWidget(self._gen_exemplars_btn)
         self._autoplay_cb = QCheckBox("Autoplay")
         self._autoplay_cb.setChecked(True)
         clip_row.addWidget(self._autoplay_cb)
@@ -358,6 +363,32 @@ class StateCharacterizationView(QWidget):
         self._clip_status.setStyleSheet("color:#888; font-size:11px;")
         clip_row.addWidget(self._clip_status, stretch=1)
         rl.addLayout(clip_row)
+
+        self._exemplar_placeholder = _placeholder(
+            "No curated exemplars for this state yet.\n"
+            "Click 'Generate State Exemplars' to create representative clips."
+        )
+        self._exemplar_table = QTableWidget(0, 6)
+        self._exemplar_table.setHorizontalHeaderLabels(
+            ["Rank", "Clip", "Animal/Subject", "Context", "Duration", "Reason"]
+        )
+        header = self._exemplar_table.horizontalHeader()
+        header.setSectionResizeMode(0, header.ResizeToContents)
+        header.setSectionResizeMode(1, header.Stretch)
+        header.setSectionResizeMode(2, header.ResizeToContents)
+        header.setSectionResizeMode(3, header.ResizeToContents)
+        header.setSectionResizeMode(4, header.ResizeToContents)
+        header.setSectionResizeMode(5, header.Stretch)
+        self._exemplar_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._exemplar_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._exemplar_table.setSelectionMode(QTableWidget.SingleSelection)
+        self._exemplar_table.verticalHeader().setVisible(False)
+        self._exemplar_table.setMaximumHeight(150)
+        self._exemplar_table.itemSelectionChanged.connect(self._on_exemplar_selected)
+        self._exemplar_table.doubleClicked.connect(lambda _idx: self._load_clip())
+        self._exemplar_table.hide()
+        rl.addWidget(self._exemplar_placeholder)
+        rl.addWidget(self._exemplar_table)
 
         # ── Label section ──
         self._lbl_title = QLabel("Label this state:")
@@ -475,6 +506,9 @@ class StateCharacterizationView(QWidget):
         self._cards_widget.hide()
         self._profile_tabs.hide()
         self._heuristic_lbl.hide()
+        self._exemplar_placeholder.show()
+        self._exemplar_table.hide()
+        self._exemplar_table.setRowCount(0)
 
         if ss is None or ss.empty:
             self._state_list.addItem("No data — run state_characterizer.py")
@@ -710,6 +744,8 @@ class StateCharacterizationView(QWidget):
             self._cat_buttons[cat].setChecked(True)
             if cat in _TECHNICAL_CATEGORIES:
                 self._more_btn.setChecked(True)
+
+        self._populate_exemplars(sid)
 
     def _update_stat_cards(self, sid: int, r, ss: pd.DataFrame, id_col: str) -> None:
         """Populate the stat cards for the selected state."""
@@ -1077,21 +1113,109 @@ class StateCharacterizationView(QWidget):
         ]
         pd.DataFrame(rows).to_csv(p, index=False)
 
+    def _load_exemplar_manifest(self) -> pd.DataFrame:
+        p = RESULTS / "characterization" / "state_exemplars.csv"
+        if not p.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(p)
+        except Exception:
+            return pd.DataFrame()
+
+    def _resolve_exemplar_clip_path(self, clip_path: str) -> Path:
+        raw = str(clip_path or "").strip()
+        if not raw:
+            return Path()
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        project_data_root = Path(_vc.get_results_dir()).parent
+        candidate = project_data_root / raw
+        if candidate.exists():
+            return candidate
+        return RESULTS / raw
+
+    def _populate_exemplars(self, sid: int) -> None:
+        df = self._load_exemplar_manifest()
+        self._exemplar_df = df
+        self._exemplar_table.setRowCount(0)
+        self._load_clip_btn.setEnabled(False)
+        if df.empty or "state_id" not in df.columns:
+            self._exemplar_placeholder.show()
+            self._exemplar_table.hide()
+            self._clip_status.setText("")
+            return
+
+        state_ids = pd.to_numeric(df["state_id"], errors="coerce")
+        sub = df[
+            (state_ids == sid)
+            & df.get("clip_path", pd.Series("", index=df.index)).fillna("").astype(str).ne("")
+            & df.get("skipped_reason", pd.Series("", index=df.index)).fillna("").astype(str).eq("")
+        ].copy()
+        if sub.empty:
+            self._exemplar_placeholder.show()
+            self._exemplar_table.hide()
+            self._clip_status.setText("No curated exemplars for this state yet.")
+            return
+
+        if "rank" in sub.columns:
+            sub = sub.sort_values("rank", na_position="last")
+        self._exemplar_placeholder.hide()
+        self._exemplar_table.show()
+        self._exemplar_table.setSortingEnabled(False)
+        self._exemplar_table.setRowCount(len(sub))
+        for row_i, (_, row) in enumerate(sub.iterrows()):
+            clip_path = str(row.get("clip_path", ""))
+            animal = str(row.get("animal_id", "") or row.get("subject_id", "") or "—")
+            context = str(row.get("context", "") or row.get("condition", "") or "—")
+            duration = row.get("duration_sec", "")
+            rank_item = QTableWidgetItem(str(row.get("rank", row_i + 1)))
+            rank_item.setTextAlignment(Qt.AlignCenter)
+            rank_item.setData(Qt.UserRole, clip_path)
+            self._exemplar_table.setItem(row_i, 0, rank_item)
+            clip_item = QTableWidgetItem(Path(clip_path).name or clip_path)
+            clip_item.setData(Qt.UserRole, clip_path)
+            self._exemplar_table.setItem(row_i, 1, clip_item)
+            self._exemplar_table.setItem(row_i, 2, QTableWidgetItem(animal))
+            self._exemplar_table.setItem(row_i, 3, QTableWidgetItem(context))
+            try:
+                dur_txt = f"{float(duration):.2f}s"
+            except (TypeError, ValueError):
+                dur_txt = str(duration)
+            self._exemplar_table.setItem(row_i, 4, QTableWidgetItem(dur_txt))
+            self._exemplar_table.setItem(row_i, 5, QTableWidgetItem(str(row.get("selection_reason", ""))))
+        self._exemplar_table.setSortingEnabled(True)
+        self._exemplar_table.selectRow(0)
+        self._clip_status.setText("Select an exemplar, then load it to preview.")
+
+    def _selected_exemplar_path(self) -> Path | None:
+        row = self._exemplar_table.currentRow()
+        if row < 0:
+            return None
+        item = self._exemplar_table.item(row, 1) or self._exemplar_table.item(row, 0)
+        if item is None:
+            return None
+        return self._resolve_exemplar_clip_path(str(item.data(Qt.UserRole) or ""))
+
+    def _on_exemplar_selected(self) -> None:
+        path = self._selected_exemplar_path()
+        if path is None:
+            self._load_clip_btn.setEnabled(False)
+            return
+        self._load_clip_btn.setEnabled(bool(str(path)))
+        self._clip_status.setText(path.name if path.name else "")
+
     def _load_clip(self) -> None:
         sid = self._load_clip_btn.property("_sid")
         if sid is None:
             return
-        clip_dir = Path(_vc.get_clips_dir()) / f"state_{sid}"
-        if not clip_dir.exists():
-            self._clip_status.setText(
-                f"No clips found for state {sid} — run: python generate_clips.py"
-            )
+        chosen = self._selected_exemplar_path()
+        if chosen is None or not str(chosen):
+            self._clip_status.setText("Select a curated exemplar first.")
             return
-        clips = list(clip_dir.glob("*.mp4"))
-        if not clips:
-            self._clip_status.setText(f"No .mp4 files in clips/state_{sid}/")
+        if not chosen.exists():
+            self._clip_status.setText(f"Clip file not found: {chosen}")
             return
-        chosen = random.choice(clips)
         self._clip_status.setText(chosen.name)
         if self._player:
             try:
