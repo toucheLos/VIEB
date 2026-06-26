@@ -883,6 +883,10 @@ class DataLoader(QThread):
                 data["summary"] = _csv("comparison/summary_table.csv")
                 data["state_summary"] = _csv("characterization/state_summary.csv")
                 data["context_report"] = _csv("characterization/context_report.csv")
+                data["feature_profiles"] = _csv("characterization/state_feature_profiles.csv")
+                data["feature_zscores"] = _csv("characterization/state_feature_zscores.csv")
+                data["duration_summary"] = _csv("characterization/state_duration_summary.csv")
+                data["group_enrichment"] = _csv("characterization/state_group_enrichment.csv")
                 data["transition_table"] = _csv("comparison/transition_table.csv")
                 data["bouts"] = _csv("characterization/bouts.csv")
                 data["motifs"] = _csv("comparison/motifs.csv")
@@ -5128,7 +5132,10 @@ class MainWindow(QMainWindow):
                 "Results": "Artifacts",
             }
             saved = self.cfg.get("last_view", "Overview")
-            self._switch(_REMOVED_VIEW_MAP.get(saved, saved))
+            startup_view = _REMOVED_VIEW_MAP.get(saved, saved)
+            if startup_view != "Overview":
+                startup_view = "Overview"
+            self._switch(startup_view)
 
     def _toggle_sidebar(self):
         self._sidebar_collapsed = not self._sidebar_collapsed

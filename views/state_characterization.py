@@ -9,8 +9,10 @@ import pandas as pd
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QPushButton, QSplitter, QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QPushButton, QScrollArea, QSplitter,
+    QTabWidget, QTableWidget, QTableWidgetItem, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 import vieb_config as _vc
@@ -45,6 +47,31 @@ _TECH_CHIP_STYLE = (
     "QPushButton:checked{background:#76B7B2;color:white;border-color:#76B7B2;}"
     "QPushButton:hover:!checked{background:#e8f0f0;}"
 )
+_CARD_STYLE = (
+    "QFrame{background:#F8F9FA;border:1px solid #E0E0E0;border-radius:6px;"
+    "padding:6px 10px;}"
+)
+
+
+# ---------------------------------------------------------------------------
+# Small stat card
+# ---------------------------------------------------------------------------
+
+def _stat_card(title: str) -> tuple[QFrame, QLabel, QLabel]:
+    """Return (frame, title_label, value_label)."""
+    frame = QFrame()
+    frame.setStyleSheet(_CARD_STYLE)
+    fl = QVBoxLayout(frame)
+    fl.setContentsMargins(6, 4, 6, 4)
+    fl.setSpacing(1)
+    t = QLabel(title)
+    t.setStyleSheet("font-size:10px; color:#888;")
+    v = QLabel("—")
+    v.setStyleSheet("font-size:14px; font-weight:bold; color:#1A1A1A;")
+    fl.addWidget(t)
+    fl.addWidget(v)
+    return frame, t, v
+
 
 # ---------------------------------------------------------------------------
 # StateCharacterizationView
@@ -96,7 +123,7 @@ class StateCharacterizationView(QWidget):
         self._terminal = TerminalBox()
         hdr = self._make_header(
             "State Characterization", "Run Characterization",
-            lambda: self._run_command(["characterize.py"], self._terminal),
+            lambda: self._run_command(["state_characterizer.py"], self._terminal),
             self._terminal,
         )
         lay.addWidget(hdr)
@@ -104,13 +131,12 @@ class StateCharacterizationView(QWidget):
         self._splitter = QSplitter(Qt.Horizontal)
         splitter = self._splitter
 
-        # Left: state list panel (expanded + collapsed views)
+        # ── Left: state list ──────────────────────────────────────────────
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 8, 0)
         ll.setSpacing(4)
 
-        # Collapse / expand toggle row
         toggle_row = QHBoxLayout()
         toggle_row.setContentsMargins(0, 0, 0, 0)
         self._panel_title = QLabel("States")
@@ -131,7 +157,6 @@ class StateCharacterizationView(QWidget):
         toggle_row.addWidget(self._collapse_btn)
         ll.addLayout(toggle_row)
 
-        # Expanded controls (hidden when collapsed)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search states…")
         self._search.textChanged.connect(self._on_search)
@@ -163,7 +188,6 @@ class StateCharacterizationView(QWidget):
         self._state_list.currentRowChanged.connect(self._on_state_selected)
         ll.addWidget(self._state_list, stretch=1)
 
-        # Collapsed view: narrow column with just state numbers
         self._collapsed_list = QListWidget()
         self._collapsed_list.setStyleSheet(
             "QListWidget{border:none; font-size:11px; font-weight:bold;}"
@@ -183,24 +207,143 @@ class StateCharacterizationView(QWidget):
         left.setMinimumWidth(56)
         splitter.addWidget(left)
 
-        # Right: detail
+        # ── Right: scrollable detail panel ───────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         right = QWidget()
         rl = QVBoxLayout(right)
-        rl.setContentsMargins(8, 0, 0, 0)
+        rl.setContentsMargins(8, 0, 4, 8)
         rl.setSpacing(8)
 
         self._detail_placeholder = _placeholder("Select a state from the list.")
         rl.addWidget(self._detail_placeholder)
 
+        # ── Stat cards row ──
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(8)
+        self._card_frames: list[QFrame] = []
+        self._card_values: dict[str, QLabel] = {}
+        for key, title in [
+            ("occupancy", "Occupancy"),
+            ("n_bouts", "# Bouts"),
+            ("mean_dur", "Mean Duration"),
+            ("median_dur", "Median Duration"),
+        ]:
+            frame, _, val_lbl = _stat_card(title)
+            self._card_values[key] = val_lbl
+            self._card_frames.append(frame)
+            cards_row.addWidget(frame, stretch=1)
+        self._cards_widget = QWidget()
+        self._cards_widget.setLayout(cards_row)
+        self._cards_widget.hide()
+        rl.addWidget(self._cards_widget)
+
+        # ── Profile tabs (kinematic chart + top features + group enrichment) ──
+        self._profile_tabs = QTabWidget()
+        self._profile_tabs.setStyleSheet(
+            "QTabBar::tab{padding:4px 10px;font-size:11px;}"
+            "QTabBar::tab:selected{background:#fff;border-bottom:2px solid #4E79A7;}"
+        )
+        self._profile_tabs.hide()
+
+        # Tab 0: Kinematic Profile
+        kin_page = QWidget()
+        kin_lay = QVBoxLayout(kin_page)
+        kin_lay.setContentsMargins(4, 4, 4, 4)
         if _MPL:
-            self._kin_title = _section_title("Kinematic Profile")
-            rl.addWidget(self._kin_title)
             self._kin_canvas = MplCanvas(figsize=(6, 2.5))
-            self._kin_canvas.hide()
-            rl.addWidget(self._kin_canvas)
+            kin_lay.addWidget(self._kin_canvas)
         else:
             self._kin_canvas = None
-            self._kin_title = None
+            kin_lay.addWidget(_placeholder("Install matplotlib to see kinematic profiles."))
+        self._profile_tabs.addTab(kin_page, "Kinematic Profile")
+
+        # Tab 1: Top Features
+        feat_page = QWidget()
+        feat_lay = QVBoxLayout(feat_page)
+        feat_lay.setContentsMargins(4, 4, 4, 4)
+        feat_desc = QLabel(
+            "Features with the highest z-scores distinguish this state from the global mean. "
+            "Positive = above average; negative = below average."
+        )
+        feat_desc.setWordWrap(True)
+        feat_desc.setStyleSheet("color:#666; font-size:11px; padding-bottom:4px;")
+        feat_lay.addWidget(feat_desc)
+
+        self._feat_table = QTableWidget(0, 3)
+        self._feat_table.setHorizontalHeaderLabels(["Feature", "Z-Score", "Direction"])
+        self._feat_table.horizontalHeader().setStretchLastSection(False)
+        self._feat_table.horizontalHeader().setSectionResizeMode(0, self._feat_table.horizontalHeader().Stretch)
+        self._feat_table.horizontalHeader().setSectionResizeMode(1, self._feat_table.horizontalHeader().ResizeToContents)
+        self._feat_table.horizontalHeader().setSectionResizeMode(2, self._feat_table.horizontalHeader().ResizeToContents)
+        self._feat_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._feat_table.setSelectionMode(QTableWidget.NoSelection)
+        self._feat_table.verticalHeader().setVisible(False)
+        self._feat_table.setStyleSheet(
+            "QTableWidget{border:none;font-size:11px;}"
+            "QTableWidget::item{padding:2px 6px;}"
+        )
+        self._feat_no_data = _placeholder(
+            "Feature z-scores not available.\n"
+            "Click 'Run Characterization' to compute them."
+        )
+        feat_lay.addWidget(self._feat_no_data)
+        feat_lay.addWidget(self._feat_table)
+        self._feat_table.hide()
+        self._profile_tabs.addTab(feat_page, "Top Features")
+
+        # Tab 2: Group Enrichment
+        enrich_page = QWidget()
+        enrich_lay = QVBoxLayout(enrich_page)
+        enrich_lay.setContentsMargins(4, 4, 4, 4)
+        enrich_desc = QLabel(
+            "Fraction of bouts in this state by experimental group. "
+            "Enrichment ratio > 1 means this state occurs more than expected in that group."
+        )
+        enrich_desc.setWordWrap(True)
+        enrich_desc.setStyleSheet("color:#666; font-size:11px; padding-bottom:4px;")
+        enrich_lay.addWidget(enrich_desc)
+
+        self._enrich_table = QTableWidget(0, 4)
+        self._enrich_table.setHorizontalHeaderLabels(["Variable", "Group", "Fraction", "Enrichment"])
+        self._enrich_table.horizontalHeader().setSectionResizeMode(0, self._enrich_table.horizontalHeader().ResizeToContents)
+        self._enrich_table.horizontalHeader().setSectionResizeMode(1, self._enrich_table.horizontalHeader().ResizeToContents)
+        self._enrich_table.horizontalHeader().setSectionResizeMode(2, self._enrich_table.horizontalHeader().ResizeToContents)
+        self._enrich_table.horizontalHeader().setSectionResizeMode(3, self._enrich_table.horizontalHeader().Stretch)
+        self._enrich_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._enrich_table.setSelectionMode(QTableWidget.NoSelection)
+        self._enrich_table.verticalHeader().setVisible(False)
+        self._enrich_table.setStyleSheet(
+            "QTableWidget{border:none;font-size:11px;}"
+            "QTableWidget::item{padding:2px 6px;}"
+        )
+        self._enrich_no_data = _placeholder(
+            "Group enrichment not available.\n"
+            "Click 'Run Characterization' after clustering to compute enrichment."
+        )
+        enrich_lay.addWidget(self._enrich_no_data)
+        enrich_lay.addWidget(self._enrich_table)
+        self._enrich_table.hide()
+        self._profile_tabs.addTab(enrich_page, "Group Enrichment")
+
+        rl.addWidget(self._profile_tabs)
+
+        # ── Heuristic label hint ──
+        self._heuristic_lbl = QLabel("")
+        self._heuristic_lbl.setStyleSheet(
+            "color:#555; font-size:11px; font-style:italic; padding:2px 0;"
+        )
+        self._heuristic_lbl.setWordWrap(True)
+        self._heuristic_lbl.hide()
+        rl.addWidget(self._heuristic_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color:#DCDCDC;")
+        rl.addWidget(sep)
 
         # ── Clip controls ──
         clip_row = QHBoxLayout()
@@ -210,7 +353,6 @@ class StateCharacterizationView(QWidget):
         clip_row.addWidget(self._load_clip_btn)
         self._autoplay_cb = QCheckBox("Autoplay")
         self._autoplay_cb.setChecked(True)
-        self._autoplay_cb.setToolTip("Automatically play clips when loaded")
         clip_row.addWidget(self._autoplay_cb)
         self._clip_status = QLabel("")
         self._clip_status.setStyleSheet("color:#888; font-size:11px;")
@@ -239,7 +381,6 @@ class StateCharacterizationView(QWidget):
         input_row.addWidget(self._save_next_btn)
         rl.addLayout(input_row)
 
-        # Category chips
         self._cat_group = QButtonGroup(self)
         self._cat_group.setExclusive(True)
         self._cat_buttons: dict[str, QPushButton] = {}
@@ -279,7 +420,6 @@ class StateCharacterizationView(QWidget):
         self._tech_row_widget.hide()
         rl.addWidget(self._tech_row_widget)
 
-        # Custom category row
         self._custom_cat_row = QHBoxLayout()
         self._custom_cat_row.setSpacing(4)
         self._custom_cat_chips_layout = self._custom_cat_row
@@ -307,7 +447,8 @@ class StateCharacterizationView(QWidget):
                 "Video player unavailable.\nInstall opencv-python to enable."
             ))
 
-        splitter.addWidget(right)
+        scroll.setWidget(right)
+        splitter.addWidget(scroll)
         splitter.setSizes([self._left_expanded_width, 660])
         splitter.splitterMoved.connect(self._on_splitter_moved)
         lay.addWidget(splitter, stretch=1)
@@ -331,11 +472,12 @@ class StateCharacterizationView(QWidget):
         self._load_clip_btn.setEnabled(False)
         self._clip_status.setText("")
         self._detail_placeholder.show()
-        if self._kin_canvas:
-            self._kin_canvas.hide()
+        self._cards_widget.hide()
+        self._profile_tabs.hide()
+        self._heuristic_lbl.hide()
 
         if ss is None or ss.empty:
-            self._state_list.addItem("No data — run characterize.py")
+            self._state_list.addItem("No data — run state_characterizer.py")
             return
 
         id_col = next(
@@ -390,11 +532,11 @@ class StateCharacterizationView(QWidget):
         )
 
     _SORT_COLS = [
-        None,                    # State ID
-        "mean_centroid_speed",   # Speed
-        "mean_elongation",       # Elongation
-        "mean_bout_dur_sec",     # Bout Duration
-        "mean_angular_vel",      # Angular Velocity
+        None,
+        "mean_centroid_speed",
+        "mean_elongation",
+        "mean_bout_dur_sec",
+        "mean_angular_vel",
     ]
 
     def _populate_list(self) -> None:
@@ -438,7 +580,6 @@ class StateCharacterizationView(QWidget):
             item.setHidden(bool(text) and text.lower() not in item.text().lower())
 
     def _enrich_kinematic_columns(self, ss: pd.DataFrame) -> pd.DataFrame:
-        """Add kinematic columns from cluster_info centers when missing."""
         needed = {
             "mean_centroid_speed", "mean_angular_vel", "mean_elongation",
             "mean_rearing_score", "mean_movement_entropy",
@@ -508,14 +649,18 @@ class StateCharacterizationView(QWidget):
             return
         r = rows.iloc[0]
 
+        # ── Stat cards ──
+        self._update_stat_cards(sid, r, ss, id_col)
+
+        # ── Kinematic profile chart ──
         if _MPL and self._kin_canvas:
             kinematic_metrics = [
-                ("mean_centroid_speed",     "Speed"),
-                ("mean_angular_vel",        "Angular Velocity"),
-                ("mean_elongation",         "Elongation"),
-                ("mean_rearing_score",      "Rearing Score"),
-                ("mean_bout_dur_sec",       "Bout Duration"),
-                ("mean_movement_entropy",   "Movement Variability"),
+                ("mean_centroid_speed",   "Speed"),
+                ("mean_angular_vel",      "Angular Velocity"),
+                ("mean_elongation",       "Elongation"),
+                ("mean_rearing_score",    "Rearing Score"),
+                ("mean_bout_dur_sec",     "Bout Duration"),
+                ("mean_movement_entropy", "Movement Variability"),
             ]
             cols_lower = {c.lower(): c for c in ss.columns}
 
@@ -536,6 +681,24 @@ class StateCharacterizationView(QWidget):
             self._kin_metrics = metrics
             self._draw_kinematic_chart()
 
+        # ── Top features table ──
+        self._update_feat_table(sid)
+
+        # ── Group enrichment table ──
+        self._update_enrich_table(sid)
+
+        # ── Heuristic label hint ──
+        hint = self._heuristic_labels.get(sid, "")
+        if hint and hint != f"State {sid}":
+            self._heuristic_lbl.setText(f"Kinematic signature: {hint}")
+            self._heuristic_lbl.show()
+        else:
+            self._heuristic_lbl.hide()
+
+        self._profile_tabs.show()
+        self._cards_widget.show()
+
+        # ── Restore saved label ──
         saved = self._load_saved_state_labels().get(sid, {})
         self._label_input.setText(saved.get("label", ""))
         cat = saved.get("category", "")
@@ -548,6 +711,192 @@ class StateCharacterizationView(QWidget):
             if cat in _TECHNICAL_CATEGORIES:
                 self._more_btn.setChecked(True)
 
+    def _update_stat_cards(self, sid: int, r, ss: pd.DataFrame, id_col: str) -> None:
+        """Populate the stat cards for the selected state."""
+        # Occupancy — from global_fraction or n_bouts-derived
+        occ = None
+        for col in ("global_fraction", "fraction", "occupancy"):
+            v = r.get(col)
+            if v is not None and not (isinstance(v, float) and v != v):
+                occ = float(v)
+                break
+
+        # Also try duration_summary if available
+        dur_df = self._data.get("duration_summary")
+        if dur_df is not None and not dur_df.empty and "state_id" in dur_df.columns:
+            dur_row = dur_df[dur_df["state_id"] == sid]
+            if not dur_row.empty:
+                dr = dur_row.iloc[0]
+                n_bouts = int(dr.get("n_bouts", 0)) if not pd.isna(dr.get("n_bouts", float("nan"))) else None
+                mean_sec = dr.get("mean_sec")
+                median_sec = dr.get("median_sec")
+            else:
+                n_bouts = None
+                mean_sec = None
+                median_sec = None
+        else:
+            n_bouts_v = r.get("n_bouts")
+            n_bouts = int(n_bouts_v) if n_bouts_v is not None and not pd.isna(n_bouts_v) else None
+            mean_sec = r.get("mean_bout_dur_sec")
+            median_sec = r.get("median_bout_dur_sec")
+
+        # Occupancy fallback from state_summary
+        if occ is None:
+            for col in [c for c in ss.columns if "frac" in c.lower() or "occ" in c.lower()]:
+                v = r.get(col)
+                if v is not None and not (isinstance(v, float) and v != v):
+                    occ = float(v)
+                    break
+
+        self._card_values["occupancy"].setText(
+            f"{occ * 100:.1f}%" if occ is not None else "—"
+        )
+        self._card_values["n_bouts"].setText(
+            str(n_bouts) if n_bouts is not None else "—"
+        )
+        self._card_values["mean_dur"].setText(
+            f"{float(mean_sec):.2f}s" if mean_sec is not None and not (isinstance(mean_sec, float) and mean_sec != mean_sec) else "—"
+        )
+        self._card_values["median_dur"].setText(
+            f"{float(median_sec):.2f}s" if median_sec is not None and not (isinstance(median_sec, float) and median_sec != median_sec) else "—"
+        )
+
+    def _update_feat_table(self, sid: int) -> None:
+        """Populate the top-features table from feature_zscores data."""
+        zdf = self._data.get("feature_zscores")
+        if zdf is None or zdf.empty or "state_id" not in zdf.columns:
+            self._feat_table.hide()
+            self._feat_no_data.show()
+            return
+
+        row_mask = zdf["state_id"] == sid
+        if not row_mask.any():
+            self._feat_table.hide()
+            self._feat_no_data.show()
+            return
+
+        z_row = zdf[row_mask].iloc[0]
+        feat_cols = [c for c in zdf.columns if c != "state_id"]
+        if not feat_cols:
+            self._feat_table.hide()
+            self._feat_no_data.show()
+            return
+
+        z_vals = [(col, float(z_row[col])) for col in feat_cols
+                  if not pd.isna(z_row[col])]
+        z_vals.sort(key=lambda x: abs(x[1]), reverse=True)
+        top_n = z_vals[:10]
+
+        self._feat_table.setRowCount(len(top_n))
+        for row_i, (fname, zval) in enumerate(top_n):
+            self._feat_table.setItem(row_i, 0, QTableWidgetItem(fname))
+            zscore_item = QTableWidgetItem(f"{zval:+.3f}")
+            zscore_item.setTextAlignment(Qt.AlignCenter)
+            self._feat_table.setItem(row_i, 1, zscore_item)
+            dir_text = "▲ above avg" if zval > 0 else "▼ below avg"
+            dir_item = QTableWidgetItem(dir_text)
+            dir_item.setTextAlignment(Qt.AlignCenter)
+            dir_item.setForeground(
+                self._feat_table.palette().highlight() if zval > 0
+                else self._feat_table.palette().dark()
+            )
+            self._feat_table.setItem(row_i, 2, dir_item)
+
+        self._feat_table.resizeRowsToContents()
+        self._feat_no_data.hide()
+        self._feat_table.show()
+
+    def _update_enrich_table(self, sid: int) -> None:
+        """Populate the group enrichment table."""
+        ge = self._data.get("group_enrichment")
+        if ge is None or ge.empty or "state_id" not in ge.columns:
+            # Fall back to context_report
+            ctx = self._data.get("context_report")
+            if ctx is not None and not ctx.empty:
+                self._update_enrich_from_context_report(sid, ctx)
+            else:
+                self._enrich_table.hide()
+                self._enrich_no_data.show()
+            return
+
+        mask = ge["state_id"] == sid
+        sub = ge[mask].copy()
+        if sub.empty:
+            self._enrich_table.hide()
+            self._enrich_no_data.show()
+            return
+
+        self._enrich_table.setRowCount(len(sub))
+        for row_i, (_, row) in enumerate(sub.iterrows()):
+            self._enrich_table.setItem(row_i, 0, QTableWidgetItem(str(row.get("group_variable", ""))))
+            self._enrich_table.setItem(row_i, 1, QTableWidgetItem(str(row.get("group_value", ""))))
+            frac = row.get("fraction")
+            frac_item = QTableWidgetItem(
+                f"{float(frac)*100:.1f}%" if frac is not None and not pd.isna(frac) else "—"
+            )
+            frac_item.setTextAlignment(Qt.AlignCenter)
+            self._enrich_table.setItem(row_i, 2, frac_item)
+            enr = row.get("enrichment_ratio")
+            enr_item = QTableWidgetItem(
+                f"{float(enr):.2f}×" if enr is not None and not pd.isna(enr) else "—"
+            )
+            enr_item.setTextAlignment(Qt.AlignCenter)
+            self._enrich_table.setItem(row_i, 3, enr_item)
+
+        self._enrich_table.resizeRowsToContents()
+        self._enrich_no_data.hide()
+        self._enrich_table.show()
+
+    def _update_enrich_from_context_report(self, sid: int, ctx: pd.DataFrame) -> None:
+        """Show context enrichment from context_report.csv as fallback."""
+        id_col = next(
+            (c for c in ("state_id", "cluster_id", "state") if c in ctx.columns), None
+        )
+        if id_col is None:
+            self._enrich_table.hide()
+            self._enrich_no_data.show()
+            return
+
+        ctx_cols = [c for c in ctx.columns
+                    if c.startswith("context_") and c.endswith("_frac")]
+        if not ctx_cols:
+            self._enrich_table.hide()
+            self._enrich_no_data.show()
+            return
+
+        mask = ctx[id_col] == sid
+        if not mask.any():
+            self._enrich_table.hide()
+            self._enrich_no_data.show()
+            return
+
+        row = ctx[mask].iloc[0]
+        rows_data = []
+        for col in ctx_cols:
+            v = row.get(col)
+            if v is None or pd.isna(v):
+                continue
+            ctx_name = col.replace("context_", "").replace("_frac", "")
+            rows_data.append(("context", ctx_name, float(v)))
+
+        if not rows_data:
+            self._enrich_table.hide()
+            self._enrich_no_data.show()
+            return
+
+        self._enrich_table.setRowCount(len(rows_data))
+        for row_i, (var, val, frac) in enumerate(rows_data):
+            self._enrich_table.setItem(row_i, 0, QTableWidgetItem(var))
+            self._enrich_table.setItem(row_i, 1, QTableWidgetItem(val))
+            frac_item = QTableWidgetItem(f"{frac*100:.1f}%")
+            frac_item.setTextAlignment(Qt.AlignCenter)
+            self._enrich_table.setItem(row_i, 2, frac_item)
+            self._enrich_table.setItem(row_i, 3, QTableWidgetItem("—"))
+
+        self._enrich_table.resizeRowsToContents()
+        self._enrich_no_data.hide()
+        self._enrich_table.show()
+
     # ───────────────────────────── Responsive scaling ──
 
     def _scale_factor(self) -> float:
@@ -556,7 +905,6 @@ class StateCharacterizationView(QWidget):
     def _draw_kinematic_chart(self) -> None:
         if not (_MPL and self._kin_canvas):
             return
-        self._kin_canvas.show()
         canvas = self._kin_canvas
         canvas.fig.clf()
         ax = canvas.fig.add_subplot(111)
@@ -631,9 +979,6 @@ class StateCharacterizationView(QWidget):
         self._save_btn.setStyleSheet(btn_style)
         self._save_next_btn.setStyleSheet(btn_style)
         self._back_btn.setStyleSheet(btn_style)
-        if self._kin_title:
-            title_fs = max(9, int(11 * s))
-            self._kin_title.setFont(QFont("Arial", title_fs, QFont.Bold))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
