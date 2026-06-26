@@ -180,16 +180,33 @@ The main GUI is `user_interface.py` (standalone, run directly). The sidebar orde
 5. **Validation** — frame labeling + Clip Reviewer (`views/validation.py`)
 6. Settings — config editor
 
-`views/analysis.py` contains `AnalysisView` with a vertical tab bar (six tabs):
+**Stage 0 — Onboarding** (`Stage0ReadinessPanel` in `user_interface.py`): A compact pipeline card that performs lightweight readiness checks only — active project detection, config existence, metadata existence, session source detection, results-dir creation. It routes the user to existing workflows (project selector, data import) rather than duplicating them. Does not scan large directories, does not expose settings parameters. If metadata is missing but a source is detected, generation runs in a `QThread`. Clicking "Check Project Readiness" is the only action needed; later stages block until this passes.
+
+**Artifacts view** (`views/artifacts.py`): Scans use `ArtifactScanWorker` (a `QThread`) so the UI never blocks during directory scanning. The `refresh()` method accepts an optional pre-loaded data dict; the worker calls `_on_scan_done` / `_on_scan_failed` on completion. Row insertion is batched via `_insert_next_rows`.
+
+`views/analysis.py` contains `AnalysisView` with a vertical tab bar (ten tabs) split into two labeled sections:
+
+**CORE ANALYSIS**
 
 | Tab | Command | Data source |
 |-----|---------|-------------|
-| Comparison Report | `compare.py --report` | `results/comparison/summary_table.csv` |
 | State Characterization | *(no longer from characterize.py)* | `results/characterization/state_summary.csv` + clips/ |
+| State Comparison | `compare.py --report` | `results/comparison/summary_table.csv` |
+| Transitions & Motifs | `compare.py --motifs` | `results/comparison/motifs.csv` |
+| Diagnostics | *(inline)* | `results/shared/cluster_info.json` |
+
+**OPTIONAL ANALYSIS**
+
+| Tab | Command | Data source |
+|-----|---------|-------------|
 | Cohort Analysis | `cohort_analysis.py --groupby X` | `results/cohort/` |
 | Quantification | `compare.py --quantify` | `results/quantification/master_table.csv` |
-| Fear Index | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
+| [metric label] | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
 | Jess Correlation | `compare.py --jess` | `results/quantification/jess_correlations.csv` |
+| Event Alignment | `compare.py --event-align` | `results/comparison/` |
+| Column Mapping | *(inline)* | project `config.json` |
+
+The tab list uses section headers (non-selectable rows) and a `_row_to_stack` dict mapping list row → stack index, since header rows do not correspond to stack pages.
 
 `views/validation.py` — `ValidationView` has three tabs:
 

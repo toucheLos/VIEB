@@ -24,8 +24,11 @@ _EXT_TYPE = {
     ".avi": "Video",
     ".mov": "Video",
     ".npy": "NumPy",
+    ".gz": "NumPy",
     ".pkl": "Model",
     ".pt": "Model",
+    ".h5": "HDF5",
+    ".hdf5": "HDF5",
     ".xlsx": "Excel",
     ".xls": "Excel",
 }

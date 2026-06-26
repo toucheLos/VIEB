@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
@@ -148,9 +148,9 @@ class AnalysisView(QWidget):
         self._worker = None
         self._jess_df = None
         self._current_tab = 0
-        # Each entry is True when that tab needs a redraw.
+        # Each entry is True when that tab needs a redraw (indexed by stack position).
         # Starts True so the first visit always renders.
-        self._tab_dirty = [True] * 9
+        self._tab_dirty = [True] * 10
         import vieb_config as _vc
         self._cond_a = _vc.get_condition_a_label()
         self._cond_b = _vc.get_condition_b_label()
@@ -159,19 +159,6 @@ class AnalysisView(QWidget):
 
     # ─────────────────────────────────────────────────────────── build ──
 
-    def _build_tab_names(self) -> list[str]:
-        return [
-            "Column Mapping",
-            "Comparison Report",
-            "Motif Discovery",
-            "Cohort Analysis",
-            "Quantification",
-            self._metric_label,
-            "Jess Correlation",
-            "Event Alignment",
-            "State Characterization",
-        ]
-
     def _build(self) -> None:
         root_lay = QHBoxLayout(self)
         root_lay.setContentsMargins(0, 0, 0, 0)
@@ -179,18 +166,18 @@ class AnalysisView(QWidget):
 
         # ── Vertical tab bar ─────────────────────────────────────────────
         self._tab_list = QListWidget()
-        self._tab_list.setFixedWidth(160)
-        self._tab_list.setSpacing(1)
+        self._tab_list.setFixedWidth(168)
+        self._tab_list.setSpacing(0)
         self._tab_list.setStyleSheet("""
             QListWidget {
                 background: #F4F4F4;
                 border: none;
                 border-right: 1px solid #DCDCDC;
-                padding-top: 8px;
+                padding-top: 4px;
                 outline: none;
             }
             QListWidget::item {
-                padding: 10px 14px;
+                padding: 9px 14px;
                 color: #333;
                 font-size: 12px;
             }
@@ -202,24 +189,73 @@ class AnalysisView(QWidget):
                 background: #E8E8E8;
             }
         """)
-        for label in self._build_tab_names():
+
+        # ── Build row → stack-index mapping ─────────────────────────────
+        # Row layout (tab list rows):
+        #   0  section header "CORE ANALYSIS"        (non-selectable)
+        #   1  State Characterization                → stack 0
+        #   2  State Comparison                      → stack 1
+        #   3  Transitions & Motifs                  → stack 2
+        #   4  Diagnostics                           → stack 3
+        #   5  section header "OPTIONAL ANALYSIS"    (non-selectable)
+        #   6  Cohort Analysis                       → stack 4
+        #   7  Quantification                        → stack 5
+        #   8  [metric label]                        → stack 6
+        #   9  Jess Correlation                      → stack 7
+        #  10  Event Alignment                       → stack 8
+        #  11  Column Mapping                        → stack 9
+
+        self._separator_rows: set[int] = {0, 5}
+        self._row_to_stack: dict[int, int] = {
+            1: 0, 2: 1, 3: 2, 4: 3,
+            6: 4, 7: 5, 8: 6, 9: 7, 10: 8, 11: 9,
+        }
+        self._metric_label_row: int = 8
+
+        def _add_section(label: str) -> None:
+            item = QListWidgetItem(label)
+            item.setFlags(Qt.ItemIsEnabled)
+            font = item.font()
+            font.setPointSize(8)
+            font.setBold(True)
+            item.setFont(font)
+            item.setForeground(QColor("#999"))
+            item.setBackground(QColor("#EBEBEB"))
+            self._tab_list.addItem(item)
+
+        def _add_tab(label: str) -> None:
             self._tab_list.addItem(label)
-        self._tab_list.setCurrentRow(0)
+
+        _add_section("CORE ANALYSIS")
+        _add_tab("State Characterization")
+        _add_tab("State Comparison")
+        _add_tab("Transitions & Motifs")
+        _add_tab("Diagnostics")
+        _add_section("OPTIONAL ANALYSIS")
+        _add_tab("Cohort Analysis")
+        _add_tab("Quantification")
+        _add_tab(self._metric_label)
+        _add_tab("Jess Correlation")
+        _add_tab("Event Alignment")
+        _add_tab("Column Mapping")
+
+        self._tab_list.setCurrentRow(1)
         self._tab_list.currentRowChanged.connect(self._switch_tab)
         root_lay.addWidget(self._tab_list)
 
-        # ── Content stack ────────────────────────────────────────────────
+        # ── Content stack (one page per real tab, no separator pages) ────
         self._stack = QStackedWidget()
         builders = [
-            self._build_tab0,
-            self._build_tab1,
-            self._build_tab2,
-            self._build_tab3,
-            self._build_tab4,
-            self._build_tab5,
-            self._build_tab6,
-            self._build_tab7,
-            self._build_tab8,
+            self._build_tab8,              # stack 0: State Characterization
+            self._build_tab1,              # stack 1: State Comparison
+            self._build_tab2,              # stack 2: Transitions & Motifs
+            self._build_tab_diagnostics,   # stack 3: Diagnostics
+            self._build_tab3,              # stack 4: Cohort Analysis
+            self._build_tab4,              # stack 5: Quantification
+            self._build_tab5,              # stack 6: [metric label]
+            self._build_tab6,              # stack 7: Jess Correlation
+            self._build_tab7,              # stack 8: Event Alignment
+            self._build_tab0,              # stack 9: Column Mapping
         ]
         for build in builders:
             page = build()
@@ -287,7 +323,7 @@ class AnalysisView(QWidget):
 
         self._t1_terminal = TerminalBox()
         hdr = self._make_header(
-            "Comparison Report", "Run Report",
+            "State Comparison", "Run Report",
             lambda: self._run_command(["compare.py", "--report"], self._t1_terminal),
             self._t1_terminal,
         )
@@ -346,7 +382,7 @@ class AnalysisView(QWidget):
         self._t2_terminal = TerminalBox()
 
         top = QHBoxLayout()
-        t2_title = QLabel("Motif Discovery")
+        t2_title = QLabel("Transitions & Motifs")
         t2_title.setFont(QFont("Arial", 14, QFont.Bold))
         top.addWidget(t2_title)
         top.addStretch()
@@ -736,21 +772,30 @@ class AnalysisView(QWidget):
 
     def _get_loaders(self):
         return [
-            self._load_tab0,
-            self._load_tab1, self._load_tab2, self._load_tab3,
-            self._load_tab4, self._load_tab5, self._load_tab6,
-            self._load_tab7, self._load_tab8,
+            self._load_tab8,              # stack 0: State Characterization
+            self._load_tab1,              # stack 1: State Comparison
+            self._load_tab2,              # stack 2: Transitions & Motifs
+            self._load_tab_diagnostics,   # stack 3: Diagnostics
+            self._load_tab3,              # stack 4: Cohort Analysis
+            self._load_tab4,              # stack 5: Quantification
+            self._load_tab5,              # stack 6: [metric label]
+            self._load_tab6,              # stack 7: Jess Correlation
+            self._load_tab7,              # stack 8: Event Alignment
+            self._load_tab0,              # stack 9: Column Mapping
         ]
 
-    def _switch_tab(self, idx: int) -> None:
-        if idx < 0 or idx >= self._stack.count():
+    def _switch_tab(self, row: int) -> None:
+        if row < 0 or row in self._separator_rows:
             return
-        self._current_tab = idx
-        self._stack.setCurrentIndex(idx)
+        stack_idx = self._row_to_stack.get(row, -1)
+        if stack_idx < 0 or stack_idx >= self._stack.count():
+            return
+        self._current_tab = stack_idx
+        self._stack.setCurrentIndex(stack_idx)
         # Only render if dirty — skip if the chart is already up-to-date.
-        if self._tab_dirty[idx]:
-            self._get_loaders()[idx]()
-            self._tab_dirty[idx] = False
+        if self._tab_dirty[stack_idx]:
+            self._get_loaders()[stack_idx]()
+            self._tab_dirty[stack_idx] = False
 
     def _load_current_tab(self) -> None:
         """Reload the visible tab unconditionally (e.g. after a pipeline run)."""
@@ -761,17 +806,15 @@ class AnalysisView(QWidget):
 
     def _mark_all_dirty(self) -> None:
         """Flag every tab for redraw on next visit."""
-        self._tab_dirty = [True] * 9
+        self._tab_dirty = [True] * 10
 
     # ────────────────────────────────────────────────── Data loading ──
 
     def update_data(self, data: dict) -> None:
         if data is not self._data:
             self._data = data
-            loaders = self._get_loaders()
-            for i, loader in enumerate(loaders):
-                loader()
-                self._tab_dirty[i] = False
+            self._mark_all_dirty()
+            self._load_current_tab()
 
     def refresh(self, data: dict) -> None:
         """Reload only the currently visible tab with fresh data; others reload lazily on switch."""
@@ -1810,6 +1853,139 @@ class AnalysisView(QWidget):
         if self._data:
             self._scv_widget.update_data(self._data)
 
+    # ──────────────────────────────────── Diagnostics (stack 3) ──
+
+    def _build_tab_diagnostics(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(12)
+
+        hdr = QHBoxLayout()
+        title = QLabel("Diagnostics")
+        title.setFont(QFont("Arial", 14, QFont.Bold))
+        hdr.addWidget(title)
+        hdr.addStretch()
+        open_btn = QPushButton("Open Diagnostics Folder")
+        open_btn.setFixedHeight(30)
+        open_btn.clicked.connect(self._open_diagnostics_folder)
+        hdr.addWidget(open_btn)
+        lay.addLayout(hdr)
+
+        subtitle = QLabel(
+            "Cluster health metrics help you judge whether the discovered states are stable and trustworthy."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color:#555; font-size:12px; padding-bottom:4px;")
+        lay.addWidget(subtitle)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color:#DCDCDC;")
+        lay.addWidget(sep)
+
+        self._diag_placeholder = QLabel(
+            "No diagnostics available.\n"
+            "Run Stage 3 (Clustering) to generate cluster health metrics.\n\n"
+            "python compare.py --cluster"
+        )
+        self._diag_placeholder.setAlignment(Qt.AlignCenter)
+        self._diag_placeholder.setWordWrap(True)
+        self._diag_placeholder.setStyleSheet("color:#888; font-style:italic; padding:24px;")
+        lay.addWidget(self._diag_placeholder)
+
+        self._diag_content = QWidget()
+        dcl = QVBoxLayout(self._diag_content)
+        dcl.setContentsMargins(0, 0, 0, 0)
+        dcl.setSpacing(12)
+
+        self._diag_params_lbl = QLabel("")
+        self._diag_params_lbl.setWordWrap(True)
+        self._diag_params_lbl.setStyleSheet(
+            "background:#F8F8F8; border:1px solid #E0E0E0; border-radius:4px;"
+            "padding:10px 14px; font-family:monospace; font-size:11px; color:#333;"
+        )
+        dcl.addWidget(self._diag_params_lbl)
+
+        self._diag_warnings_widget = QWidget()
+        self._diag_warnings_lay = QVBoxLayout(self._diag_warnings_widget)
+        self._diag_warnings_lay.setContentsMargins(0, 0, 0, 0)
+        self._diag_warnings_lay.setSpacing(4)
+        dcl.addWidget(self._diag_warnings_widget)
+
+        dcl.addStretch()
+        self._diag_content.hide()
+        lay.addWidget(self._diag_content)
+        lay.addStretch()
+        return page
+
+    def _load_tab_diagnostics(self) -> None:
+        diag = self._data.get("diagnostics") if self._data else None
+        if not diag:
+            self._diag_placeholder.show()
+            self._diag_content.hide()
+            return
+
+        self._diag_placeholder.hide()
+        self._diag_content.show()
+
+        lines = [
+            f"States: {diag.get('n_states', '?')}   |   "
+            f"Frames: {diag.get('n_frames', 0):,}   |   "
+            f"Noise: {diag.get('noise_frac', 0) * 100:.1f}%",
+            f"Largest state: {diag.get('largest_state_frac', 0) * 100:.1f}%   |   "
+            f"Mean confidence: {diag.get('mean_confidence', 0):.3f}   |   "
+            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0) * 100:.1f}%",
+            f"UMAP dims: {diag.get('umap_dims', '?')}   |   "
+            f"min_cluster_size: {diag.get('min_cluster_size', '?')}   |   "
+            f"Features: {diag.get('n_features', '?')}   |   "
+            f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
+        ]
+        self._diag_params_lbl.setText("\n".join(lines))
+
+        while self._diag_warnings_lay.count():
+            item = self._diag_warnings_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        warnings = diag.get("warnings", [])
+        if not warnings:
+            ok_lbl = QLabel("✓  No cluster health warnings.")
+            ok_lbl.setStyleSheet(
+                "color:#2e7d32; font-size:12px; padding:8px 0;"
+            )
+            self._diag_warnings_lay.addWidget(ok_lbl)
+        for w in warnings:
+            level = w.get("level", "info")
+            if level == "error":
+                color, icon = "#c62828", "✕"
+            elif level == "warning":
+                color, icon = "#e65100", "⚠"
+            else:
+                color, icon = "#1565c0", "ℹ"
+            lbl = QLabel(f"{icon}  {w.get('message', '')}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                f"color:{color}; font-size:12px; padding:4px 0;"
+            )
+            if w.get("action"):
+                lbl.setToolTip(w["action"])
+            self._diag_warnings_lay.addWidget(lbl)
+
+    def _open_diagnostics_folder(self) -> None:
+        from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtCore import QUrl
+        diag_dir = RESULTS / "diagnostics"
+        if diag_dir.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(diag_dir)))
+        else:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Diagnostics",
+                "No diagnostics directory found.\n"
+                "Run clustering (Stage 3) to generate diagnostic outputs."
+            )
+
     # ───────────────────────────────────────── Label refresh ──
 
     def refresh_labels(self) -> None:
@@ -1818,6 +1994,9 @@ class AnalysisView(QWidget):
         self._cond_a = _vc.get_condition_a_label()
         self._cond_b = _vc.get_condition_b_label()
         self._metric_label = _vc.get_primary_metric_label()
+        item = self._tab_list.item(self._metric_label_row)
+        if item is not None:
+            item.setText(self._metric_label)
         self._load_current_tab()
 
     # ─────────────────────────────────────── Command runner ──

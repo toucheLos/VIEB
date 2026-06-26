@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 
 import pandas as pd
 
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QFont, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
@@ -22,6 +23,34 @@ from artifact_scanner import (
     scan_artifacts, build_publication_bundle, format_size, format_time,
 )
 
+PREVIEW_CSV_ROWS = 100
+PREVIEW_TEXT_BYTES = 64_000
+SMALL_JSON_BYTES = 256_000
+ROW_BATCH_SIZE = 150
+BINARY_TYPES = {"Model", "NumPy", "HDF5"}
+BINARY_SUFFIXES = {".pkl", ".pt", ".pth", ".ckpt", ".npy", ".npy.gz", ".h5", ".hdf5"}
+
+
+class ArtifactScanWorker(QThread):
+    done = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, results_dir: str, clips_dir: str | None):
+        super().__init__()
+        self._results_dir = results_dir
+        self._clips_dir = clips_dir
+
+    def run(self):
+        import time
+        t0 = time.perf_counter()
+        try:
+            artifacts = scan_artifacts(self._results_dir, clips_dir=self._clips_dir)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        print(f"[timing] Artifacts scan: {(time.perf_counter() - t0) * 1000:.1f} ms ({len(artifacts)} files)")
+        self.done.emit(artifacts)
+
 
 class ArtifactsView(QWidget):
     worker_running = pyqtSignal(bool)
@@ -33,6 +62,9 @@ class ArtifactsView(QWidget):
         self._artifacts: list[dict] = []
         self._filtered: list[dict] = []
         self._worker = None
+        self._pending_rows: list[dict] = []
+        self._row_timer = QTimer(self)
+        self._row_timer.timeout.connect(self._insert_next_rows)
         self._build()
 
     # ------------------------------------------------------------------ build
@@ -43,7 +75,7 @@ class ArtifactsView(QWidget):
 
         # ── Header ───────────────────────────────────────────────────────
         hdr = QHBoxLayout()
-        title = QLabel("Results Browser")
+        title = QLabel("Artifacts")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         hdr.addWidget(title)
         hdr.addStretch()
@@ -72,7 +104,7 @@ class ArtifactsView(QWidget):
         self._type_filter = QComboBox()
         self._type_filter.addItem("All")
         for t in ("CSV", "JSON", "Image", "Video", "PDF", "NumPy",
-                  "Model", "Excel", "Other"):
+                  "HDF5", "Model", "Excel", "Other"):
             self._type_filter.addItem(t)
         self._type_filter.currentTextChanged.connect(self._apply_filters)
         filt.addWidget(self._type_filter)
@@ -161,16 +193,47 @@ class ArtifactsView(QWidget):
     # ----------------------------------------------------------- data hooks
     def update_data(self, data: dict) -> None:
         self._data = data
-        self._scan()
 
-    def refresh(self, data: dict) -> None:
-        self._data = data
+    def refresh(self, data: dict | None = None) -> None:
+        if isinstance(data, dict):
+            self._data = data
         self._scan()
 
     # -------------------------------------------------------------- scanning
     def _scan(self) -> None:
-        clips_dir = str(CLIPS) if CLIPS.is_dir() else None
-        self._artifacts = scan_artifacts(str(RESULTS), clips_dir=clips_dir)
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._summary_lbl.setText("Scanning artifacts...")
+        self._row_timer.stop()
+        self._pending_rows = []
+        self._table.setRowCount(0)
+        self._preview_stack.setCurrentWidget(self._preview_empty)
+        results_dir, clips_dir = self._current_artifact_roots()
+        self._worker = ArtifactScanWorker(str(results_dir), str(clips_dir) if clips_dir else None)
+        self._worker.done.connect(self._on_scan_done)
+        self._worker.failed.connect(self._on_scan_failed)
+        self.worker_running.emit(True)
+        self._worker.start()
+
+    def _current_artifact_roots(self) -> tuple[Path, Path | None]:
+        """Resolve active-project artifact roots at scan time, not import time."""
+        try:
+            import vieb_config as _vc
+            results_dir = Path(_vc.get_results_dir())
+            clips_dir = Path(_vc.get_clips_dir())
+        except Exception:
+            results_dir = RESULTS
+            clips_dir = CLIPS
+        return results_dir, clips_dir if clips_dir.is_dir() else None
+
+    def _on_scan_failed(self, message: str) -> None:
+        self.worker_running.emit(False)
+        self._summary_lbl.setText("Artifact scan failed")
+        self._show_info(f"Artifact scan failed:\n{message}")
+
+    def _on_scan_done(self, artifacts: list[dict]) -> None:
+        self.worker_running.emit(False)
+        self._artifacts = artifacts
 
         categories = sorted(set(a["category"] for a in self._artifacts))
         current = self._cat_filter.currentText()
@@ -211,9 +274,32 @@ class ArtifactsView(QWidget):
         )
 
     def _populate_table(self, artifacts: list[dict]) -> None:
+        self._row_timer.stop()
+        self._pending_rows = list(artifacts)
         self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(artifacts))
-        for ri, a in enumerate(artifacts):
+        self._table.setRowCount(0)
+        self._insert_next_rows()
+        if self._pending_rows:
+            self._summary_lbl.setText(
+                f"Loading {min(len(artifacts), ROW_BATCH_SIZE)} of {len(artifacts)} files..."
+            )
+            self._row_timer.start(0)
+        else:
+            self._table.setSortingEnabled(True)
+
+    def _insert_next_rows(self) -> None:
+        if not self._pending_rows:
+            self._row_timer.stop()
+            self._table.setSortingEnabled(True)
+            return
+
+        batch = self._pending_rows[:ROW_BATCH_SIZE]
+        del self._pending_rows[:ROW_BATCH_SIZE]
+        start = self._table.rowCount()
+        self._table.setRowCount(start + len(batch))
+
+        for offset, a in enumerate(batch):
+            ri = start + offset
             self._table.setItem(ri, 0, QTableWidgetItem(a["name"]))
             self._table.setItem(ri, 1, QTableWidgetItem(a["category"]))
             self._table.setItem(ri, 2, QTableWidgetItem(a["file_type"]))
@@ -222,7 +308,19 @@ class ArtifactsView(QWidget):
             self._table.setItem(ri, 3, size_item)
             self._table.setItem(ri, 4, QTableWidgetItem(format_time(a["modified_ts"])))
             self._table.setItem(ri, 5, QTableWidgetItem(a["rel_path"]))
-        self._table.setSortingEnabled(True)
+
+        total_size = sum(a["size_bytes"] for a in self._filtered)
+        if self._pending_rows:
+            loaded = len(self._filtered) - len(self._pending_rows)
+            self._summary_lbl.setText(
+                f"Loading {loaded} of {len(self._filtered)} files, {format_size(total_size)}"
+            )
+        else:
+            self._row_timer.stop()
+            self._table.setSortingEnabled(True)
+            self._summary_lbl.setText(
+                f"{len(self._filtered)} files, {format_size(total_size)}"
+            )
 
     # ----------------------------------------------------------- selection
     def _selected_artifact(self) -> dict | None:
@@ -263,15 +361,38 @@ class ArtifactsView(QWidget):
 
     # ------------------------------------------------------------- preview
     def _preview_file(self, art: dict) -> None:
+        t0 = time.perf_counter()
         ftype = art["file_type"]
         path = art["abs_path"]
+        path_obj = Path(path)
+        suffixes = "".join(s.lower() for s in path_obj.suffixes)
 
-        if ftype == "CSV" or ftype == "Excel":
-            try:
+        def _metadata_text(message: str | None = None) -> str:
+            lines = [
+                f"File: {art['name']}",
+                f"Type: {ftype}",
+                f"Size: {format_size(art['size_bytes'])}",
+                f"Modified: {format_time(art['modified_ts'])}",
+                f"Path: {path}",
+            ]
+            if message:
+                lines.extend(["", message])
+            return "\n".join(lines)
+
+        try:
+            if ftype in BINARY_TYPES or any(suffixes.endswith(s) for s in BINARY_SUFFIXES):
+                self._show_info(
+                    _metadata_text(
+                        "Binary artifact preview is disabled. Use Open File, Reveal in Folder, or Export."
+                    )
+                )
+                return
+
+            if ftype == "CSV" or ftype == "Excel":
                 if ftype == "Excel":
-                    df = pd.read_excel(path, nrows=20)
+                    df = pd.read_excel(path, nrows=PREVIEW_CSV_ROWS)
                 else:
-                    df = pd.read_csv(path, nrows=20)
+                    df = pd.read_csv(path, nrows=PREVIEW_CSV_ROWS)
                 self._preview_table.setRowCount(len(df))
                 self._preview_table.setColumnCount(len(df.columns))
                 self._preview_table.setHorizontalHeaderLabels(list(df.columns))
@@ -280,70 +401,77 @@ class ArtifactsView(QWidget):
                         self._preview_table.setItem(
                             ri, ci, QTableWidgetItem(str(val)),
                         )
+                self._preview_table.setToolTip(
+                    f"Preview limited to first {PREVIEW_CSV_ROWS} rows. "
+                    "Use Open File or Export for the full file."
+                )
                 self._preview_stack.setCurrentWidget(self._preview_table)
-            except Exception as e:
-                self._show_info(f"Error reading {ftype}:\n{e}")
 
-        elif ftype == "JSON":
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                text = json.dumps(data, indent=2)
-                if len(text) > 12_000:
-                    text = text[:12_000] + "\n\n... (truncated)"
+            elif ftype == "JSON":
+                if art["size_bytes"] <= SMALL_JSON_BYTES:
+                    with open(path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    text = json.dumps(data, indent=2)
+                    if len(text.encode("utf-8", errors="replace")) > PREVIEW_TEXT_BYTES:
+                        text = text[:PREVIEW_TEXT_BYTES] + (
+                            f"\n\nLarge file preview limited to first {PREVIEW_TEXT_BYTES} bytes. "
+                            "Use Export/Open for full file."
+                        )
+                else:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        text = f.read(PREVIEW_TEXT_BYTES)
+                    text += (
+                        f"\n\nLarge file preview limited to first {PREVIEW_TEXT_BYTES} bytes. "
+                        "Use Export/Open for full file."
+                    )
                 self._preview_text.setPlainText(text)
                 self._preview_stack.setCurrentWidget(self._preview_text)
-            except Exception as e:
-                self._show_info(f"Error reading JSON:\n{e}")
 
-        elif ftype == "Image":
-            pix = QPixmap(path)
-            if not pix.isNull():
-                available = self._preview_stack.size()
-                scaled = pix.scaled(
-                    available.width() - 20,
-                    available.height() - 20,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
+            elif ftype == "Image":
+                pix = QPixmap(path)
+                if not pix.isNull():
+                    available = self._preview_stack.size()
+                    scaled = pix.scaled(
+                        available.width() - 20,
+                        available.height() - 20,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                    self._preview_image.setPixmap(scaled)
+                    self._preview_stack.setCurrentWidget(self._preview_image)
+                else:
+                    self._show_info("Cannot display image.")
+
+            elif ftype == "Video":
+                self._show_info(
+                    _metadata_text("Double-click the row to open in system player.")
                 )
-                self._preview_image.setPixmap(scaled)
-                self._preview_stack.setCurrentWidget(self._preview_image)
+
+            elif ftype == "PDF":
+                self._show_info(
+                    _metadata_text("Double-click the row to open in system viewer.")
+                )
+
             else:
-                self._show_info("Cannot display image.")
-
-        elif ftype == "Video":
-            self._show_info(
-                f"Video: {art['name']}\n"
-                f"Size: {format_size(art['size_bytes'])}\n\n"
-                "Double-click the row to open in system player."
-            )
-
-        elif ftype == "PDF":
-            self._show_info(
-                f"PDF: {art['name']}\n"
-                f"Size: {format_size(art['size_bytes'])}\n\n"
-                "Double-click the row to open in system viewer."
-            )
-
-        else:
-            try:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    head = f.read(4000)
+                    head = f.read(PREVIEW_TEXT_BYTES)
                 if head.strip():
+                    if art["size_bytes"] > PREVIEW_TEXT_BYTES:
+                        head += (
+                            f"\n\nLarge file preview limited to first {PREVIEW_TEXT_BYTES} bytes. "
+                            "Use Export/Open for full file."
+                        )
                     self._preview_text.setPlainText(head)
                     self._preview_stack.setCurrentWidget(self._preview_text)
                 else:
-                    self._show_info(
-                        f"{ftype} file: {art['name']}\n"
-                        f"Size: {format_size(art['size_bytes'])}\n"
-                        f"Modified: {format_time(art['modified_ts'])}"
-                    )
-            except Exception:
-                self._show_info(
-                    f"{ftype} file: {art['name']}\n"
-                    f"Size: {format_size(art['size_bytes'])}\n"
-                    f"Modified: {format_time(art['modified_ts'])}"
-                )
+                    self._show_info(_metadata_text())
+        except Exception as e:
+            self._show_info(f"Error previewing {ftype}:\n{e}")
+        finally:
+            print(
+                f"[timing] Artifact preview {ftype}: "
+                f"{(time.perf_counter() - t0) * 1000:.1f} ms"
+            )
 
     def _show_info(self, text: str) -> None:
         self._preview_info.setText(text)

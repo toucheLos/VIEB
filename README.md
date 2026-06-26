@@ -73,7 +73,11 @@ python user_interface.py
 
 VIEB is organized as a staged pipeline. Each stage builds on the previous one. The GUI guides you through all stages with a live terminal output and status indicators.
 
-### Stage 0 — Pose Estimation (DeepLabCut)
+### Stage 0 — Onboarding
+
+Before the pipeline can run, VIEB verifies that an active project exists and has enough information to proceed. Click **Check Project Readiness** in the Stage 0 card. If anything is missing, the card points you to the relevant existing workflow (project selector, data import). All checks are lightweight — no directory scanning, no heavy library loading.
+
+### Stage 1 — Pose Estimation (DeepLabCut)
 
 VIEB takes DeepLabCut CSV output as input. If you have already run DLC on your videos, point VIEB to your `config.yaml` via the DLC Setup view and your raw videos directory via Settings. VIEB will find the pose CSVs automatically.
 
@@ -83,7 +87,7 @@ If you are starting from scratch, VIEB includes a full DLC training pipeline: ad
 
 Custom keypoint configurations are supported via the keypoint mapping panel in DLC Setup.
 
-### Stage 1 — Feature Extraction
+### Stage 2 — Feature Extraction
 
 ```bash
 python compare.py --extract
