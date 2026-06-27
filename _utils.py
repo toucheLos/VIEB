@@ -15,9 +15,11 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import time as _time
 import numpy as np
 import pandas as pd
 
+_t_mpl = _time.perf_counter()
 _MPL = False
 try:
     import matplotlib
@@ -33,7 +35,9 @@ try:
     _MPL = True
 except Exception:
     pass
+print(f"[timing] _utils.py matplotlib import: {(_time.perf_counter() - _t_mpl) * 1000:.1f} ms")
 
+_t_cv2 = _time.perf_counter()
 _CV2 = False
 try:
     import cv2
@@ -41,6 +45,7 @@ try:
     _CV2 = True
 except Exception:
     pass
+print(f"[timing] _utils.py cv2 import: {(_time.perf_counter() - _t_cv2) * 1000:.1f} ms")
 
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -401,6 +406,7 @@ _DEFAULT_CFG = {
     "cohort_csv_path": "",
     "current_run_saved": False,
     "current_run_id": "",
+    "active_cluster_run": "",
     "column_map": {
         "animal_id":  "animal_id",
         "day":        "day",

@@ -35,6 +35,27 @@ def _meta(): return _vc.get_metadata_path()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None):
+    import project_manager as _pm
+
+    root = repo_root or ROOT
+    app_path = app_config_path or os.path.join(root, "app_config.json")
+    project = _pm.get_active_project(root, app_path)
+    paths = _pm.resolve_project_paths(root, app_path)
+    print(f"Active project: {project}")
+    print(f"Metadata path: {paths['metadata'].path} (origin: {paths['metadata'].origin})")
+    print(f"Results dir: {paths['results'].path} (origin: {paths['results'].origin})")
+    print(f"Raw videos dir: {paths['raw_videos'].path} (origin: {paths['raw_videos'].origin})")
+    print(f"Config path: {paths['config'].path}")
+    for key in ("metadata", "results", "raw_videos"):
+        info = paths[key]
+        if not info.valid:
+            raise _pm.ProjectSelectionError(
+                f"Refusing project path for {key}: {info.message} Complete Stage 0: Onboarding before running the pipeline."
+            )
+    return paths
+
+
 def _slug(text: object) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", str(text).strip().lower()).strip("_")
     return slug or "group"
@@ -934,88 +955,34 @@ def _run_validation_report(
 
 def _next_run_n(runs_dir: str) -> int:
     """Return the next integer N for naming a run directory."""
-    max_n = 0
-    if os.path.isdir(runs_dir):
-        for name in os.listdir(runs_dir):
-            if name.startswith("run_") and os.path.isdir(os.path.join(runs_dir, name)):
-                try:
-                    n = int(name.split("_")[1])
-                    max_n = max(max_n, n)
-                except (IndexError, ValueError):
-                    pass
-    return max_n + 1
+    from cluster_run_manager import ClusterRunManager
+    mgr = ClusterRunManager(os.path.dirname(runs_dir))
+    return mgr._next_run_n()
 
 
 def _auto_save_previous_run() -> str | None:
     """Copy results/shared/ to results/runs/{run_id}/ before a new run overwrites it."""
-    import shutil
-    from datetime import datetime as _dt
+    from cluster_run_manager import ClusterRunManager
 
     shared_dir = os.path.join(_res(), "shared")
     cluster_info_path = os.path.join(shared_dir, "cluster_info.json")
     if not os.path.exists(cluster_info_path):
         return None
 
-    with open(cluster_info_path) as f:
-        ci = json.load(f)
-
     manifest_path = os.path.join(shared_dir, "run_manifest.json")
-    existing_manifest: dict = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            existing_manifest = json.load(f)
+    if not os.path.exists(manifest_path):
+        return None
 
-    prev_mcs = existing_manifest.get("min_cluster_size", ci.get("min_cluster_size", 50))
-    prev_umap = existing_manifest.get("umap_dims", ci.get("umap_dims", 10))
-    prev_hdbscan_sample = existing_manifest.get(
-        "hdbscan_sample",
-        ci.get("hdbscan_sample", 0),
-    )
+    with open(manifest_path) as f:
+        existing_manifest = json.load(f)
 
-    runs_dir = os.path.join(_res(), "runs")
-    os.makedirs(runs_dir, exist_ok=True)
-    n = _next_run_n(runs_dir)
-    now = _dt.now()
-    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{prev_mcs}_umap{prev_umap}"
-    run_dir = os.path.join(runs_dir, run_id)
-    os.makedirs(run_dir, exist_ok=True)
+    run_id = existing_manifest.get("run_id", "")
+    if not run_id:
+        return None
 
-    for fname in os.listdir(shared_dir):
-        src = os.path.join(shared_dir, fname)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(run_dir, fname))
-
-    # Compute noise_frac from existing label files
-    noise_frac = 0.0
-    try:
-        total_frames = 0
-        noise_frames = 0
-        for fname in os.listdir(shared_dir):
-            if fname.endswith("_labels.npy"):
-                lbl = np.load(os.path.join(shared_dir, fname))
-                total_frames += len(lbl)
-                noise_frames += int((lbl == -1).sum())
-        if total_frames > 0:
-            noise_frac = float(noise_frames / total_frames)
-    except Exception:
-        pass
-
-    manifest = {
-        "run_id": run_id,
-        "date": existing_manifest.get("date", now.strftime("%Y-%m-%d %H:%M")),
-        "min_cluster_size": int(prev_mcs),
-        "umap_dims": int(prev_umap),
-        "hdbscan_min_samples": int(existing_manifest.get("hdbscan_min_samples", 0)),
-        "hdbscan_sample": int(prev_hdbscan_sample),
-        "n_clusters": int(ci.get("n_clusters", 0)),
-        "mean_confidence": float(ci.get("mean_confidence", 0.0)),
-        "low_confidence_frac": float(ci.get("low_confidence_frac", 0.0)),
-        "noise_frac": round(noise_frac, 4),
-        "saved": False,
-    }
-    with open(os.path.join(run_dir, "run_manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
-
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    mgr = ClusterRunManager(_res(), config_path=cfg_path)
+    mgr.save_run(run_id)
     print(f"Auto-saved previous run to results/runs/{run_id}/")
     return run_id
 
@@ -1029,33 +996,50 @@ def _write_current_run_manifest(
     mean_conf: float,
     low_conf_frac: float,
     noise_frac: float,
+    *,
+    min_samples_requested: int = 0,
+    runtime_seconds: float = 0.0,
+    assignment_method: str = "",
 ) -> str:
     """Write results/shared/run_manifest.json and update config.json."""
-    from datetime import datetime as _dt
+    from cluster_run_manager import ClusterRunConfig, ClusterRunManager
 
-    runs_dir = os.path.join(_res(), "runs")
-    os.makedirs(runs_dir, exist_ok=True)
-    n = _next_run_n(runs_dir)
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    mgr = ClusterRunManager(_res(), config_path=cfg_path)
+    run_cfg = ClusterRunConfig(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples_requested,
+        umap_dims=umap_dims,
+        hdbscan_sample=hdbscan_sample,
+    )
+    run_id = mgr.create_run_id(run_cfg)
+
+    from datetime import datetime as _dt
     now = _dt.now()
-    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{min_cluster_size}_umap{umap_dims}"
 
     manifest = {
         "run_id": run_id,
+        "status": "completed",
         "date": now.strftime("%Y-%m-%d %H:%M"),
+        "started_at": "",
+        "finished_at": now.isoformat(),
+        "runtime_seconds": round(runtime_seconds, 1),
         "min_cluster_size": min_cluster_size,
+        "min_samples_requested": min_samples_requested,
+        "min_samples_resolved": effective_min_samples,
         "umap_dims": umap_dims,
-        "hdbscan_min_samples": effective_min_samples,
         "hdbscan_sample": hdbscan_sample,
+        "hdbscan_min_samples": effective_min_samples,
         "n_clusters": n_found,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
         "noise_frac": round(noise_frac, 4),
+        "assignment_method": assignment_method,
         "saved": False,
     }
     with open(os.path.join(_res(), "shared", "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg_data: dict = {}
     if os.path.exists(cfg_path):
         try:
@@ -1185,7 +1169,9 @@ def _fit_cpu_hdbscan_with_assignment(
 
 
 def _mark_run_saved() -> None:
-    """Set saved=true in results/shared/run_manifest.json and config.json."""
+    """Set saved=true in results/shared/run_manifest.json, save to runs/, and update config.json."""
+    from cluster_run_manager import ClusterRunManager
+
     manifest_path = os.path.join(_res(), "shared", "run_manifest.json")
     if not os.path.exists(manifest_path):
         print("[warn] No run_manifest.json found — nothing to mark as saved.")
@@ -1195,6 +1181,12 @@ def _mark_run_saved() -> None:
     manifest["saved"] = True
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
+
+    run_id = manifest.get("run_id", "")
+    if run_id:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        mgr = ClusterRunManager(_res(), config_path=cfg_path)
+        mgr.save_run(run_id)
 
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg_data: dict = {}
@@ -1219,9 +1211,11 @@ def cmd_cluster(
     validate: bool = False,
     hdbscan_sample: int = 300000,
 ):
+    import time as _time
     import joblib
     from ml import BehaviorPreprocessor
 
+    _t0 = _time.perf_counter()
     hdbscan_sample = max(1, int(hdbscan_sample))
 
     if _detect_gpu():
@@ -1448,7 +1442,10 @@ def cmd_cluster(
     # UMAP and HDBSCAN need separate sampling controls: UMAP can fit on a
     # subset and transform everything cheaply, but HDBSCAN still builds its
     # clustering structure on the embedding it is fit on.
-    effective_min_samples = min_samples if min_samples is not None else min_cluster_size
+    if min_samples is not None:
+        effective_min_samples = min_samples
+    else:
+        effective_min_samples = max(10, min(100, min_cluster_size // 10))
     if use_gpu and effective_min_samples > 1023:
         print(f"  [info] cuML HDBSCAN requires min_samples <= 1023; clamping {effective_min_samples} -> 1023.")
         effective_min_samples = 1023
@@ -1598,6 +1595,7 @@ def cmd_cluster(
                 effective_min_samples,
             )
 
+    _assignment_method = "direct" if len(predict_indices) == 0 else "approximate_predict"
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
     print(f"  Behavioral states discovered: {n_found}")
@@ -1685,7 +1683,9 @@ def cmd_cluster(
     print(f"Per-video probabilities → results/shared/<stem>_probs.npy")
 
     # ---- Write run manifest for this run ----
+    _runtime = _time.perf_counter() - _t0
     _noise_frac = float(n_noise / len(all_raw_labels)) if len(all_raw_labels) > 0 else 0.0
+    _min_samples_requested = min_samples if min_samples is not None else 0
     _current_run_id = _write_current_run_manifest(
         min_cluster_size=min_cluster_size,
         umap_dims=umap_dims,
@@ -1695,6 +1695,9 @@ def cmd_cluster(
         mean_conf=mean_conf,
         low_conf_frac=low_conf_frac,
         noise_frac=_noise_frac,
+        min_samples_requested=_min_samples_requested,
+        runtime_seconds=_runtime,
+        assignment_method=_assignment_method,
     )
     print(f"Run manifest → results/shared/run_manifest.json  (run_id: {_current_run_id})")
 
@@ -1708,6 +1711,16 @@ def cmd_cluster(
         print("Diagnostics → results/diagnostics/")
     except Exception as _diag_err:
         print(f"[warn] Diagnostics generation failed: {_diag_err}")
+
+    # ---- Auto-save run to results/runs/ ----
+    try:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        _mgr.save_run(_current_run_id)
+        print(f"Run auto-saved → results/runs/{_current_run_id}/")
+    except Exception as _save_err:
+        print(f"[warn] Could not auto-save run: {_save_err}")
 
     # ---- Validation report ----
     if validate:
@@ -3452,6 +3465,10 @@ def main():
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     parser.add_argument("--save-run", action="store_true",
                         help="Mark the cluster run as saved after --cluster completes")
+    parser.add_argument("--set-active", metavar="RUN_ID", default=None,
+                        help="Set a saved run as the active clustering run")
+    parser.add_argument("--list-runs", action="store_true",
+                        help="List all saved clustering runs")
     parser.add_argument("--event-align", action="store_true",
                         help="Peri-event behavioral state analysis (discrete experiments only)")
     parser.add_argument("--diagnostics", action="store_true",
@@ -3468,11 +3485,46 @@ def main():
 
     if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
                 args.report, args.summarize, args.quantify, args.motifs, args.save_run,
-                args.event_align, args.diagnostics, args.motif_clips]):
+                args.event_align, args.diagnostics, args.motif_clips,
+                args.set_active, args.list_runs]):
         parser.print_help()
         sys.exit(1)
 
     _print_hardware_banner()
+    try:
+        _print_project_path_diagnostics()
+    except Exception as exc:
+        sys.exit(str(exc))
+
+    if args.list_runs:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        _runs = _mgr.list_runs()
+        _active = _mgr.get_active_run()
+        if not _runs:
+            print("No saved clustering runs.")
+        else:
+            print(f"{'Run ID':<55} {'States':>6} {'Noise':>7} {'MCS':>6} {'MS':>4} {'UMAP':>5} {'Status':<10} {'Active'}")
+            print("-" * 105)
+            for _m in _runs:
+                _act = " *" if _m.run_id == _active else ""
+                print(
+                    f"{_m.run_id:<55} {_m.n_clusters:>6} "
+                    f"{_m.noise_frac * 100:>6.1f}% {_m.min_cluster_size:>6} "
+                    f"{_m.min_samples_resolved:>4} {_m.umap_dims:>5} "
+                    f"{_m.status:<10}{_act}"
+                )
+
+    if args.set_active:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        try:
+            _mgr.set_active_run(args.set_active)
+            print(f"Active run set to: {args.set_active}")
+        except FileNotFoundError:
+            sys.exit(f"Run not found: {args.set_active}")
 
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)

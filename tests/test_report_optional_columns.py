@@ -11,6 +11,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import project_manager as pm
+
 
 def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame, config_extra: dict | None = None):
     project_dir = tmp_path / "project"
@@ -224,3 +226,21 @@ def test_stem_derivation_common_extensions():
     assert [ms.derive_stem(v) for v in values] == [
         "session1", "session2", "session3", "session4", "session5"
     ]
+
+
+def test_report_cli_diagnostics_use_active_project_paths(tmp_path, capsys):
+    project = pm.create_project(tmp_path / "projects" / "report_project", "Report Project", repo_root=tmp_path)
+    app = tmp_path / "app_config.json"
+    app.write_text(json.dumps({"active_project": str(project)}), encoding="utf-8")
+
+    import compare
+
+    paths = compare._print_project_path_diagnostics(str(tmp_path), str(app))
+
+    out = capsys.readouterr().out
+    assert f"Active project: {project}" in out
+    assert f"Metadata path: {project / 'metadata.csv'} (origin: project_config)" in out
+    assert f"Results dir: {project / 'results'} (origin: project_config)" in out
+    assert f"Raw videos dir: {project / 'raw_videos'} (origin: project_config)" in out
+    assert f"Config path: {project / 'config.json'}" in out
+    assert paths["metadata"].path == (project / "metadata.csv").resolve()

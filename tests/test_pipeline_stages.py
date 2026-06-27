@@ -119,6 +119,23 @@ def test_stage0_no_repo_root_fallback(tmp_path):
         pm.get_active_project(tmp_path, app)
 
 
+def test_stage0_readiness_not_complete_for_repo_root_path_fallback(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (tmp_path / "metadata.csv").write_text("session_id,stem,animal_id,context\nvideo1,video1,a,A\n", encoding="utf-8")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["metadata"] = str(tmp_path / "metadata.csv")
+    cfg["paths"]["results"] = str(tmp_path / "results")
+    _write_json(project / "config.json", cfg)
+
+    validation = pm.validate_project(project, tmp_path)
+    checks = {check.key: check for check in validation.checks}
+
+    assert pm.onboarding_complete(project, tmp_path) is False
+    assert checks["metadata"].status == "red"
+    assert checks["results"].status == "red"
+
+
 def test_stage0_blocks_pipeline_error_message():
     """The workers module contains the exact blocking message for Stage 0."""
     src = Path(__file__).resolve().parents[1] / "_workers.py"
@@ -155,3 +172,92 @@ def test_stage0_does_not_import_heavy_libraries():
             for name in names:
                 root_pkg = (name or "").split(".")[0].lower()
                 assert root_pkg not in heavy, f"user_interface.py imports heavy library at top level: {name}"
+
+
+# ── Stage 0 summary state tests ─────────────────────────────────────────────
+
+
+def test_stage0_summary_no_project(tmp_path):
+    """When no project is configured, startup selection returns onboarding_required."""
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "onboarding_required"
+    assert selected.active_project is None
+
+
+def test_stage0_summary_one_detected_project(tmp_path):
+    """When exactly one project exists, it is auto-selected."""
+    _make_project(tmp_path, "only_one")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "auto_selected"
+    assert selected.active_project is not None
+
+
+def test_stage0_summary_multiple_detected_projects(tmp_path):
+    """When multiple projects exist without an active one, picker is required."""
+    _make_project(tmp_path, "proj_a")
+    _make_project(tmp_path, "proj_b")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "picker_required"
+    assert len(selected.candidates) >= 2
+
+
+def test_stage0_summary_ready_project(tmp_path):
+    """A project with metadata and data source is ready (onboarding complete)."""
+    project = _make_project(tmp_path, with_metadata=True)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+    assert pm.onboarding_complete(project) is True
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "use_active"
+
+
+def test_stage0_summary_incomplete_project(tmp_path):
+    """A project without metadata is incomplete (onboarding not done)."""
+    project = _make_project(tmp_path, with_metadata=False)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+    assert pm.onboarding_complete(project) is False
+
+
+def test_stage0_details_hidden_by_default():
+    """The details section container starts hidden in the _build method."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    assert class_start != -1
+    build_start = text.find("def _build(self):", class_start)
+    assert build_start != -1
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert "_details_container" in build_body, "Stage0 _build must create _details_container"
+    assert ".hide()" in build_body, "Stage0 _build must hide the details container"
+
+
+def test_stage0_details_checklist_available():
+    """The details section contains the validation checklist and toggle."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "_checklist" in class_body, "Stage0 must have a _checklist layout"
+    assert "_add_check" in class_body, "Stage0 must have _add_check method"
+    assert "_toggle_details" in class_body, "Stage0 must have _toggle_details method"
+
+
+def test_stage0_routes_to_existing_dialogs():
+    """Stage 0 panel routes to existing dialogs, not duplicated UI."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "NewProjectDialog" in class_body, "Stage0 must use NewProjectDialog"
+    assert "ProjectSelectorDialog" in class_body, "Stage0 must use ProjectSelectorDialog"
+    assert "QLineEdit" not in class_body, "Stage0 must not define its own form fields"

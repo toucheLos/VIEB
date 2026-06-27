@@ -46,6 +46,15 @@ class Check:
 
 
 @dataclass
+class ResolvedProjectPath:
+    key: str
+    path: Path
+    origin: str
+    valid: bool
+    message: str = ""
+
+
+@dataclass
 class ProjectValidation:
     path: Path
     valid: bool
@@ -113,6 +122,32 @@ def _abs(path: Path | str | None, base: Path) -> Path | None:
     return p.resolve()
 
 
+def _path_is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _repo_root_for_project(project_path: Path, repo_root: Path | str | None = None) -> Path:
+    if repo_root is not None:
+        return Path(repo_root).resolve()
+    project = project_path.resolve()
+    if project.parent.name == "projects":
+        return project.parent.parent.resolve()
+    return REPO_ROOT.resolve()
+
+
+def _external_path_keys(config: dict[str, Any]) -> set[str]:
+    raw = config.get("external_paths", [])
+    if isinstance(raw, dict):
+        return {str(k) for k, v in raw.items() if v}
+    if isinstance(raw, (list, tuple, set)):
+        return {str(item) for item in raw}
+    return set()
+
+
 def _read_project_config(project_path: Path) -> dict[str, Any]:
     cfg_path = project_path / PROJECT_CONFIG_NAME
     if not cfg_path.exists():
@@ -163,6 +198,134 @@ def normalize_project_config(config: dict[str, Any], project_path: Path) -> dict
     return cfg
 
 
+def _configured_path_value(config: dict[str, Any], key: str, project_path: Path) -> tuple[Any, bool]:
+    paths = config.get("paths") if isinstance(config.get("paths"), dict) else {}
+    flat_keys = {
+        "raw_videos": "raw_videos_dir",
+        "pose_files": "pose_files_dir",
+        "pose_h5": "h5_path",
+        "metadata": "metadata_csv_path",
+        "results": "results_dir",
+    }
+    if key in paths and paths.get(key) not in (None, ""):
+        return paths.get(key), True
+    flat_key = flat_keys.get(key)
+    if flat_key and config.get(flat_key) not in (None, ""):
+        return config.get(flat_key), True
+    defaults = {
+        "raw_videos": project_path / "raw_videos",
+        "metadata": project_path / "metadata.csv",
+        "results": project_path / "results",
+        "config": project_path / PROJECT_CONFIG_NAME,
+        "project": project_path,
+    }
+    return defaults.get(key), False
+
+
+def _classify_project_path(
+    key: str,
+    value: Any,
+    *,
+    configured: bool,
+    project_path: Path,
+    repo_root: Path,
+    external_keys: set[str],
+) -> ResolvedProjectPath:
+    resolved = _abs(value, project_path)
+    if resolved is None:
+        return ResolvedProjectPath(key, project_path / key, "project_config", False, f"{key} path is not configured.")
+
+    if key in {"config", "project", "pose_files", "pose_h5"}:
+        origin = "project_config" if configured else "project_default"
+        return ResolvedProjectPath(key, resolved, origin, True, f"{resolved} ({origin})")
+
+    defaults = {
+        "raw_videos": project_path / "raw_videos",
+        "metadata": project_path / "metadata.csv",
+        "results": project_path / "results",
+    }
+    repo_root_paths = {
+        "raw_videos": repo_root / "raw_videos",
+        "metadata": repo_root / "metadata.csv",
+        "results": repo_root / "results",
+    }
+    project_default = defaults[key].resolve()
+    repo_root_path = repo_root_paths[key].resolve()
+    project_is_repo_root = project_path.resolve() == repo_root.resolve()
+    project_local = resolved == project_default or _path_is_relative_to(resolved, project_path)
+
+    if project_is_repo_root and resolved == repo_root_path:
+        origin = "legacy_repo_root" if configured else "project_default"
+        return ResolvedProjectPath(key, resolved, origin, True, f"{resolved} ({origin})")
+
+    if resolved == repo_root_path and not project_is_repo_root:
+        if key in external_keys:
+            return ResolvedProjectPath(
+                key,
+                resolved,
+                "external_explicit",
+                True,
+                f"{resolved} (explicit external repo-root path)",
+            )
+        return ResolvedProjectPath(
+            key,
+            resolved,
+            "invalid_repo_root_fallback",
+            False,
+            f"{resolved} is a repo-root legacy path; migrate it into the project or mark it external.",
+        )
+
+    if project_local:
+        origin = "project_config" if configured else "project_default"
+        return ResolvedProjectPath(key, resolved, origin, True, f"{resolved} ({origin})")
+
+    if key in external_keys:
+        return ResolvedProjectPath(key, resolved, "external_explicit", True, f"{resolved} (explicit external path)")
+
+    return ResolvedProjectPath(
+        key,
+        resolved,
+        "project_config",
+        False,
+        f"{resolved} is outside the project; add '{key}' to external_paths if intentional.",
+    )
+
+
+def resolve_project_paths_for_project(
+    project_path: Path | str,
+    config: dict[str, Any] | None = None,
+    repo_root: Path | str | None = None,
+) -> dict[str, ResolvedProjectPath]:
+    project = Path(project_path).expanduser().resolve()
+    root = _repo_root_for_project(project, repo_root)
+    raw_cfg = config if config is not None else _read_project_config(project)
+    external_keys = _external_path_keys(raw_cfg)
+    out: dict[str, ResolvedProjectPath] = {}
+    for key in ("project", "config", "raw_videos", "metadata", "results", "pose_files", "pose_h5"):
+        value, configured = _configured_path_value(raw_cfg, key, project)
+        if value in (None, "") and key in {"pose_files", "pose_h5"}:
+            continue
+        out[key] = _classify_project_path(
+            key,
+            value,
+            configured=configured,
+            project_path=project,
+            repo_root=root,
+            external_keys=external_keys,
+        )
+    return out
+
+
+def resolve_project_paths(
+    repo_root: Path | str = REPO_ROOT,
+    app_config_path: Path | str | None = None,
+) -> dict[str, ResolvedProjectPath]:
+    root = Path(repo_root).resolve()
+    project = get_active_project(root, app_config_path)
+    cfg = _read_project_config(project)
+    return resolve_project_paths_for_project(project, cfg, root)
+
+
 def write_project_config(project_path: Path | str, config: dict[str, Any]) -> None:
     project = Path(project_path).resolve()
     cfg = normalize_project_config(config, project)
@@ -182,8 +345,9 @@ def is_valid_project(path: Path | str) -> bool:
     return validate_project(path).valid
 
 
-def validate_project(path: Path | str) -> ProjectValidation:
+def validate_project(path: Path | str, repo_root: Path | str | None = None) -> ProjectValidation:
     project = Path(path).expanduser().resolve()
+    root = _repo_root_for_project(project, repo_root)
     checks: list[Check] = []
 
     exists = project.exists() and project.is_dir()
@@ -199,19 +363,30 @@ def validate_project(path: Path | str) -> ProjectValidation:
     else:
         checks.append(Check("config", "project config exists/writable", "yellow", "config.json can be created"))
 
+    paths = resolve_project_paths_for_project(project, cfg, root)
     cfg = normalize_project_config(cfg, project)
-    meta = Path(cfg["metadata_csv_path"])
-    meta_parent_ok = meta.exists() or meta.parent.exists()
-    checks.append(Check("metadata", "metadata exists or can be generated", "green" if meta.exists() else ("yellow" if meta_parent_ok else "red"), str(meta)))
+    meta_info = paths["metadata"]
+    meta = meta_info.path
+    if not meta_info.valid:
+        checks.append(Check("metadata", "metadata exists or can be generated", "red", meta_info.message))
+    else:
+        meta_parent_ok = meta.exists() or meta.parent.exists()
+        meta_status = "green" if meta.exists() else ("yellow" if meta_parent_ok else "red")
+        checks.append(Check("metadata", "metadata exists or can be generated", meta_status, meta_info.message))
 
-    source = session_source_status(project, cfg)
+    source = session_source_status(project, cfg, root)
     source_msg = source["message"] if source["valid"] else "import raw videos, pose CSVs, H5 pose data, or metadata CSV"
     checks.append(Check("pose_source", "session-defining data source detected", "green" if source["valid"] else "yellow", source_msg))
 
-    results = Path(cfg["results_dir"])
-    results_ok = results.exists() and os.access(results, os.W_OK)
-    results_parent_ok = results.exists() or results.parent.exists()
-    checks.append(Check("results", "results directory exists/writable", "green" if results_ok else ("yellow" if results_parent_ok else "red"), str(results)))
+    results_info = paths["results"]
+    results = results_info.path
+    if not results_info.valid:
+        checks.append(Check("results", "results directory exists/writable", "red", results_info.message))
+    else:
+        results_ok = results.exists() and os.access(results, os.W_OK)
+        results_parent_ok = results.exists() or results.parent.exists()
+        results_status = "green" if results_ok else ("yellow" if results_parent_ok else "red")
+        checks.append(Check("results", "results directory exists/writable", results_status, results_info.message))
 
     feature = results / "features" / "index.json"
     cluster = results / "shared" / "cluster_info.json"
@@ -247,21 +422,29 @@ def _metadata_row_count(path: Path | str | None) -> int:
         return 0
 
 
-def session_source_status(project_path: Path | str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def session_source_status(
+    project_path: Path | str,
+    config: dict[str, Any] | None = None,
+    repo_root: Path | str | None = None,
+) -> dict[str, Any]:
     """Return whether the project has at least one source that defines sessions."""
     project = Path(project_path).resolve()
-    cfg = normalize_project_config(config if config is not None else _read_project_config(project), project)
-    raw_count = _count_files(cfg.get("raw_videos_dir"), VIDEO_EXTENSIONS)
+    raw_cfg = config if config is not None else _read_project_config(project)
+    cfg = normalize_project_config(raw_cfg, project)
+    paths = resolve_project_paths_for_project(project, raw_cfg, _repo_root_for_project(project, repo_root))
+    raw_info = paths["raw_videos"]
+    meta_info = paths["metadata"]
+    raw_count = _count_files(raw_info.path if raw_info.valid else None, VIDEO_EXTENSIONS)
     pose_csv_count = _count_files(cfg.get("pose_files_dir"), {".csv"})
     h5_path = Path(cfg["h5_path"]) if cfg.get("h5_path") else None
     h5_exists = bool(h5_path and h5_path.exists() and h5_path.is_file())
-    metadata_rows = _metadata_row_count(cfg.get("metadata_csv_path"))
+    metadata_rows = _metadata_row_count(meta_info.path if meta_info.valid else None)
     metadata_valid = False
     if metadata_rows:
         try:
             from metadata_generator import validate_metadata_csv
 
-            metadata_valid = bool(validate_metadata_csv(cfg.get("metadata_csv_path", "")).get("valid"))
+            metadata_valid = bool(validate_metadata_csv(str(meta_info.path)).get("valid"))
         except Exception:
             metadata_valid = False
 
@@ -338,7 +521,7 @@ def detect_projects(
         if c in seen or c == root:
             continue
         seen.add(c)
-        validation = validate_project(c)
+        validation = validate_project(c, root)
         if validation.valid:
             out.append(validation)
     return out
@@ -374,7 +557,7 @@ def select_startup_project(repo_root: Path | str = REPO_ROOT, app_config_path: P
         if not active.is_absolute():
             active = root / active
         active = active.resolve()
-        validation = validate_project(active)
+        validation = validate_project(active, root)
         if validation.valid:
             _remember_project(app_cfg, active, validation.project_name)
             save_app_config(app_cfg, app_path)
@@ -405,29 +588,15 @@ def load_active_project_config(repo_root: Path | str = REPO_ROOT, app_config_pat
 
 
 def resolve_project_path(key: str, repo_root: Path | str = REPO_ROOT, app_config_path: Path | str | None = None) -> Path:
-    project = get_active_project(repo_root, app_config_path)
-    cfg = load_active_project_config(repo_root, app_config_path)
-    paths = cfg.get("paths", {})
-    value = {
-        "raw_videos": cfg.get("raw_videos_dir") or paths.get("raw_videos"),
-        "pose_files": cfg.get("pose_files_dir") or paths.get("pose_files"),
-        "pose_h5": cfg.get("h5_path") or paths.get("pose_h5"),
-        "metadata": cfg.get("metadata_csv_path") or paths.get("metadata"),
-        "results": cfg.get("results_dir") or paths.get("results"),
-        "config": str(project / "config.json"),
-        "project": str(project),
-    }.get(key)
-    if not value:
-        raise ProjectSelectionError(f"Project path '{key}' is not configured.")
-    resolved = _abs(value, project)
+    paths = resolve_project_paths(repo_root, app_config_path)
+    resolved = paths.get(key)
     if resolved is None:
         raise ProjectSelectionError(f"Project path '{key}' is not configured.")
-    root = Path(repo_root).resolve()
-    if resolved in (root / "metadata.csv", root / "raw_videos", root / "results") and project != root:
+    if not resolved.valid:
         raise ProjectSelectionError(
-            f"Refusing repo-root fallback for {key}. Complete Stage 0: Onboarding before running the pipeline."
+            f"Refusing project path for {key}: {resolved.message} Complete Stage 0: Onboarding before running the pipeline."
         )
-    return resolved
+    return resolved.path
 
 
 def set_active_project(
@@ -440,7 +609,7 @@ def set_active_project(
     project = Path(project_path).expanduser()
     if not project.is_absolute():
         project = root / project
-    validation = validate_project(project)
+    validation = validate_project(project, root)
     if not validation.valid:
         raise ProjectSelectionError(f"Not a valid VIEB project: {project}")
     app_path = Path(app_config_path) if app_config_path else root / "app_config.json"
@@ -453,9 +622,13 @@ def set_active_project(
 def ensure_project_metadata(project_path: Path | str, *, overwrite: bool = False) -> dict[str, Any]:
     """Validate existing metadata or create metadata.csv from detected sources."""
     project = Path(project_path).resolve()
-    validation = validate_project(project)
-    cfg = validation.config
-    meta = Path(cfg["metadata_csv_path"])
+    raw_cfg = _read_project_config(project)
+    paths = resolve_project_paths_for_project(project, raw_cfg)
+    meta_info = paths["metadata"]
+    if not meta_info.valid:
+        return {"created": False, "path": meta_info.path, "valid": False, "messages": [meta_info.message]}
+    cfg = normalize_project_config(raw_cfg, project)
+    meta = meta_info.path
     source = session_source_status(project, cfg)
     if not source["valid"]:
         return {"created": False, "path": meta, "valid": False, "messages": ["Stage 0 requires raw videos, pose CSVs, an H5 pose file, or an existing metadata CSV."]}
@@ -504,6 +677,10 @@ def import_data_source(
         if not source.is_dir():
             raise ProjectSelectionError("Raw videos source must be a folder.")
         paths["raw_videos"] = str(source)
+        if not _path_is_relative_to(source, project):
+            cfg.setdefault("external_paths", [])
+            if "raw_videos" not in cfg["external_paths"]:
+                cfg["external_paths"].append("raw_videos")
         cfg["pose_source"] = "none"
         write_project_config(project, cfg)
         report = ensure_project_metadata(project, overwrite=True)
@@ -545,12 +722,17 @@ def import_data_source(
     }
 
 
-def onboarding_complete(project_path: Path | str) -> bool:
+def onboarding_complete(project_path: Path | str, repo_root: Path | str | None = None) -> bool:
     """Return True when metadata and at least one session source are valid."""
     project = Path(project_path).resolve()
-    cfg = normalize_project_config(_read_project_config(project), project)
-    source = session_source_status(project, cfg)
-    meta = Path(cfg["metadata_csv_path"])
+    root = _repo_root_for_project(project, repo_root)
+    raw_cfg = _read_project_config(project)
+    paths = resolve_project_paths_for_project(project, raw_cfg, root)
+    if not paths["metadata"].valid or not paths["results"].valid or not paths["raw_videos"].valid:
+        return False
+    cfg = normalize_project_config(raw_cfg, project)
+    source = session_source_status(project, cfg, root)
+    meta = paths["metadata"].path
     if not source["valid"] or not meta.exists():
         return False
     try:
@@ -588,6 +770,12 @@ def create_project(project_path: Path | str, project_name: str, paths: dict[str,
     if not metadata.exists():
         with metadata.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(["session_id", "stem", "subject_id", "animal_id", "context", "condition", "day", "timepoint"])
+    supplied_paths = paths or {}
+    external_paths = [
+        key
+        for key, raw in supplied_paths.items()
+        if key in {"raw_videos", "metadata", "results"} and _abs(raw, project) and not _path_is_relative_to(_abs(raw, project), project)
+    ]
     cfg = {
         "project_name": project_name,
         "paths": {
@@ -598,6 +786,7 @@ def create_project(project_path: Path | str, project_name: str, paths: dict[str,
             "results": str((project / "results").resolve()),
             **(paths or {}),
         },
+        "external_paths": external_paths,
         "metadata_schema": {},
         "analysis_groups": [],
         "ui_panels": {},
@@ -662,7 +851,8 @@ def migrate_legacy_project(repo_root: Path | str = REPO_ROOT, app_config_path: P
 
 def resume_status(project_path: Path | str) -> dict[str, bool]:
     validation = validate_project(project_path)
-    results = Path(validation.config.get("results_dir") or Path(project_path) / "results")
+    paths = resolve_project_paths_for_project(validation.path, validation.config)
+    results = paths["results"].path if paths["results"].valid else Path(project_path) / "results"
     return {
         "features": (results / "features" / "index.json").exists(),
         "clusters": (results / "shared" / "cluster_info.json").exists(),

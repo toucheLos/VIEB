@@ -549,3 +549,96 @@ class ArtifactExportWorker(QThread):
         except Exception:
             self.log.emit(traceback.format_exc())
             self.done.emit(False)
+
+
+# ---------------------------------------------------------------------------
+# Cluster Queue Worker
+# ---------------------------------------------------------------------------
+
+class ClusterQueueWorker(QThread):
+    """Execute a queue of clustering configs sequentially via subprocess."""
+
+    log = pyqtSignal(str)
+    run_started = pyqtSignal(int, str)       # (index, run_id)
+    run_finished = pyqtSignal(int, str, bool)  # (index, run_id, success)
+    queue_done = pyqtSignal()
+
+    def __init__(self, configs: list[dict], cfg: dict):
+        super().__init__()
+        self.configs = configs
+        self.cfg = cfg
+        self._stop_requested = False
+        self._proc = None
+
+    def stop_after_current(self):
+        self._stop_requested = True
+
+    def run(self):
+        for i, config in enumerate(self.configs):
+            if self._stop_requested:
+                self.log.emit(f"[queue] Stopped after run {i}.\n")
+                break
+
+            mcs = config.get("min_cluster_size", 50)
+            ms = config.get("min_samples", 0)
+            umap = config.get("umap_dims", 10)
+            sample = config.get("hdbscan_sample", 300000)
+            run_label = f"mcs={mcs}, ms={ms}, umap={umap}"
+            self.run_started.emit(i, run_label)
+            self.log.emit(f"\n{'='*60}\n[queue] Starting run {i+1}/{len(self.configs)}: {run_label}\n{'='*60}\n")
+
+            args = [
+                "compare.py", "--cluster", "--save-run",
+                "--min-cluster-size", str(mcs),
+                "--umap-dims", str(umap),
+                "--hdbscan-sample", str(sample),
+            ]
+            if ms > 0:
+                args += ["--hdbscan-min-samples", str(ms)]
+
+            try:
+                ok = self._run_subprocess(args)
+            except Exception as exc:
+                self.log.emit(f"[queue] Run {i+1} exception: {exc}\n")
+                ok = False
+
+            status = "completed" if ok else "failed"
+            self.log.emit(f"[queue] Run {i+1}/{len(self.configs)} {status}.\n")
+            self.run_finished.emit(i, run_label, ok)
+
+        self.queue_done.emit()
+
+    def _run_subprocess(self, args) -> bool:
+        python_exe = self._analysis_python()
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        p = subprocess.Popen(
+            [python_exe, "-u", *args],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        self._proc = p
+        assert p.stdout is not None
+        for line in p.stdout:
+            self.log.emit(line)
+        rc = p.wait()
+        self._proc = None
+        return rc == 0
+
+    def _analysis_python(self) -> str:
+        configured = str(
+            self.cfg.get("analysis_python")
+            or self.cfg.get("gpu_python")
+            or ""
+        ).strip()
+        if configured and Path(configured).exists():
+            return configured
+        gpu_python = ROOT / "venv-gpu" / "bin" / "python"
+        if gpu_python.exists():
+            return str(gpu_python)
+        return sys.executable

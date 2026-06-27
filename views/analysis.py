@@ -162,6 +162,7 @@ class AnalysisView(QWidget):
     # ─────────────────────────────────────────────────────────── build ──
 
     def _build(self) -> None:
+        self.setUpdatesEnabled(False)
         root_lay = QHBoxLayout(self)
         root_lay.setContentsMargins(0, 0, 0, 0)
         root_lay.setSpacing(0)
@@ -246,8 +247,10 @@ class AnalysisView(QWidget):
         root_lay.addWidget(self._tab_list)
 
         # ── Content stack (one page per real tab, no separator pages) ────
+        # Tabs are built lazily on first visit to avoid constructing all 10
+        # tab pages (with ~15-20 MplCanvas figures) during AnalysisView init.
         self._stack = QStackedWidget()
-        builders = [
+        self._tab_builders = [
             self._build_tab8,              # stack 0: State Characterization
             self._build_tab1,              # stack 1: State Comparison
             self._build_tab2,              # stack 2: Transitions & Motifs
@@ -259,11 +262,28 @@ class AnalysisView(QWidget):
             self._build_tab7,              # stack 8: Event Alignment
             self._build_tab0,              # stack 9: Column Mapping
         ]
-        for build in builders:
-            page = build()
-            self._stack.addWidget(page)
+        self._tab_built = [False] * len(self._tab_builders)
+        for _ in self._tab_builders:
+            placeholder = QLabel("Loading…")
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setStyleSheet("color:#777;font-style:italic;padding:24px;")
+            self._stack.addWidget(placeholder)
 
-        root_lay.addWidget(self._stack, stretch=1)
+        right_panel = QVBoxLayout()
+        right_panel.setContentsMargins(0, 0, 0, 0)
+        right_panel.setSpacing(0)
+
+        self._active_run_banner = QLabel("")
+        self._active_run_banner.setStyleSheet(
+            "background:#E3F2FD;color:#1565c0;padding:6px 16px;font-size:12px;font-weight:600;"
+            "border-bottom:1px solid #BBDEFB;"
+        )
+        self._active_run_banner.setVisible(False)
+        right_panel.addWidget(self._active_run_banner)
+        right_panel.addWidget(self._stack, stretch=1)
+
+        root_lay.addLayout(right_panel, stretch=1)
+        self.setUpdatesEnabled(True)
 
     # ─────────────────────────────────── Shared header builder ──
 
@@ -786,15 +806,28 @@ class AnalysisView(QWidget):
             self._load_tab0,              # stack 9: Column Mapping
         ]
 
+    def _ensure_tab_built(self, stack_idx: int) -> None:
+        if self._tab_built[stack_idx]:
+            return
+        import time as _time
+        _t = _time.perf_counter()
+        page = self._tab_builders[stack_idx]()
+        old = self._stack.widget(stack_idx)
+        self._stack.insertWidget(stack_idx, page)
+        self._stack.removeWidget(old)
+        old.deleteLater()
+        self._tab_built[stack_idx] = True
+        print(f"[timing] Analysis lazy-build tab {stack_idx}: {(_time.perf_counter() - _t) * 1000:.1f} ms")
+
     def _switch_tab(self, row: int) -> None:
         if row < 0 or row in self._separator_rows:
             return
         stack_idx = self._row_to_stack.get(row, -1)
-        if stack_idx < 0 or stack_idx >= self._stack.count():
+        if stack_idx < 0 or stack_idx >= len(self._tab_builders):
             return
+        self._ensure_tab_built(stack_idx)
         self._current_tab = stack_idx
         self._stack.setCurrentIndex(stack_idx)
-        # Only render if dirty — skip if the chart is already up-to-date.
         if self._tab_dirty[stack_idx]:
             self._get_loaders()[stack_idx]()
             self._tab_dirty[stack_idx] = False
@@ -802,7 +835,8 @@ class AnalysisView(QWidget):
     def _load_current_tab(self) -> None:
         """Reload the visible tab unconditionally (e.g. after a pipeline run)."""
         idx = self._current_tab
-        if 0 <= idx < self._stack.count():
+        if 0 <= idx < len(self._tab_builders):
+            self._ensure_tab_built(idx)
             self._get_loaders()[idx]()
             self._tab_dirty[idx] = False
 
@@ -816,13 +850,32 @@ class AnalysisView(QWidget):
         if data is not self._data:
             self._data = data
             self._mark_all_dirty()
+            self._update_active_run_banner()
             self._load_current_tab()
 
     def refresh(self, data: dict) -> None:
         """Reload only the currently visible tab with fresh data; others reload lazily on switch."""
         self._data = data
         self._mark_all_dirty()
+        self._update_active_run_banner()
         self._load_current_tab()
+
+    def _update_active_run_banner(self) -> None:
+        rm = self._data.get("run_manifest") if self._data else None
+        if not rm:
+            self._active_run_banner.setVisible(False)
+            return
+        run_id = rm.get("run_id", "")
+        n = rm.get("n_clusters", "?")
+        noise = rm.get("noise_frac", 0)
+        noise_pct = f"{float(noise) * 100:.1f}%" if isinstance(noise, (int, float)) else "?"
+        ms_req = rm.get("min_samples_requested", None)
+        ms_res = rm.get("min_samples_resolved", rm.get("hdbscan_min_samples", ""))
+        ms_text = f" | min_samples=Auto (→{ms_res})" if ms_req == 0 and ms_res else ""
+        self._active_run_banner.setText(
+            f"Active: {run_id}  |  {n} states  |  noise: {noise_pct}{ms_text}"
+        )
+        self._active_run_banner.setVisible(True)
 
     # ─────────────────────── Tab 1 loader ──
 

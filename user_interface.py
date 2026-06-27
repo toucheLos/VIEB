@@ -860,11 +860,14 @@ class DataLoader(QThread):
                 p = RESULTS / rel
                 return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
+            _t = time.perf_counter()
             import vieb_config as _vc_dl
             try:
                 metadata_path = Path(_vc_dl.get_metadata_path())
             except Exception:
                 metadata_path = None
+            print(f"[timing]   DL: vieb_config + metadata_path: {(time.perf_counter() - _t) * 1000:.1f} ms")
+            _t = time.perf_counter()
             marker_paths = {
                 "metadata": metadata_path,
                 "features": RESULTS / "features" / "index.json",
@@ -877,9 +880,13 @@ class DataLoader(QThread):
                 key: bool(path and path.exists())
                 for key, path in marker_paths.items()
             }
+            print(f"[timing]   DL: marker checks: {(time.perf_counter() - _t) * 1000:.1f} ms")
+            _t = time.perf_counter()
             data["cluster_info"] = _json("shared/cluster_info.json")
             data["feature_index"] = _json("features/index.json")
             data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
+            data["run_manifest"] = _json("shared/run_manifest.json")
+            print(f"[timing]   DL: JSON reads: {(time.perf_counter() - _t) * 1000:.1f} ms")
             if not self._lightweight:
                 data["summary"] = _csv("comparison/summary_table.csv")
                 data["state_summary"] = _csv("characterization/state_summary.csv")
@@ -2272,47 +2279,117 @@ class Stage0ReadinessPanel(QFrame):
         self.setObjectName("stage0Panel")
         self.setStyleSheet(
             "QFrame#stage0Panel{background:transparent;border:none;}"
-            "QLabel[muted='true']{color:#667085;}"
-            "QPushButton{background:#fff;color:#202124;border:1px solid #d0d5dd;border-radius:4px;padding:5px 10px;}"
-            "QPushButton:hover{background:#f8fafc;}"
+            "QPushButton#stage0Primary{background:#1A73E8;color:#fff;border:none;"
+            "border-radius:4px;padding:8px 20px;font-weight:bold;font-size:13px;}"
+            "QPushButton#stage0Primary:hover{background:#1565C0;}"
+            "QPushButton#stage0Secondary{background:#fff;color:#202124;"
+            "border:1px solid #d0d5dd;border-radius:4px;padding:5px 10px;font-size:11px;}"
+            "QPushButton#stage0Secondary:hover{background:#f8fafc;}"
         )
         self._build()
-        self.refresh()
+        QTimer.singleShot(0, self.refresh)
 
     def _build(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(10)
 
-        self._project_label = QLabel("No active project.")
-        self._project_label.setWordWrap(True)
-        self._project_label.setProperty("muted", "true")
-        lay.addWidget(self._project_label)
+        # A. Summary card
+        summary = QFrame()
+        summary.setObjectName("stage0Summary")
+        summary.setStyleSheet(
+            "QFrame#stage0Summary{background:#fafafa;border:1px solid #e0e0e0;"
+            "border-radius:6px;padding:12px;}"
+        )
+        card = QVBoxLayout(summary)
+        card.setContentsMargins(12, 10, 12, 10)
+        card.setSpacing(6)
 
-        self._checklist = QVBoxLayout()
-        lay.addLayout(self._checklist)
+        name_row = QHBoxLayout()
+        self._project_name_label = QLabel("No project selected")
+        self._project_name_label.setStyleSheet(
+            "font-weight:bold;font-size:14px;color:#202124;"
+            "border:none;background:transparent;"
+        )
+        name_row.addWidget(self._project_name_label)
+        self._status_badge = QLabel("")
+        self._status_badge.setStyleSheet("border:none;background:transparent;")
+        name_row.addWidget(self._status_badge)
+        name_row.addStretch()
+        card.addLayout(name_row)
 
-        self._suggested = QLabel("")
-        self._suggested.setWordWrap(True)
-        self._suggested.setStyleSheet("color:#475467;font-weight:600;")
-        lay.addWidget(self._suggested)
+        self._data_summary = QLabel("")
+        self._data_summary.setWordWrap(True)
+        self._data_summary.setStyleSheet(
+            "color:#667085;font-size:12px;border:none;background:transparent;"
+        )
+        card.addWidget(self._data_summary)
 
-        # Secondary actions — route to existing workflows, no duplicated UI
+        self._next_action = QLabel("")
+        self._next_action.setWordWrap(True)
+        self._next_action.setStyleSheet(
+            "color:#475467;font-weight:600;font-size:12px;"
+            "border:none;background:transparent;"
+        )
+        card.addWidget(self._next_action)
+
+        lay.addWidget(summary)
+
+        # B. Primary action button
+        self._primary_btn = QPushButton("Onboard Project")
+        self._primary_btn.setObjectName("stage0Primary")
+        self._primary_btn.setMinimumHeight(36)
+        self._primary_btn.setCursor(Qt.PointingHandCursor)
+        lay.addWidget(self._primary_btn)
+
+        # C. Secondary actions — route to existing workflows
         actions = QHBoxLayout()
         actions.setSpacing(8)
         self._create_btn = QPushButton("Create Project")
+        self._create_btn.setObjectName("stage0Secondary")
         self._create_btn.clicked.connect(self._create_project)
         self._open_btn = QPushButton("Open Project")
+        self._open_btn.setObjectName("stage0Secondary")
         self._open_btn.clicked.connect(self._open_existing)
         self._change_btn = QPushButton("Change Project")
+        self._change_btn.setObjectName("stage0Secondary")
         self._change_btn.clicked.connect(self._change_project)
         self._source_btn = QPushButton("Add Data Source")
+        self._source_btn.setObjectName("stage0Secondary")
         self._source_btn.clicked.connect(self._add_data_source)
         for btn in (self._create_btn, self._open_btn, self._change_btn, self._source_btn):
             btn.setMinimumHeight(28)
             actions.addWidget(btn)
         actions.addStretch()
         lay.addLayout(actions)
+
+        # D. Collapsible details section
+        self._details_toggle = QPushButton("Show details  ▾")
+        self._details_toggle.setFlat(True)
+        self._details_toggle.setCursor(Qt.PointingHandCursor)
+        self._details_toggle.setStyleSheet(
+            "color:#555;font-size:11px;text-align:left;padding:2px 0;"
+            "border:none;background:transparent;"
+        )
+        self._details_toggle.clicked.connect(self._toggle_details)
+        lay.addWidget(self._details_toggle)
+
+        self._details_container = QWidget()
+        self._details_container.setStyleSheet("background:transparent;")
+        details_lay = QVBoxLayout(self._details_container)
+        details_lay.setContentsMargins(0, 0, 0, 0)
+        details_lay.setSpacing(4)
+        self._checklist = QVBoxLayout()
+        details_lay.addLayout(self._checklist)
+        self._details_container.hide()
+        lay.addWidget(self._details_container)
+
+    def _toggle_details(self):
+        visible = not self._details_container.isVisible()
+        self._details_container.setVisible(visible)
+        self._details_toggle.setText(
+            "Hide details  ▴" if visible else "Show details  ▾"
+        )
 
     def _clear_checklist(self):
         while self._checklist.count():
@@ -2329,36 +2406,131 @@ class Stage0ReadinessPanel(QFrame):
         bg, fg = colors.get(check.status, colors["yellow"])
         row = QLabel(f"{check.label}: {check.message}")
         row.setWordWrap(True)
-        row.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:5px 8px;border:none;")
+        row.setStyleSheet(
+            f"background:{bg};color:{fg};border-radius:4px;"
+            f"padding:5px 8px;border:none;"
+        )
         self._checklist.addWidget(row)
 
-    def refresh(self):
+    def _determine_state(self):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        if not selected.active_project:
+            if selected.action == "picker_required":
+                return ("picker_required", selected, None)
+            return ("no_project", selected, None)
+        validation = _pm.validate_project(selected.active_project)
+        if selected.action == "auto_selected" and not _pm.onboarding_complete(
+            selected.active_project
+        ):
+            return ("auto_detected", selected, validation)
+        if _pm.onboarding_complete(selected.active_project):
+            return ("ready", selected, validation)
+        return ("incomplete", selected, validation)
+
+    def _update_primary_button(self, state):
+        try:
+            self._primary_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        configs = {
+            "no_project": ("Onboard Project", self._create_project),
+            "picker_required": ("Choose Project", self._change_project),
+            "auto_detected": ("Use This Project", self._use_detected_project),
+            "incomplete": ("Fix Setup", self._fix_setup),
+            "ready": ("Continue", self._continue_ready),
+        }
+        label, handler = configs.get(state, ("Check", self._check_readiness))
+        self._primary_btn.setText(label)
+        self._primary_btn.clicked.connect(handler)
+
+    def refresh(self):
+        state, selected, validation = self._determine_state()
         self._clear_checklist()
-        if selected.active_project:
-            validation = _pm.validate_project(selected.active_project)
-            self._project_label.setText(f"{validation.project_name}\n{validation.path}")
+
+        if validation:
+            self._project_name_label.setText(validation.project_name)
+            source = _pm.session_source_status(
+                validation.path, validation.config
+            )
+            self._data_summary.setText(source["message"])
             for check in validation.checks:
                 self._add_check(check)
-            if _pm.onboarding_complete(validation.path):
-                self._suggested.setText(
-                    "Project ready. Continue with Stage 1 for pose estimation, "
-                    "or skip to Stage 2 if pose data is already available."
-                )
-            else:
-                self._suggested.setText(
-                    "Add a data source or check the project config to complete readiness."
-                )
         else:
-            self._project_label.setText("No active project.")
-            self._add_check(_pm.Check("active_project", "active project exists", "red", "No valid project selected."))
-            if selected.action == "picker_required":
-                self._suggested.setText("Multiple projects detected — use Change Project to select one.")
-            else:
-                self._suggested.setText("Create a new project or open an existing one to get started.")
+            self._project_name_label.setText("No project selected")
+            self._data_summary.setText("")
+            self._add_check(
+                _pm.Check(
+                    "active_project", "active project exists", "red",
+                    "No valid project selected.",
+                )
+            )
+
+        badge_config = {
+            "ready": ("Ready", "#ECFDF3", "#027A48"),
+            "incomplete": ("Needs Setup", "#FFFAEB", "#B54708"),
+            "auto_detected": ("Detected", "#E3F2FD", "#1565C0"),
+        }
+        badge = badge_config.get(state)
+        if badge:
+            text, bg, fg = badge
+            self._status_badge.setText(text)
+            self._status_badge.setStyleSheet(
+                f"background:{bg};color:{fg};border-radius:4px;"
+                f"padding:2px 8px;font-weight:600;font-size:11px;border:none;"
+            )
+            self._status_badge.show()
+        else:
+            self._status_badge.hide()
+
+        action_text = {
+            "no_project":
+                "Click Onboard Project to detect or create a project.",
+            "picker_required":
+                "Multiple projects detected — choose one to continue.",
+            "auto_detected":
+                "A project was detected. Click ‘Use This Project’ to activate it.",
+            "incomplete":
+                "Add a data source or check the project config "
+                "to complete readiness.",
+            "ready":
+                "Project ready. Continue with Stage 1 for pose estimation, "
+                "or skip to Stage 2 if pose data is already available.",
+        }
+        self._next_action.setText(action_text.get(state, ""))
+        self._update_primary_button(state)
+
+    def _use_detected_project(self):
+        selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        if selected.active_project:
+            _pm.set_active_project(
+                selected.active_project, ROOT, APP_CONFIG_PATH
+            )
+            self.project_changed.emit()
+            self.refresh()
+
+    def _fix_setup(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        validation = _pm.validate_project(project)
+        cfg = validation.config
+        meta = Path(cfg.get("metadata_csv_path", ""))
+        source = _pm.session_source_status(project, cfg)
+        if not source["valid"]:
+            self._add_data_source()
+        elif not meta.exists():
+            self._generate_metadata_async(project)
+        else:
+            self._add_data_source()
+
+    def _continue_ready(self):
+        self.project_changed.emit()
+        self.refresh()
 
     def _check_readiness(self):
-        """Primary action: lightweight readiness check only. Routes to existing workflows when needed."""
+        """Primary action: lightweight readiness check only."""
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
         if not selected.active_project:
             if selected.action == "picker_required":
@@ -2370,14 +2542,23 @@ class Stage0ReadinessPanel(QFrame):
         project = selected.active_project
         validation = _pm.validate_project(project)
         cfg = validation.config
-        # Ensure results dir exists (fast, synchronous mkdir)
-        results = (cfg.get("paths") or {}).get("results") or str(project / "results")
+        results = (
+            (cfg.get("paths") or {}).get("results")
+            or str(project / "results")
+        )
         Path(results).mkdir(parents=True, exist_ok=True)
-        # If metadata missing but a session source is detectable, generate asynchronously
-        meta = (cfg.get("paths") or {}).get("metadata") or str(project / "metadata.csv")
+        meta = (
+            (cfg.get("paths") or {}).get("metadata")
+            or str(project / "metadata.csv")
+        )
         if not Path(meta).exists():
             source = _pm.session_source_status(project, cfg)
-            if source.get("valid") or source.get("raw_videos", 0) > 0 or source.get("pose_csvs", 0) > 0 or source.get("h5"):
+            if (
+                source.get("valid")
+                or source.get("raw_videos", 0) > 0
+                or source.get("pose_csvs", 0) > 0
+                or source.get("h5")
+            ):
                 self._generate_metadata_async(project)
                 return
         self.project_changed.emit()
@@ -2412,39 +2593,59 @@ class Stage0ReadinessPanel(QFrame):
             self.refresh()
 
     def _open_existing(self):
-        d = _existing_directory(self, "Open Existing Project", str(ROOT / "projects"))
+        d = _existing_directory(
+            self, "Open Existing Project", str(ROOT / "projects")
+        )
         if not d:
             return
         path = Path(d)
         validation = _pm.validate_project(path)
         if not validation.valid:
-            QMessageBox.warning(self, "Open Project", "That folder is not a valid VIEB project.")
+            QMessageBox.warning(
+                self, "Open Project",
+                "That folder is not a valid VIEB project.",
+            )
             return
         _pm.set_active_project(validation.path, ROOT, APP_CONFIG_PATH)
         self.project_changed.emit()
         self.refresh()
 
     def _change_project(self):
-        detected = _pm.detect_projects(repo_root=ROOT, app_config_path=APP_CONFIG_PATH)
+        detected = _pm.detect_projects(
+            repo_root=ROOT, app_config_path=APP_CONFIG_PATH
+        )
         if len(detected) == 1:
             _pm.set_active_project(detected[0].path, ROOT, APP_CONFIG_PATH)
             self.project_changed.emit()
         elif len(detected) > 1:
             from views.project_selector import ProjectSelectorDialog
             app_cfg = _load_app_config()
-            app_cfg["projects"] = [{"name": d.project_name, "path": str(d.path), "last_opened": ""} for d in detected]
+            app_cfg["projects"] = [
+                {
+                    "name": d.project_name,
+                    "path": str(d.path),
+                    "last_opened": "",
+                }
+                for d in detected
+            ]
             dlg = ProjectSelectorDialog(app_cfg, self)
             if dlg.exec_() == QDialog.Accepted:
                 self.project_changed.emit()
         else:
-            QMessageBox.information(self, "Change Project", "No other valid projects were found.")
+            QMessageBox.information(
+                self, "Change Project",
+                "No other valid projects were found.",
+            )
         self.refresh()
 
     def _add_data_source(self):
         try:
             project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
         except _pm.ProjectSelectionError:
-            QMessageBox.warning(self, "Add Data Source", "No active project. Create or open a project first.")
+            QMessageBox.warning(
+                self, "Add Data Source",
+                "No active project. Create or open a project first.",
+            )
             return
         choices = [
             ("Raw videos folder", "raw_videos"),
@@ -2453,28 +2654,45 @@ class Stage0ReadinessPanel(QFrame):
             ("Metadata CSV", "metadata"),
         ]
         menu = QMenu(self)
-        action_to_source = {menu.addAction(label): src for label, src in choices}
-        picked = menu.exec_(self._source_btn.mapToGlobal(self._source_btn.rect().bottomLeft()))
+        action_to_source = {
+            menu.addAction(label): src for label, src in choices
+        }
+        picked = menu.exec_(
+            self._source_btn.mapToGlobal(
+                self._source_btn.rect().bottomLeft()
+            )
+        )
         if picked is None:
             return
         source_type = action_to_source[picked]
         if source_type in ("raw_videos", "pose_csvs"):
-            title = "Select Raw Videos Folder" if source_type == "raw_videos" else "Select Pose CSV Folder"
+            title = (
+                "Select Raw Videos Folder"
+                if source_type == "raw_videos"
+                else "Select Pose CSV Folder"
+            )
             source = _existing_directory(self, title, str(project))
         elif source_type == "pose_h5":
-            source, _ = _open_file(self, "Select H5 Pose File", str(project), "H5 files (*.h5 *.hdf5);;All files (*)")
+            source, _ = _open_file(
+                self, "Select H5 Pose File", str(project),
+                "H5 files (*.h5 *.hdf5);;All files (*)",
+            )
         else:
-            source, _ = _open_file(self, "Select Metadata CSV", str(project), "CSV files (*.csv);;All files (*)")
+            source, _ = _open_file(
+                self, "Select Metadata CSV", str(project),
+                "CSV files (*.csv);;All files (*)",
+            )
         if not source:
             return
         try:
             _pm.import_data_source(project, source_type, source)
         except Exception as exc:
-            QMessageBox.warning(self, "Add Data Source", f"Could not add data source:\n{exc}")
+            QMessageBox.warning(
+                self, "Add Data Source",
+                f"Could not add data source:\n{exc}",
+            )
         self.project_changed.emit()
         self.refresh()
-
-
 class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
@@ -2496,6 +2714,7 @@ class RunPipelineView(QWidget):
         QTimer.singleShot(800, self._probe_gpu_async)
 
     def _build(self):
+        self.setUpdatesEnabled(False)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(12)
@@ -2539,10 +2758,14 @@ class RunPipelineView(QWidget):
         scroll.setWidgetResizable(True)
         holder = QWidget()
         v = QVBoxLayout(holder)
+        _t_stages = time.perf_counter()
         for stage in STAGES:
+            _t_sr = time.perf_counter()
             row = StageRow(stage, self.cfg)
             if stage["id"] == 0:
+                _t_s0 = time.perf_counter()
                 self._project_panel = Stage0ReadinessPanel(self.cfg, self)
+                _perf("    Stage0ReadinessPanel", _t_s0)
                 self._project_panel.project_changed.connect(self.project_changed.emit)
                 row._body.layout().insertWidget(0, self._project_panel)
                 row.run_stage.connect(lambda _: self._project_panel._check_readiness())
@@ -2570,6 +2793,8 @@ class RunPipelineView(QWidget):
                 row.navigate_cluster_runs.connect(self.navigate_cluster_runs.emit)
             self._rows[stage["id"]] = row
             v.addWidget(row)
+            _perf(f"    StageRow {stage['id']}", _t_sr)
+        _perf("  all StageRows", _t_stages)
         # ── Clustering Diagnostics panel ──
         self._diag_frame = QFrame()
         self._diag_frame.setFrameShape(QFrame.StyledPanel)
@@ -2620,6 +2845,7 @@ class RunPipelineView(QWidget):
         log_hdr.addStretch()
         lay.addLayout(log_hdr)
         lay.addWidget(self._global_log)
+        self.setUpdatesEnabled(True)
 
     def _probe_gpu_async(self):
         class _ProbeThread(QThread):
@@ -4894,9 +5120,15 @@ def export_pdf_report():
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        _t = time.perf_counter()
         self._init_project()
+        _perf("  _init_project", _t)
+        _t = time.perf_counter()
         _refresh_global_paths()
+        _perf("  _refresh_global_paths", _t)
+        _t = time.perf_counter()
         self.cfg = _load_cfg()
+        _perf("  _load_cfg", _t)
         self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
         self.setMinimumSize(1024, 768)
         w, h = self.cfg.get("window_size", [1280, 800])
@@ -4928,6 +5160,7 @@ class MainWindow(QMainWindow):
         self._reload_timer.timeout.connect(self._reload_for_current_view)
         t_build = time.perf_counter()
         self._build()
+        self.setUpdatesEnabled(True)
         _perf("main window construction", t_build)
         QTimer.singleShot(0, self._load_lightweight_data)
         self._start_file_watcher()
@@ -4935,6 +5168,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(300, self._check_dlc_setup)
 
     def _build(self):
+        self.setUpdatesEnabled(False)
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -5093,12 +5327,14 @@ class MainWindow(QMainWindow):
             self._views[name] = widget
             self._stack.addWidget(widget)
 
+        _t_ov = time.perf_counter()
         self._ov = OverviewView()
         self._ov.export_requested.connect(self._show_export_dialog)
         self._ov.load_previous_requested.connect(self._load_session)
         self._ov.cohort_path_changed.connect(self._on_cohort_path_changed)
         self._ov.navigate_help.connect(self._navigate_to_help)
         add("Overview", self._ov)
+        _perf("  OverviewView construction", _t_ov)
 
         for lazy_name in (
             "Pipeline", "Analysis", "Artifacts", "Settings", "Help",
@@ -5111,6 +5347,7 @@ class MainWindow(QMainWindow):
             add(lazy_name, placeholder)
 
         self._build_status_bar()
+        _perf("  _build total", _t_ov)
 
         if getattr(self, "_is_new_project", False):
             pose_source = getattr(self, "_new_project_pose_source", "none")
@@ -5364,6 +5601,7 @@ class MainWindow(QMainWindow):
         if current is not None and not isinstance(current, QLabel):
             return
         t0 = time.perf_counter()
+        self._stack.setUpdatesEnabled(False)
 
         if name == "Pipeline":
             self._pv = RunPipelineView(self.cfg)
@@ -5414,6 +5652,7 @@ class MainWindow(QMainWindow):
             self._crv = ClusterRunsView(self.cfg)
             self._crv.run_activated.connect(self._manual_reload)
             self._crv.cluster_changed.connect(self._on_cluster_changed)
+            self._crv.queue_start_requested.connect(self._start_cluster_queue)
             self._replace_view(name, self._crv)
         elif name == "Browse States":
             self._sv = BrowseStatesView(self.cfg)
@@ -5429,6 +5668,7 @@ class MainWindow(QMainWindow):
             self._qv = QuantificationView(self.cfg)
             self._replace_view(name, self._qv)
 
+        self._stack.setUpdatesEnabled(True)
         _perf(f"construct view {name}", t0)
 
     def _switch(self, name):
@@ -5515,6 +5755,45 @@ class MainWindow(QMainWindow):
         """Reload cfg after the active cluster run changes."""
         self.cfg = _load_cfg()
         self._watch_result_files()
+
+    # --- Cluster queue ---
+
+    def _start_cluster_queue(self, configs: list) -> None:
+        from _workers import ClusterQueueWorker
+        self._cluster_queue_worker = ClusterQueueWorker(configs, self.cfg)
+        self._cluster_queue_worker.log.connect(self._on_queue_log)
+        self._cluster_queue_worker.run_started.connect(self._on_queue_run_started)
+        self._cluster_queue_worker.run_finished.connect(self._on_queue_run_finished)
+        self._cluster_queue_worker.queue_done.connect(self._on_queue_done)
+        if self._crv:
+            self._crv.set_queue_running(True)
+            self._crv._queue_worker = self._cluster_queue_worker
+        self._set_running(True)
+        self._cluster_queue_worker.start()
+
+    def _on_queue_log(self, text: str) -> None:
+        pass
+
+    def _on_queue_run_started(self, index: int, label: str) -> None:
+        total = len(self._cluster_queue_worker.configs) if self._cluster_queue_worker else 0
+        self.statusBar().showMessage(f"Cluster queue: running {index + 1}/{total} ({label})")
+        if self._crv:
+            self._crv.set_queue_progress(index, total)
+
+    def _on_queue_run_finished(self, index: int, label: str, ok: bool) -> None:
+        status = "completed" if ok else "failed"
+        self.statusBar().showMessage(f"Cluster queue: run {index + 1} {status}", 3000)
+        if self._crv:
+            self._crv.refresh()
+
+    def _on_queue_done(self) -> None:
+        self._set_running(False)
+        if self._crv:
+            self._crv.set_queue_running(False)
+            self._crv.clear_queue_progress()
+            self._crv.refresh()
+        self._load_data()
+        self.statusBar().showMessage("Cluster queue finished.", 5000)
 
     def _on_reload_clicked(self) -> None:
         """Re-run compare.py --report and refresh all views with the latest results."""

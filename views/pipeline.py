@@ -463,6 +463,17 @@ class RunPipelineView(QWidget):
 
         self._diag_frame.show()
 
+        # Resolved min_samples info from run manifest
+        rm = data.get("run_manifest") or {}
+        ms_req = rm.get("min_samples_requested", None)
+        ms_res = rm.get("min_samples_resolved", rm.get("hdbscan_min_samples", ""))
+        if ms_req == 0 and ms_res:
+            ms_text = f"min_samples: Auto (resolved to {ms_res})"
+        elif ms_res:
+            ms_text = f"min_samples: {ms_res}"
+        else:
+            ms_text = ""
+
         # Parameters summary
         lines = [
             f"States: {diag.get('n_states', '?')}   "
@@ -476,6 +487,8 @@ class RunPipelineView(QWidget):
             f"Features: {diag.get('n_features', '?')}   "
             f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
         ]
+        if ms_text:
+            lines.append(ms_text)
         self._diag_params.setText("\n".join(lines))
 
         # Clear old warnings

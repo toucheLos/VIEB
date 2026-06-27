@@ -15,12 +15,13 @@ def _write_json(path: Path, data: dict):
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def _make_project(root: Path, name: str = "proj", *, external: dict | None = None) -> Path:
+def _make_project(root: Path, name: str = "proj", *, external: dict | None = None, external_paths: list[str] | None = None) -> Path:
     project = root / "projects" / name
     project.mkdir(parents=True)
-    results = external.get("results") if external else project / "results"
-    raw = external.get("raw_videos") if external else project / "raw_videos"
-    meta = external.get("metadata") if external else project / "metadata.csv"
+    external = external or {}
+    results = external.get("results", project / "results")
+    raw = external.get("raw_videos", project / "raw_videos")
+    meta = external.get("metadata", project / "metadata.csv")
     Path(results).mkdir(parents=True, exist_ok=True)
     Path(raw).mkdir(parents=True, exist_ok=True)
     Path(meta).parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ def _make_project(root: Path, name: str = "proj", *, external: dict | None = Non
             "metadata": str(meta),
             "results": str(results),
         },
+        "external_paths": external_paths or [],
         "metadata_schema": {"column_map": {"session_id": "session_id"}},
         "analysis_groups": [{"name": "Session", "column": "session_id", "enabled": True}],
         "ui_panels": {},
@@ -215,12 +217,101 @@ def test_external_metadata_and_raw_video_paths(tmp_path):
     meta = external / "metadata.csv"
     raw.mkdir(parents=True)
     meta.write_text("session_id\n", encoding="utf-8")
-    project = _make_project(tmp_path, "external_paths", external={"raw_videos": raw, "metadata": meta, "results": external / "results"})
+    project = _make_project(
+        tmp_path,
+        "external_paths",
+        external={"raw_videos": raw, "metadata": meta, "results": external / "results"},
+        external_paths=["raw_videos", "metadata", "results"],
+    )
     app = tmp_path / "app_config.json"
     _write_json(app, {"active_project": str(project), "recent_projects": []})
 
     assert pm.resolve_project_path("metadata", tmp_path, app) == meta.resolve()
     assert pm.resolve_project_path("raw_videos", tmp_path, app) == raw.resolve()
+
+
+def test_missing_project_paths_default_to_project_local(tmp_path):
+    project = tmp_path / "projects" / "defaults"
+    project.mkdir(parents=True)
+    _write_json(project / "config.json", {"project_name": "defaults"})
+    paths = pm.resolve_project_paths_for_project(project, {}, tmp_path)
+
+    assert paths["metadata"].path == (project / "metadata.csv").resolve()
+    assert paths["metadata"].origin == "project_default"
+    assert paths["results"].path == (project / "results").resolve()
+    assert paths["results"].origin == "project_default"
+    assert paths["raw_videos"].path == (project / "raw_videos").resolve()
+    assert paths["raw_videos"].origin == "project_default"
+
+
+def test_stage0_rejects_accidental_repo_root_metadata_and_results(tmp_path):
+    project = _make_project(tmp_path, "bad_stage0")
+    (tmp_path / "metadata.csv").write_text("session_id,stem\nvideo1,video1\n", encoding="utf-8")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["metadata"] = str(tmp_path / "metadata.csv")
+    cfg["paths"]["results"] = str(tmp_path / "results")
+    _write_json(project / "config.json", cfg)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    validation = pm.validate_project(project, tmp_path)
+    checks = {check.key: check for check in validation.checks}
+
+    assert checks["metadata"].status == "red"
+    assert checks["results"].status == "red"
+    assert pm.onboarding_complete(project, tmp_path) is False
+    with pytest.raises(pm.ProjectSelectionError):
+        pm.resolve_project_path("results", tmp_path, app)
+
+
+def test_unmarked_external_results_are_refused(tmp_path):
+    external = tmp_path / "external"
+    project = _make_project(
+        tmp_path,
+        "external_results",
+        external={"results": external / "results"},
+        external_paths=[],
+    )
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    paths = pm.resolve_project_paths_for_project(project, json.loads((project / "config.json").read_text()), tmp_path)
+
+    assert paths["results"].valid is False
+    with pytest.raises(pm.ProjectSelectionError):
+        pm.resolve_project_path("results", tmp_path, app)
+
+
+def test_explicit_external_results_are_allowed(tmp_path):
+    external = tmp_path / "external"
+    project = _make_project(
+        tmp_path,
+        "external_results_ok",
+        external={"results": external / "results"},
+        external_paths=["results"],
+    )
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    paths = pm.resolve_project_paths_for_project(project, json.loads((project / "config.json").read_text()), tmp_path)
+
+    assert paths["results"].origin == "external_explicit"
+    assert pm.resolve_project_path("results", tmp_path, app) == (external / "results").resolve()
+
+
+def test_gui_readiness_and_cli_resolver_agree_on_paths(tmp_path):
+    project = _make_project(tmp_path, "agreement")
+    raw = project / "raw_videos"
+    (raw / "video1.mp4").write_bytes(b"")
+    meta = project / "metadata.csv"
+    meta.write_text("session_id,stem,animal_id,context\nvideo1,video1,a,A\n", encoding="utf-8")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    assert pm.onboarding_complete(project, tmp_path) is True
+    assert pm.resolve_project_path("metadata", tmp_path, app) == meta.resolve()
+    assert pm.resolve_project_path("results", tmp_path, app) == (project / "results").resolve()
 
 
 def test_existing_results_mark_stages_resumable(tmp_path):

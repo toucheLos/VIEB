@@ -102,6 +102,22 @@ def _ensure_project_scaffold(folder: Path) -> None:
 
 
 def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
+    external_paths = set(cfg.get("external_paths") or [])
+    for key, flat_key in (
+        ("raw_videos", "raw_videos_dir"),
+        ("metadata", "metadata_csv_path"),
+        ("results", "results_dir"),
+    ):
+        raw = cfg.get(flat_key)
+        if not raw:
+            continue
+        resolved = Path(raw).expanduser()
+        if not resolved.is_absolute():
+            resolved = folder / resolved
+        try:
+            resolved.resolve().relative_to(folder.resolve())
+        except ValueError:
+            external_paths.add(key)
     cfg["paths"] = {
         "raw_videos": cfg.get("raw_videos_dir") or str(folder / "raw_videos"),
         "pose_files": cfg.get("pose_files_dir", ""),
@@ -110,6 +126,7 @@ def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
         "results": cfg.get("results_dir") or str(folder / "results"),
         "external_data_root": cfg.get("external_data_root", ""),
     }
+    cfg["external_paths"] = sorted(external_paths)
     cfg.setdefault("metadata_schema", {})
     cfg.setdefault("analysis_groups", [])
     cfg.setdefault("ui_panels", {})
