@@ -6012,7 +6012,9 @@ QComboBox::drop-down { border: none; width: 20px; }
 QComboBox QAbstractItemView {
     background: #FFFFFF;
     border: 1px solid #E5E5E5;
+    color: #1A1A1A;
     selection-background-color: rgba(78,121,167,0.12);
+    selection-color: #1A1A1A;
     outline: none;
 }
 
@@ -6153,6 +6155,47 @@ QSlider::handle:horizontal {
     margin: -6px 0;
 }
 QSlider::sub-page:horizontal { background: #4E79A7; border-radius: 2px; }
+
+/* ── Popup surfaces ──────────────────────────────────────── */
+QMenu {
+    background: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #DADCE0;
+    border-radius: 4px;
+    padding: 4px;
+}
+QMenu::item {
+    background: transparent;
+    color: #1A1A1A;
+    padding: 6px 28px 6px 12px;
+    border-radius: 3px;
+}
+QMenu::item:selected {
+    background: #E8F0FE;
+    color: #0B57D0;
+}
+QMenu::separator {
+    height: 1px;
+    background: #E5E5E5;
+    margin: 4px 6px;
+}
+QFileDialog {
+    background: #FAFAFA;
+    color: #1A1A1A;
+}
+QListView, QTreeView, QAbstractItemView {
+    background: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #E5E5E5;
+    selection-background-color: rgba(78,121,167,0.12);
+    selection-color: #1A1A1A;
+    alternate-background-color: #FAFAFA;
+}
+QListView::item:selected, QTreeView::item:selected,
+QAbstractItemView::item:selected {
+    background: #E8F0FE;
+    color: #0B57D0;
+}
 
 /* ── Progress bar ─────────────────────────────────────────── */
 QProgressBar {

@@ -261,3 +261,57 @@ def test_stage0_routes_to_existing_dialogs():
     assert "NewProjectDialog" in class_body, "Stage0 must use NewProjectDialog"
     assert "ProjectSelectorDialog" in class_body, "Stage0 must use ProjectSelectorDialog"
     assert "QLineEdit" not in class_body, "Stage0 must not define its own form fields"
+
+
+def _class_body(path: Path, class_name: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    class_start = text.find(f"class {class_name}")
+    assert class_start != -1, f"{class_name} not found in {path.name}"
+    class_end = text.find("\nclass ", class_start + 1)
+    return text[class_start:class_end] if class_end != -1 else text[class_start:]
+
+
+def test_global_qss_styles_popup_surfaces():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    qss_start = text.find("_APP_QSS =")
+    assert qss_start != -1
+    qss = text[qss_start:]
+
+    for selector in ("QMenu", "QMenu::item", "QMenu::item:selected", "QFileDialog", "QListView", "QTreeView", "QAbstractItemView"):
+        assert selector in qss
+    assert "background: #FFFFFF" in qss
+    assert "color: #1A1A1A" in qss
+
+
+def test_popup_menus_use_light_menu_helper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "def _style_light_menu(menu: QMenu) -> QMenu:" in text
+    assert text.count("_style_light_menu(QMenu(self))") >= 2
+
+
+def test_stage_rows_use_qt_arrow_buttons_not_text_glyphs():
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("user_interface.py", "_widgets.py"):
+        body = _class_body(root / rel, "StageRow")
+        assert "self._arrow = QToolButton()" in body
+        assert "setArrowType(Qt.RightArrow)" in body
+        assert "setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)" in body
+        assert "def _set_expanded(self, expanded: bool):" in body
+        assert "self._arrow = QLabel" not in body
+        assert "self._arrow.setText" not in body
+        assert "_ARROW_COLLAPSED" not in body
+        assert "_ARROW_EXPANDED" not in body
+
+
+def test_expand_all_uses_stage_row_expansion_helper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _toggle_expand_all(self):")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    assert "row._set_expanded(not any_expanded)" in fn_body
+    assert "row._arrow.setText" not in fn_body

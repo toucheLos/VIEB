@@ -376,11 +376,10 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
-    _ARROW_COLLAPSED = "›"
-    _ARROW_EXPANDED = "⌄"
     _ARROW_STYLE = (
-        "color:#9aa0a6;background:transparent;border:none;"
-        "font-size:18px;font-weight:400;"
+        "QToolButton{color:#5f6368;background:transparent;border:none;"
+        "padding:0;margin:0;}"
+        "QToolButton:hover{background:#edf2f7;border-radius:3px;}"
     )
 
     def __init__(self, stage: dict, cfg: dict):
@@ -440,10 +439,12 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel(self._ARROW_COLLAPSED)
-        self._arrow.setAlignment(Qt.AlignCenter)
-        self._arrow.setFixedWidth(18)
+        self._arrow = QToolButton()
+        self._arrow.setArrowType(Qt.RightArrow)
+        self._arrow.setCursor(Qt.PointingHandCursor)
+        self._arrow.setFixedSize(18, 18)
         self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.clicked.connect(self._toggle)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -572,12 +573,13 @@ class StageRow(QFrame):
 
         self.set_status("pending")
 
-    def _toggle(self):
-        expanded = not self._body.isVisible()
+    def _set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText(self._ARROW_EXPANDED if expanded else self._ARROW_COLLAPSED)
-        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _toggle(self):
+        self._set_expanded(not self._body.isVisible())
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -593,15 +595,7 @@ class StageRow(QFrame):
             f"background:transparent;border:none;font-size:13px;"
             f"font-weight:bold;color:{icon_color};"
         )
-        if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText(self._ARROW_EXPANDED)
-        else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText(self._ARROW_COLLAPSED)
-        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._set_expanded(status == "running")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
