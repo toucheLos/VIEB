@@ -75,7 +75,7 @@ VIEB is organized as a staged pipeline. Each stage builds on the previous one. T
 
 ### Stage 0 — Onboarding
 
-Before the pipeline can run, VIEB verifies that an active project exists and has enough information to proceed. Click **Check Project Readiness** in the Stage 0 card. If anything is missing, the card points you to the relevant existing workflow (project selector, data import). All checks are lightweight — no directory scanning, no heavy library loading.
+Before the pipeline can run, VIEB verifies that an active project exists and has enough information to proceed. Stage 0 shows a summary card with the project name, readiness status, and detected data sources. One primary button guides you through the next step — creating a project, choosing between detected projects, fixing missing configuration, or continuing to the pipeline. Detailed validation checks are available under a "Show details" toggle. All checks are lightweight — no directory scanning, no heavy library loading.
 
 ### Stage 1 — Pose Estimation (DeepLabCut)
 
@@ -147,7 +147,7 @@ Compares behavioral profiles across experimental groups using Mann-Whitney U tes
 
 ## GUI Overview
 
-The VIEB GUI provides a complete interface for running and inspecting the pipeline without touching the terminal.
+The VIEB GUI provides a complete interface for running and inspecting the pipeline without touching the terminal. All views are constructed lazily on first visit.
 
 ### Overview
 Dashboard showing dataset statistics, number of discovered behavioral states, and mean state occupancy broken down by cohort or individual animal.
@@ -155,23 +155,30 @@ Dashboard showing dataset statistics, number of discovered behavioral states, an
 ### Pipeline
 Staged pipeline runner. Each stage shows its command, status, and live terminal output. Run stages individually or in sequence.
 
+### Cluster Runs
+Manage and compare clustering experiments. Queue multiple parameter configurations (min_cluster_size, UMAP dims, min_samples) for batch execution, save runs for later comparison, and restore any saved run as the active clustering. A comparison table shows all runs side-by-side with health status indicators.
+
 ### Browse States
 Visual explorer for discovered behavioral states. Displays exemplar video clips, kinematic profiles, and context enrichment for each state. Paginated across all animals.
 
 ### Analysis
-Six-tab analysis hub:
-- **Comparison Report** — state occupancy by day, context, experiment, and animal
-- **State Characterization** — kinematic profiles and heuristic labels per state
+Ten-tab analysis hub (tabs built lazily on first visit):
+- **State Characterization** — kinematic profiles, exemplar clips, and heuristic labels per state
+- **State Comparison** — state occupancy by day, context, experiment, and animal
+- **Transitions & Motifs** — transition matrices and context-enriched motif sequences
+- **Diagnostics** — cluster quality metrics and UMAP embeddings
 - **Cohort Analysis** — group-level comparisons with statistical outputs
 - **Quantification** — per-animal behavioral scalars and master table
 - **Fear Index** — leave-one-out normalized fear expression index
 - **Jess Correlation** — correlation between behavioral scalars and protein expression data
+- **Event Alignment** — time-locked state occupancy around experimental events
+- **Column Mapping** — metadata column mapper for CSV field configuration
 
 ### Validation
-Manual frame labeling interface for ground-truth validation of discovered states.
+Three-tab validation hub: Clip Reviewer (session-based annotation with supervised classifier), Video Watching (random clip sampling), and Frame Sampling (frame-level labeling for paper figures).
 
 ### Settings
-Configure all paths (raw videos, results, metadata, DLC project), arena bounds, FPS, and clustering parameters.
+Full project configuration editor: paths (raw videos, results, metadata, DLC interpreter, cohort file), pose data source (CSV or H5 with auto-detection), arena bounds, context groups and descriptions, experiment labels, FPS, UMAP dimensions, HDBSCAN min_samples, column mapping, metadata generation and validation, and learning curve panel configuration.
 
 ---
 

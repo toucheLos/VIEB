@@ -793,6 +793,22 @@ def _open_file(parent, title: str, start: str, filter_str: str = "All files (*)"
     )
 
 
+_LIGHT_MENU_QSS = (
+    "QMenu#lightPopupMenu{background:#FFFFFF;color:#1A1A1A;"
+    "border:1px solid #DADCE0;border-radius:4px;padding:4px;}"
+    "QMenu#lightPopupMenu::item{background:transparent;color:#1A1A1A;"
+    "padding:6px 28px 6px 12px;border-radius:3px;}"
+    "QMenu#lightPopupMenu::item:selected{background:#E8F0FE;color:#0B57D0;}"
+    "QMenu#lightPopupMenu::separator{height:1px;background:#E5E5E5;margin:4px 6px;}"
+)
+
+
+def _style_light_menu(menu: QMenu) -> QMenu:
+    menu.setObjectName("lightPopupMenu")
+    menu.setStyleSheet(_LIGHT_MENU_QSS)
+    return menu
+
+
 class _Capture(QObject):
     text = pyqtSignal(str)
     encoding = "utf-8"
@@ -1959,11 +1975,10 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
-    _ARROW_COLLAPSED = "▸"
-    _ARROW_EXPANDED = "▾"
     _ARROW_STYLE = (
-        "color:#5f6368;background:transparent;border:none;"
-        "font-size:14px;font-weight:bold;"
+        "QToolButton{color:#5f6368;background:transparent;border:none;"
+        "padding:0;margin:0;}"
+        "QToolButton:hover{background:#edf2f7;border-radius:3px;}"
     )
 
     def __init__(self, stage: dict, cfg: dict):
@@ -2023,10 +2038,12 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel(self._ARROW_COLLAPSED)
-        self._arrow.setAlignment(Qt.AlignCenter)
-        self._arrow.setFixedWidth(18)
+        self._arrow = QToolButton()
+        self._arrow.setArrowType(Qt.RightArrow)
+        self._arrow.setCursor(Qt.PointingHandCursor)
+        self._arrow.setFixedSize(18, 18)
         self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.clicked.connect(self._toggle)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -2192,12 +2209,13 @@ class StageRow(QFrame):
 
         self.set_status("pending")
 
-    def _toggle(self):
-        expanded = not self._body.isVisible()
+    def _set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText(self._ARROW_EXPANDED if expanded else self._ARROW_COLLAPSED)
-        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _toggle(self):
+        self._set_expanded(not self._body.isVisible())
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -2213,15 +2231,7 @@ class StageRow(QFrame):
             f"background:transparent;border:none;font-size:13px;"
             f"font-weight:bold;color:{icon_color};"
         )
-        if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText(self._ARROW_EXPANDED)
-        else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText(self._ARROW_COLLAPSED)
-        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._set_expanded(status == "running")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
@@ -2653,7 +2663,7 @@ class Stage0ReadinessPanel(QFrame):
             ("H5 pose file", "pose_h5"),
             ("Metadata CSV", "metadata"),
         ]
-        menu = QMenu(self)
+        menu = _style_light_menu(QMenu(self))
         action_to_source = {
             menu.addAction(label): src for label, src in choices
         }
@@ -2943,11 +2953,7 @@ class RunPipelineView(QWidget):
     def _toggle_expand_all(self):
         any_expanded = any(row._body.isVisible() for row in self._rows.values())
         for row in self._rows.values():
-            row._body.setVisible(not any_expanded)
-            row._desc.setVisible(not any_expanded)
-            row._arrow.setText(
-                row._ARROW_EXPANDED if not any_expanded else row._ARROW_COLLAPSED
-            )
+            row._set_expanded(not any_expanded)
         self._expand_all_btn.setText("Collapse All" if not any_expanded else "Expand All")
 
     def _param_changed(self, key, value):
@@ -4684,211 +4690,6 @@ class QuantificationView(QWidget):
         self._lc_canvas.draw()
 
 
-class SettingsView(QWidget):
-    settings_changed = pyqtSignal(dict)
-    navigate_help = pyqtSignal(str)
-
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        _set_top = QHBoxLayout()
-        t = QLabel("Settings")
-        t.setFont(QFont("Arial", 18, QFont.Bold))
-        _set_top.addWidget(t)
-        _set_hbtn = QPushButton("?")
-        _set_hbtn.setFixedSize(20, 20)
-        _set_hbtn.setFlat(True)
-        _set_hbtn.setToolTip("Open Help for Settings")
-        _set_hbtn.setCursor(Qt.PointingHandCursor)
-        _set_hbtn.setStyleSheet(
-            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
-            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
-            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
-        )
-        _set_hbtn.clicked.connect(lambda: self.navigate_help.emit("settings"))
-        _set_top.addWidget(_set_hbtn)
-        _set_top.addStretch()
-        lay.addLayout(_set_top)
-        form = QGridLayout()
-        r = 0
-
-        def row(label, widget):
-            nonlocal r
-            form.addWidget(QLabel(label), r, 0)
-            form.addWidget(widget, r, 1)
-            r += 1
-
-        ab = cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
-        self._xmin = QSpinBox(); self._xmin.setRange(0, 9999); self._xmin.setValue(ab["x_min"])
-        self._ymin = QSpinBox(); self._ymin.setRange(0, 9999); self._ymin.setValue(ab["y_min"])
-        self._xmax = QSpinBox(); self._xmax.setRange(0, 9999); self._xmax.setValue(ab["x_max"])
-        self._ymax = QSpinBox(); self._ymax.setRange(0, 9999); self._ymax.setValue(ab["y_max"])
-        row("Arena x_min", self._xmin)
-        row("Arena y_min", self._ymin)
-        row("Arena x_max", self._xmax)
-        row("Arena y_max", self._ymax)
-
-        def dir_row(label, key):
-            nonlocal r
-            le = QLineEdit(self.cfg.get(key, ""))
-            b = QPushButton("Browse...")
-            b.clicked.connect(lambda: self._browse(le))
-            h = QHBoxLayout()
-            h.addWidget(le)
-            h.addWidget(b)
-            form.addWidget(QLabel(label), r, 0)
-            form.addLayout(h, r, 1)
-            r += 1
-            return le
-
-        self._results = dir_row("Results directory", "results_dir")
-        self._raw = dir_row("Raw videos directory", "raw_videos_dir")
-
-        # Metadata CSV file picker
-        self._meta_le = QLineEdit(self.cfg.get("metadata_csv_path", ""))
-        meta_browse = QPushButton("Browse...")
-        meta_browse.clicked.connect(lambda: self._browse_file(self._meta_le))
-        meta_h = QHBoxLayout()
-        meta_h.addWidget(self._meta_le)
-        meta_h.addWidget(meta_browse)
-        form.addWidget(QLabel("Metadata CSV file"), r, 0)
-        form.addLayout(meta_h, r, 1)
-        r += 1
-
-        self._cohort_le = QLineEdit(self.cfg.get("cohort_csv_path", ""))
-        cohort_browse = QPushButton("Browse...")
-        cohort_browse.clicked.connect(lambda: self._browse_file(self._cohort_le,
-            "Data files (*.csv *.xlsx *.xls);;All files (*.*)"))
-        cohort_h = QHBoxLayout()
-        cohort_h.addWidget(self._cohort_le)
-        cohort_h.addWidget(cohort_browse)
-        form.addWidget(QLabel("Cohort file"), r, 0)
-        form.addLayout(cohort_h, r, 1)
-        r += 1
-
-        self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
-        row("Context groups (comma-separated)", self._ctx_groups)
-
-        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
-        if not isinstance(lc_cfg, dict):
-            lc_cfg = {}
-        self._lc_enabled = QCheckBox("Enable configured learning curve panel")
-        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
-        form.addWidget(QLabel("Learning curves"), r, 0)
-        form.addWidget(self._lc_enabled, r, 1)
-        r += 1
-        self._lc_group_col = QLineEdit(str(lc_cfg.get("group_column", "context") or ""))
-        row("Learning group column", self._lc_group_col)
-        self._lc_baseline = QLineEdit("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
-        row("Learning baseline group", self._lc_baseline)
-        self._lc_comparison = QLineEdit("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
-        row("Learning comparison group", self._lc_comparison)
-        self._lc_order_col = QLineEdit(str(lc_cfg.get("order_column", "day") or ""))
-        row("Learning order column", self._lc_order_col)
-        self._lc_target_state = QLineEdit(str(lc_cfg.get("target_state", "auto") or "auto"))
-        row("Learning target state", self._lc_target_state)
-
-        self._fps = QSpinBox()
-        self._fps.setRange(1, 256)
-        self._fps.setValue(int(self.cfg.get("fps", 30)))
-        row("FPS", self._fps)
-
-        _umap_tip = (
-            "Number of UMAP output dimensions before HDBSCAN clustering.\n"
-            "Lower values (3–5) run faster and produce coarser clusters.\n"
-            "Higher values (10–15) preserve more structure. Default: 10."
-        )
-        self._umap_dims = QSpinBox()
-        self._umap_dims.setRange(2, 50)
-        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
-        self._umap_dims.setToolTip(_umap_tip)
-        row("UMAP dimensions", self._umap_dims)
-
-        _hms_tip = (
-            "HDBSCAN min_samples controls how conservative cluster borders are.\n"
-            "0 = use the same value as min_cluster_size (recommended default).\n"
-            "Lower values produce more clusters with softer borders."
-        )
-        self._hdbscan_min_samples = QSpinBox()
-        self._hdbscan_min_samples.setRange(0, 500)
-        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
-        self._hdbscan_min_samples.setToolTip(_hms_tip)
-        row("HDBSCAN min_samples", self._hdbscan_min_samples)
-
-        lay.addLayout(form)
-
-        save = QPushButton("Save Settings")
-        save.clicked.connect(self._save)
-        lay.addWidget(save)
-        lay.addStretch()
-
-    def load_from_cfg(self):
-        """Repopulate widgets from self.cfg (e.g. after switching projects)."""
-        ab = self.cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
-        self._xmin.setValue(ab["x_min"])
-        self._ymin.setValue(ab["y_min"])
-        self._xmax.setValue(ab["x_max"])
-        self._ymax.setValue(ab["y_max"])
-        self._results.setText(self.cfg.get("results_dir", ""))
-        self._raw.setText(self.cfg.get("raw_videos_dir", ""))
-        self._meta_le.setText(self.cfg.get("metadata_csv_path", ""))
-        self._cohort_le.setText(self.cfg.get("cohort_csv_path", ""))
-        self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
-        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
-        if not isinstance(lc_cfg, dict):
-            lc_cfg = {}
-        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
-        self._lc_group_col.setText(str(lc_cfg.get("group_column", "context") or ""))
-        self._lc_baseline.setText("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
-        self._lc_comparison.setText("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
-        self._lc_order_col.setText(str(lc_cfg.get("order_column", "day") or ""))
-        self._lc_target_state.setText(str(lc_cfg.get("target_state", "auto") or "auto"))
-        self._fps.setValue(int(self.cfg.get("fps", 30)))
-        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
-        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
-
-    def _browse(self, le):
-        d = QFileDialog.getExistingDirectory(self, "Select Directory", le.text())
-        if d:
-            le.setText(d)
-
-    def _browse_file(self, le, filter_str="CSV files (*.csv)"):
-        path, _ = QFileDialog.getOpenFileName(self, "Select File", le.text(), filter_str)
-        if path:
-            le.setText(path)
-
-    def _save(self):
-        self.cfg["arena_bounds"] = {
-            "x_min": self._xmin.value(),
-            "y_min": self._ymin.value(),
-            "x_max": self._xmax.value(),
-            "y_max": self._ymax.value(),
-        }
-        self.cfg["results_dir"] = self._results.text()
-        self.cfg["raw_videos_dir"] = self._raw.text()
-        self.cfg["metadata_csv_path"] = self._meta_le.text()
-        self.cfg["cohort_csv_path"] = self._cohort_le.text().strip()
-        self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
-        ui_panels = self.cfg.setdefault("ui_panels", {})
-        ui_panels["learning_curves"] = {
-            "enabled": self._lc_enabled.isChecked(),
-            "group_column": self._lc_group_col.text().strip() or "context",
-            "baseline_group": self._lc_baseline.text().strip() or None,
-            "comparison_group": self._lc_comparison.text().strip() or None,
-            "order_column": self._lc_order_col.text().strip() or "day",
-            "subject_column": "animal_id",
-            "target_state": self._lc_target_state.text().strip() or "auto",
-        }
-        self.cfg["fps"] = self._fps.value()
-        self.cfg["umap_dims"] = self._umap_dims.value()
-        self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()
-        _save_cfg(self.cfg)
-        self.settings_changed.emit(self.cfg)
-        QMessageBox.information(self, "Settings", "Saved.")
-
-
 class NavBtn(QPushButton):
     """Sidebar navigation button styled to match the design spec."""
 
@@ -5625,6 +5426,7 @@ class MainWindow(QMainWindow):
             self._artv.worker_running.connect(self._set_running)
             self._replace_view(name, self._artv)
         elif name == "Settings":
+            from views.settings import SettingsView
             self._setv = SettingsView(self.cfg)
             self._setv.settings_changed.connect(self._settings_changed)
             self._setv.navigate_help.connect(self._navigate_to_help)
@@ -6026,7 +5828,7 @@ class MainWindow(QMainWindow):
         projects = app_cfg.get("projects", [])
         active = app_cfg.get("active_project", "")
 
-        menu = QMenu(self)
+        menu = _style_light_menu(QMenu(self))
         for proj in projects:
             path = proj.get("path", "")
             pname = proj.get("name", "Unnamed")
