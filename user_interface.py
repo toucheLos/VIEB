@@ -2426,16 +2426,50 @@ class Stage0ReadinessPanel(QFrame):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
         if not selected.active_project:
             if selected.action == "picker_required":
-                return ("picker_required", selected, None)
-            return ("no_project", selected, None)
+                return ("picker_required", selected, None, {})
+            return ("no_project", selected, None, {})
         validation = _pm.validate_project(selected.active_project)
+        ctx = {}
         if selected.action == "auto_selected" and not _pm.onboarding_complete(
             selected.active_project
         ):
-            return ("auto_detected", selected, validation)
-        if _pm.onboarding_complete(selected.active_project):
-            return ("ready", selected, validation)
-        return ("incomplete", selected, validation)
+            return ("auto_detected", selected, validation, ctx)
+
+        paths = _pm.resolve_project_paths_for_project(
+            selected.active_project, validation.config, ROOT
+        )
+        ctx["paths"] = paths
+        if any(
+            info.origin == "invalid_repo_root_fallback"
+            for info in paths.values()
+        ):
+            return ("legacy_paths", selected, validation, ctx)
+
+        source = _pm.session_source_status(
+            selected.active_project, validation.config, ROOT
+        )
+        ctx["source"] = source
+        has_raw = source.get("raw_videos", 0) > 0
+        has_pose = source.get("pose_csvs", 0) > 0 or bool(source.get("h5"))
+        if not has_raw and not has_pose:
+            return ("needs_data", selected, validation, ctx)
+
+        meta = paths["metadata"].path
+        if not meta.exists():
+            return ("needs_metadata", selected, validation, ctx)
+
+        mapping = _pm.column_mapping_status(
+            selected.active_project, validation.config
+        )
+        ctx["mapping"] = mapping
+        if not mapping.get("mapped"):
+            return ("needs_column_mapping", selected, validation, ctx)
+
+        if not _pm.onboarding_complete(selected.active_project):
+            return ("incomplete", selected, validation, ctx)
+        if has_raw and not has_pose:
+            return ("ready_for_stage1", selected, validation, ctx)
+        return ("ready_for_stage2", selected, validation, ctx)
 
     def _update_primary_button(self, state):
         try:
@@ -2446,20 +2480,25 @@ class Stage0ReadinessPanel(QFrame):
             "no_project": ("Onboard Project", self._create_project),
             "picker_required": ("Choose Project", self._change_project),
             "auto_detected": ("Use This Project", self._use_detected_project),
+            "legacy_paths": ("Migrate Legacy Paths", self._migrate_legacy_paths),
+            "needs_data": ("Add Data Source", self._add_data_source),
+            "needs_metadata": ("Generate Metadata", self._generate_metadata_for_project),
+            "needs_column_mapping": ("Open Column Mapping", self._open_column_mapping),
             "incomplete": ("Fix Setup", self._fix_setup),
-            "ready": ("Continue", self._continue_ready),
+            "ready_for_stage1": ("Continue to Stage 1: Pose Estimation", self._continue_ready),
+            "ready_for_stage2": ("Continue to Stage 2: Feature Extraction", self._continue_ready),
         }
         label, handler = configs.get(state, ("Check", self._check_readiness))
         self._primary_btn.setText(label)
         self._primary_btn.clicked.connect(handler)
 
     def refresh(self):
-        state, selected, validation = self._determine_state()
+        state, selected, validation, ctx = self._determine_state()
         self._clear_checklist()
 
         if validation:
             self._project_name_label.setText(validation.project_name)
-            source = _pm.session_source_status(
+            source = ctx.get("source") or _pm.session_source_status(
                 validation.path, validation.config
             )
             self._data_summary.setText(source["message"])
@@ -2476,8 +2515,13 @@ class Stage0ReadinessPanel(QFrame):
             )
 
         badge_config = {
-            "ready": ("Ready", "#ECFDF3", "#027A48"),
+            "ready_for_stage1": ("Ready", "#ECFDF3", "#027A48"),
+            "ready_for_stage2": ("Ready", "#ECFDF3", "#027A48"),
             "incomplete": ("Needs Setup", "#FFFAEB", "#B54708"),
+            "needs_data": ("Needs Data", "#FFFAEB", "#B54708"),
+            "needs_metadata": ("Needs Metadata", "#FFFAEB", "#B54708"),
+            "needs_column_mapping": ("Needs Mapping", "#FFFAEB", "#B54708"),
+            "legacy_paths": ("Path Issue", "#FEF3F2", "#B42318"),
             "auto_detected": ("Detected", "#E3F2FD", "#1565C0"),
         }
         badge = badge_config.get(state)
@@ -2499,15 +2543,27 @@ class Stage0ReadinessPanel(QFrame):
                 "Multiple projects detected — choose one to continue.",
             "auto_detected":
                 "A project was detected. Click ‘Use This Project’ to activate it.",
+            "legacy_paths":
+                "This project still points at legacy repo-root paths. Migrate or mark those paths external.",
+            "needs_data":
+                "Add raw videos, pose CSVs, an H5 pose file, or a metadata CSV to define sessions.",
+            "needs_metadata":
+                "Data was found. Generate metadata before continuing.",
+            "needs_column_mapping":
+                "Metadata was found, but the session ID column needs to be mapped.",
             "incomplete":
                 "Add a data source or check the project config "
                 "to complete readiness.",
-            "ready":
-                "Project ready. Continue with Stage 1 for pose estimation, "
-                "or skip to Stage 2 if pose data is already available.",
+            "ready_for_stage1":
+                "Project ready. Continue to pose estimation.",
+            "ready_for_stage2":
+                "Project ready with pose data. Continue to feature extraction.",
         }
         self._next_action.setText(action_text.get(state, ""))
         self._update_primary_button(state)
+        has_project = validation is not None
+        self._change_btn.setVisible(has_project)
+        self._source_btn.setVisible(has_project)
 
     def _use_detected_project(self):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
@@ -2534,6 +2590,60 @@ class Stage0ReadinessPanel(QFrame):
             self._generate_metadata_async(project)
         else:
             self._add_data_source()
+
+    def _generate_metadata_for_project(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        self._generate_metadata_async(project)
+
+    def _open_column_mapping(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        validation = _pm.validate_project(project)
+        cfg = _pm.normalize_project_config(validation.config, validation.path)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Metadata Column Mapping")
+        dlg.resize(920, 720)
+        lay = QVBoxLayout(dlg)
+        from views.metadata_mapper import MetadataMapperWidget
+
+        mapper = MetadataMapperWidget(cfg, dlg)
+        mapper.mapping_saved.connect(lambda _schema: self._on_column_mapping_saved(dlg))
+        lay.addWidget(mapper)
+        dlg.exec_()
+
+    def _on_column_mapping_saved(self, dlg):
+        self.project_changed.emit()
+        self.refresh()
+        dlg.accept()
+
+    def _migrate_legacy_paths(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        answer = QMessageBox.question(
+            self,
+            "Migrate Legacy Paths",
+            "Update this project so repo-root metadata, raw videos, and results paths are treated as explicit external paths?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        migrated = _pm.migrate_legacy_project(
+            ROOT, APP_CONFIG_PATH, name=project.name
+        )
+        _pm.set_active_project(migrated, ROOT, APP_CONFIG_PATH)
+        self.project_changed.emit()
+        self.refresh()
 
     def _continue_ready(self):
         self.project_changed.emit()

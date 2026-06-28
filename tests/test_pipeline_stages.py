@@ -225,6 +225,182 @@ def test_stage0_summary_incomplete_project(tmp_path):
     assert pm.onboarding_complete(project) is False
 
 
+def test_stage0_state_ready_for_stage1(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+
+    source = pm.session_source_status(project)
+
+    assert source["raw_videos"] > 0
+    assert source["pose_csvs"] == 0
+    assert source["h5"] is False
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_ready_for_stage2_csv(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    pose_dir = project / "pose_csvs"
+    pose_dir.mkdir()
+    (pose_dir / "video1.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["pose_files"] = str(pose_dir)
+    _write_json(project / "config.json", cfg)
+
+    source = pm.session_source_status(project)
+
+    assert source["pose_csvs"] > 0
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_ready_for_stage2_h5(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    h5 = project / "pose.h5"
+    h5.write_text("", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["pose_h5"] = str(h5)
+    _write_json(project / "config.json", cfg)
+
+    source = pm.session_source_status(project)
+
+    assert source["h5"] is True
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_needs_data(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    source = pm.session_source_status(project)
+
+    assert source["raw_videos"] == 0
+    assert source["pose_csvs"] == 0
+    assert source["h5"] is False
+
+
+def test_stage0_state_needs_metadata(tmp_path):
+    project = _make_project(tmp_path, with_metadata=False)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+
+    source = pm.session_source_status(project)
+    paths = pm.resolve_project_paths_for_project(project)
+
+    assert source["raw_videos"] > 0
+    assert not paths["metadata"].path.exists()
+
+
+def test_stage0_state_needs_column_mapping(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+    (project / "metadata.csv").write_text("col_a,col_b\nv1,v2\n", encoding="utf-8")
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "not_found"
+
+
+def test_stage0_state_legacy_paths(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (tmp_path / "metadata.csv").write_text("session_id,stem\nvideo1,video1\n", encoding="utf-8")
+    (tmp_path / "results").mkdir()
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["metadata"] = str(tmp_path / "metadata.csv")
+    cfg["paths"]["results"] = str(tmp_path / "results")
+    _write_json(project / "config.json", cfg)
+
+    paths = pm.resolve_project_paths_for_project(project, repo_root=tmp_path)
+
+    assert paths["metadata"].origin == "invalid_repo_root_fallback"
+    assert paths["results"].origin == "invalid_repo_root_fallback"
+
+
+def test_column_mapping_status_mapped_explicit(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is True
+    assert status["session_id_column"] == "session_id"
+
+
+def test_column_mapping_status_mapped_alias(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "metadata.csv").write_text("filename,stem\nvideo1.mp4,video1\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["metadata_schema"] = {"column_map": {}}
+    _write_json(project / "config.json", cfg)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is True
+    assert status["session_id_column"] == "filename"
+    assert status["auto_detected"] is True
+
+
+def test_column_mapping_status_unmapped(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "metadata.csv").write_text("col_a,col_b\nv1,v2\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["metadata_schema"] = {"column_map": {"session_id": "missing"}}
+    _write_json(project / "config.json", cfg)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "not_found"
+
+
+def test_column_mapping_status_no_metadata(tmp_path):
+    project = _make_project(tmp_path, with_metadata=False)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "no_metadata"
+
+
+def test_column_mapping_status_lightweight():
+    src = Path(__file__).resolve().parents[1] / "project_manager.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def column_mapping_status(")
+    assert fn_start != -1, "column_mapping_status not found"
+    fn_body = text[fn_start:]
+    next_def = fn_body.find("\ndef ", 1)
+    if next_def == -1:
+        next_def = len(fn_body)
+    fn_body = fn_body[:next_def]
+    assert "import pandas" not in fn_body
+    assert "os.walk" not in fn_body
+    assert ".rglob(" not in fn_body
+
+
+def test_stage0_routes_to_column_mapper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    class_body = _class_body(src, "Stage0ReadinessPanel")
+
+    assert "MetadataMapperWidget" in class_body
+
+
+def test_stage0_primary_button_labels_cover_all_states():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _update_primary_button(self, state):")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    for state in (
+        "no_project",
+        "picker_required",
+        "auto_detected",
+        "legacy_paths",
+        "needs_data",
+        "needs_metadata",
+        "needs_column_mapping",
+        "incomplete",
+        "ready_for_stage1",
+        "ready_for_stage2",
+    ):
+        assert state in fn_body
+
+
 def test_stage0_details_hidden_by_default():
     """The details section container starts hidden in the _build method."""
     src = Path(__file__).resolve().parents[1] / "user_interface.py"

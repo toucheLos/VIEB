@@ -469,6 +469,52 @@ def session_source_status(
     }
 
 
+def column_mapping_status(project_path: Path | str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return whether metadata has a resolvable session identifier column."""
+    project = Path(project_path).resolve()
+    raw_cfg = config if config is not None else _read_project_config(project)
+    cfg = normalize_project_config(raw_cfg, project)
+    paths = resolve_project_paths_for_project(project, raw_cfg, _repo_root_for_project(project))
+    meta_info = paths["metadata"]
+    meta_path = meta_info.path
+    if not meta_info.valid or not meta_path.exists() or not meta_path.is_file():
+        return {"mapped": False, "reason": "no_metadata"}
+
+    try:
+        with meta_path.open(newline="", encoding="utf-8-sig") as f:
+            headers = next(csv.reader(f), [])
+    except Exception:
+        return {"mapped": False, "reason": "unreadable"}
+
+    lower_headers = {str(h).lower(): str(h) for h in headers}
+    mapped_col = (
+        cfg.get("metadata_schema", {})
+        .get("column_map", {})
+        .get("session_id")
+    )
+    if mapped_col:
+        original = lower_headers.get(str(mapped_col).lower())
+        if original is not None:
+            return {
+                "mapped": True,
+                "session_id_column": original,
+                "reason": "explicit",
+            }
+
+    from metadata_schema import SESSION_ALIASES
+
+    for alias in SESSION_ALIASES:
+        original = lower_headers.get(str(alias).lower())
+        if original is not None:
+            return {
+                "mapped": True,
+                "session_id_column": original,
+                "auto_detected": True,
+                "reason": "alias",
+            }
+    return {"mapped": False, "reason": "not_found", "headers": headers}
+
+
 def _candidate_paths(app_cfg: dict[str, Any], repo_root: Path) -> list[Path]:
     paths: list[Path] = []
     projects_dir = repo_root / "projects"
