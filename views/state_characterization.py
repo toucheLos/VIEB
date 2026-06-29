@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QPushButton, QScrollArea, QSplitter,
+    QLineEdit, QListWidget, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QTabWidget, QTableWidget, QTableWidgetItem, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -87,10 +88,12 @@ class StateCharacterizationView(QWidget):
         self.cfg = cfg or {}
         self._data: dict = {}
         self._worker = None
+        self._running_command = ""
         self._state_ids: list[int] = []
         self._heuristic_labels: dict[int, str] = {}
         self._kin_metrics: dict[str, float] = {}
         self._exemplar_df: pd.DataFrame | None = None
+        self._poles: dict = {}
         self._ref_width = 900
         self._build()
 
@@ -115,6 +118,72 @@ class StateCharacterizationView(QWidget):
         lay.addWidget(terminal)
         return outer
 
+    def _build_poles_panel(self) -> QWidget:
+        """Compact two-card panel showing low- and high-motion pole states."""
+        outer = QWidget()
+        vl = QVBoxLayout(outer)
+        vl.setContentsMargins(0, 0, 0, 4)
+        vl.setSpacing(4)
+
+        title = QLabel("Movement Poles")
+        title.setStyleSheet("font-weight:bold; font-size:11px; color:#555; letter-spacing:0.5px;")
+        vl.addWidget(title)
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(8)
+
+        for attr_prefix, pole_title, color in [
+            ("_low",  "Frozen / Low-Motion Pole",      "#E8F4FD"),
+            ("_high", "Locomotion / High-Motion Pole",  "#EDF7ED"),
+        ]:
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame{{background:{color};border:1px solid #D0D0D0;"
+                "border-radius:6px;padding:4px 8px;}}"
+            )
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(6, 4, 6, 6)
+            cl.setSpacing(2)
+
+            t = QLabel(pole_title)
+            t.setStyleSheet("font-size:10px; font-weight:bold; color:#444;")
+            cl.addWidget(t)
+
+            state_lbl = QLabel("—")
+            state_lbl.setStyleSheet("font-size:12px; font-weight:bold; color:#1A1A1A;")
+            cl.addWidget(state_lbl)
+            setattr(self, attr_prefix + "_state_lbl", state_lbl)
+
+            speed_lbl = QLabel("Speed (z): —")
+            speed_lbl.setStyleSheet("font-size:10px; color:#555;")
+            cl.addWidget(speed_lbl)
+            setattr(self, attr_prefix + "_speed_lbl", speed_lbl)
+
+            bouts_lbl = QLabel("Bouts: —")
+            bouts_lbl.setStyleSheet("font-size:10px; color:#555;")
+            cl.addWidget(bouts_lbl)
+            setattr(self, attr_prefix + "_bouts_lbl", bouts_lbl)
+
+            warn_lbl = QLabel("")
+            warn_lbl.setWordWrap(True)
+            warn_lbl.setStyleSheet("font-size:9px; color:#B25E00; font-style:italic;")
+            warn_lbl.hide()
+            cl.addWidget(warn_lbl)
+            setattr(self, attr_prefix + "_warn_lbl", warn_lbl)
+
+            key = "low" if attr_prefix == "_low" else "high"
+            clip_btn = QPushButton("Load Exemplar")
+            clip_btn.setFixedHeight(22)
+            clip_btn.setStyleSheet("font-size:10px;")
+            clip_btn.clicked.connect(lambda _checked=False, k=key: self._load_pole_clip(k))
+            cl.addWidget(clip_btn)
+            setattr(self, attr_prefix + "_clip_btn", clip_btn)
+
+            cards_row.addWidget(card, stretch=1)
+
+        vl.addLayout(cards_row)
+        return outer
+
     def _build(self) -> None:
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 20, 16)
@@ -127,6 +196,10 @@ class StateCharacterizationView(QWidget):
             self._terminal,
         )
         lay.addWidget(hdr)
+
+        self._poles_panel = self._build_poles_panel()
+        self._poles_panel.hide()
+        lay.addWidget(self._poles_panel)
 
         self._splitter = QSplitter(Qt.Horizontal)
         splitter = self._splitter
@@ -214,6 +287,7 @@ class StateCharacterizationView(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         right = QWidget()
+        right.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         rl = QVBoxLayout(right)
         rl.setContentsMargins(8, 0, 4, 8)
         rl.setSpacing(8)
@@ -532,6 +606,8 @@ class StateCharacterizationView(QWidget):
         self._id_col = id_col
         self._ctx_enrich = ctx_enrich
         self._compute_heuristic_labels(ss, id_col)
+        self._load_poles()
+        self._update_poles_panel()
         self._populate_list()
 
     def _compute_heuristic_labels(self, ss: pd.DataFrame, id_col: str) -> None:
@@ -1113,6 +1189,90 @@ class StateCharacterizationView(QWidget):
         ]
         pd.DataFrame(rows).to_csv(p, index=False)
 
+    # ─────────────────────────────────── Movement poles ──
+
+    def _load_poles(self) -> None:
+        p = RESULTS / "characterization" / "poles.json"
+        if not p.exists():
+            self._poles = {}
+            return
+        try:
+            self._poles = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            self._poles = {}
+
+    def _update_poles_panel(self) -> None:
+        if not self._poles:
+            self._poles_panel.hide()
+            return
+
+        for attr_prefix, pole_key in [("_low", "low_motion"), ("_high", "high_motion")]:
+            pole = self._poles.get(pole_key, {})
+            sid = pole.get("state_id")
+            speed = pole.get("speed_zscore")
+            n_bouts = pole.get("n_bouts", 0)
+            warn = pole.get("warning", "") or ""
+            pole_type = pole.get("type", "unavailable")
+
+            state_lbl: QLabel = getattr(self, attr_prefix + "_state_lbl")
+            speed_lbl: QLabel = getattr(self, attr_prefix + "_speed_lbl")
+            bouts_lbl: QLabel = getattr(self, attr_prefix + "_bouts_lbl")
+            warn_lbl:  QLabel = getattr(self, attr_prefix + "_warn_lbl")
+            clip_btn: QPushButton = getattr(self, attr_prefix + "_clip_btn")
+
+            if pole_type == "unavailable" or sid is None:
+                state_lbl.setText("—")
+                speed_lbl.setText("Speed (z): —")
+                bouts_lbl.setText("Bouts: —")
+                clip_btn.setEnabled(False)
+            else:
+                state_lbl.setText(f"State {sid}")
+                speed_lbl.setText(f"Speed (z): {speed:+.3f}" if speed is not None else "Speed (z): —")
+                bouts_lbl.setText(f"Bouts: {n_bouts}")
+                clip_btn.setEnabled(True)
+
+            if warn:
+                warn_lbl.setText(warn)
+                warn_lbl.show()
+            else:
+                warn_lbl.hide()
+
+        self._poles_panel.show()
+
+    def _load_pole_clip(self, pole_key: str) -> None:
+        """Load first available exemplar clip for the pole state (lazy)."""
+        pole = self._poles.get(pole_key + "_motion", {})
+        sid = pole.get("state_id")
+        if sid is None:
+            return
+        df = self._load_exemplar_manifest()
+        if df.empty or "state_id" not in df.columns:
+            self._clip_status.setText(f"No exemplar manifest found for State {sid}.")
+            return
+        mask = (
+            (pd.to_numeric(df["state_id"], errors="coerce") == sid)
+            & df["clip_path"].fillna("").astype(str).ne("")
+            & df.get("skipped_reason", pd.Series("", index=df.index)).fillna("").astype(str).eq("")
+        )
+        sub = df[mask]
+        if sub.empty:
+            self._clip_status.setText(f"No exemplar clips for State {sid}.")
+            return
+        if "rank" in sub.columns:
+            sub = sub.sort_values("rank", na_position="last")
+        path = self._resolve_exemplar_clip_path(str(sub.iloc[0]["clip_path"]))
+        if not path or not path.exists():
+            self._clip_status.setText(f"Clip file not found: {path}")
+            return
+        self._clip_status.setText(path.name)
+        if self._player:
+            try:
+                self._player.load(str(path))
+                if self._autoplay_cb.isChecked():
+                    self._player.play()
+            except Exception:
+                self._clip_status.setText(f"Error loading {path.name}")
+
     def _load_exemplar_manifest(self) -> pd.DataFrame:
         p = RESULTS / "characterization" / "state_exemplars.csv"
         if not p.exists():
@@ -1304,7 +1464,9 @@ class StateCharacterizationView(QWidget):
     def _run_command(self, args: list[str], terminal: TerminalBox) -> None:
         if self._worker and self._worker.isRunning():
             return
-        terminal.set_command("python " + " ".join(str(a) for a in args))
+        command = "python " + " ".join(str(a) for a in args)
+        terminal.set_command(command)
+        self._running_command = command
         self._worker = SubprocessWorker(args)
         self._worker.log.connect(terminal.append_output)
         self._worker.done.connect(self._on_run_done)
@@ -1317,4 +1479,5 @@ class StateCharacterizationView(QWidget):
 
     def _on_run_done(self, ok: bool) -> None:
         self.worker_running.emit(False)
+        self._running_command = ""
         self._load()

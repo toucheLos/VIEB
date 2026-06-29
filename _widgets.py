@@ -496,12 +496,6 @@ class StageRow(QFrame):
             self._collapse.toggled.connect(lambda v: self.changed.emit("enable_state_collapse", v))
             params.addWidget(self._collapse)
             has_params = True
-        if self.stage["id"] == 11:
-            self._clips = QCheckBox("Export video clips")
-            self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
-            self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
-            params.addWidget(self._clips)
-            has_params = True
         if self.stage["id"] == 5:
             self._diagnose_btn = QPushButton("Diagnose")
             self._diagnose_btn.setFixedHeight(26)

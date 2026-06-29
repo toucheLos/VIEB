@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import tempfile
@@ -136,18 +137,36 @@ def _section_title(text: str) -> QLabel:
     return lbl
 
 
+def _scroll_content_widget() -> tuple[QWidget, QVBoxLayout]:
+    content = QWidget()
+    content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+    layout = QVBoxLayout(content)
+    layout.setSpacing(16)
+    return content, layout
+
+
+def _set_table_height_for_rows(table: QTableWidget, max_height: int = 900) -> None:
+    rows = max(1, table.rowCount())
+    header_h = table.horizontalHeader().height() if table.horizontalHeader() else 28
+    row_h = table.verticalHeader().defaultSectionSize() if table.verticalHeader() else 24
+    frame = table.frameWidth() * 2
+    table.setMinimumHeight(min(max_height, header_h + frame + (rows * row_h) + 8))
+
+
 # ---------------------------------------------------------------------------
 # AnalysisView
 # ---------------------------------------------------------------------------
 
 class AnalysisView(QWidget):
     worker_running = pyqtSignal(bool)
+    navigate_cluster_runs = pyqtSignal()
 
     def __init__(self, cfg: dict | None = None):
         super().__init__()
         self.cfg = cfg or {}
         self._data: dict = {}
         self._worker = None
+        self._running_command = ""
         self._jess_df = None
         self._current_tab = 0
         # Each entry is True when that tab needs a redraw (indexed by stack position).
@@ -273,13 +292,30 @@ class AnalysisView(QWidget):
         right_panel.setContentsMargins(0, 0, 0, 0)
         right_panel.setSpacing(0)
 
+        self._active_run_bar = QWidget()
+        banner_lay = QHBoxLayout(self._active_run_bar)
+        banner_lay.setContentsMargins(0, 0, 0, 0)
+        banner_lay.setSpacing(0)
+
         self._active_run_banner = QLabel("")
         self._active_run_banner.setStyleSheet(
             "background:#E3F2FD;color:#1565c0;padding:6px 16px;font-size:12px;font-weight:600;"
-            "border-bottom:1px solid #BBDEFB;"
+            "border-bottom:1px solid #BBDEFB;border:none;"
         )
-        self._active_run_banner.setVisible(False)
-        right_panel.addWidget(self._active_run_banner)
+        banner_lay.addWidget(self._active_run_banner, stretch=1)
+
+        self._switch_cluster_btn = QPushButton("Open Cluster Runs")
+        self._switch_cluster_btn.setFixedHeight(30)
+        self._switch_cluster_btn.setCursor(Qt.PointingHandCursor)
+        self._switch_cluster_btn.setStyleSheet(
+            "QPushButton{background:#E3F2FD;color:#1565c0;border:none;"
+            "border-bottom:1px solid #BBDEFB;padding:0 14px;font-weight:600;}"
+            "QPushButton:hover{background:#BBDEFB;}"
+        )
+        self._switch_cluster_btn.clicked.connect(self.navigate_cluster_runs.emit)
+        banner_lay.addWidget(self._switch_cluster_btn)
+        self._active_run_bar.setVisible(False)
+        right_panel.addWidget(self._active_run_bar)
         right_panel.addWidget(self._stack, stretch=1)
 
         root_lay.addLayout(right_panel, stretch=1)
@@ -354,9 +390,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t1_placeholder = _placeholder(
             "No comparison data found.\n"
@@ -424,9 +458,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t2_placeholder = _placeholder(
             "No motif data found.\n"
@@ -435,8 +467,23 @@ class AnalysisView(QWidget):
         )
         cl.addWidget(self._t2_placeholder)
 
+        # ── Section A — State Transitions ────────────────────────────────
+        cl.addWidget(_section_title("A · State Transitions"))
         if _MPL:
-            cl.addWidget(_section_title("Top Context-Enriched Motifs"))
+            self._t2_trans_canvas = MplCanvas(figsize=(9, 3.5))
+            self._t2_trans_canvas.setMinimumHeight(280)
+            cl.addWidget(self._t2_trans_canvas)
+        else:
+            self._t2_trans_canvas = None
+        self._t2_trans_placeholder = _placeholder(
+            "No transition data found.\n"
+            "Run Report (compare.py --report) to generate transition_by_context.png."
+        )
+        cl.addWidget(self._t2_trans_placeholder)
+
+        # ── Section B — Top Context-Enriched Multi-State Motifs ───────────
+        cl.addWidget(_section_title("B · Top Context-Enriched Multi-State Motifs"))
+        if _MPL:
             self._t2_canvas = MplCanvas(figsize=(9, 3.2))
             self._t2_canvas.setMinimumHeight(280)
             cl.addWidget(self._t2_canvas)
@@ -444,7 +491,6 @@ class AnalysisView(QWidget):
             self._t2_canvas = None
             cl.addWidget(_placeholder("Install matplotlib to view charts."))
 
-        cl.addWidget(_section_title("Motif Enrichment Table"))
         self._t2_table = QTableWidget(0, 6)
         self._t2_table.setHorizontalHeaderLabels(
             ["Motif", "Type", "Context A", "Context B", "Enrichment", "95% CI"]
@@ -452,11 +498,35 @@ class AnalysisView(QWidget):
         self._t2_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._t2_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._t2_table.setSortingEnabled(True)
-        self._t2_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        cl.addWidget(self._t2_table, stretch=1)
+        self._t2_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        cl.addWidget(self._t2_table)
 
-        # Motif exemplar clips section
-        cl.addWidget(_section_title("Motif Exemplar Clips"))
+        # ── Section C — Bout Duration by Context ──────────────────────────
+        cl.addWidget(_section_title("C · Bout Duration by Context"))
+        dur_desc = QLabel(
+            "How long each state persists per context (separate from sequence "
+            "motifs). Enrichment > 1 means longer-than-average bouts in that context."
+        )
+        dur_desc.setWordWrap(True)
+        dur_desc.setStyleSheet("color:#666; font-size:11px; padding-bottom:4px;")
+        cl.addWidget(dur_desc)
+        self._t2_dur_table = QTableWidget(0, 6)
+        self._t2_dur_table.setHorizontalHeaderLabels(
+            ["State", "Context", "Bouts", "Mean (s)", "Median (s)", "Enrichment"]
+        )
+        self._t2_dur_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._t2_dur_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._t2_dur_table.setSortingEnabled(True)
+        self._t2_dur_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        cl.addWidget(self._t2_dur_table)
+        self._t2_dur_placeholder = _placeholder(
+            "No bout-duration data found.\n"
+            "Run Motifs (compare.py --motifs) after Report to generate it."
+        )
+        cl.addWidget(self._t2_dur_placeholder)
+
+        # ── Section D — Motif Example Clips ───────────────────────────────
+        cl.addWidget(_section_title("D · Motif Example Clips"))
         clip_row = QHBoxLayout()
         self._t2_gen_clips_btn = QPushButton("Generate Motif Clips")
         self._t2_gen_clips_btn.setFixedHeight(30)
@@ -482,10 +552,12 @@ class AnalysisView(QWidget):
         self._t2_clips_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._t2_clips_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._t2_clips_table.setSortingEnabled(True)
-        self._t2_clips_table.setMaximumHeight(250)
+        self._t2_clips_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self._t2_clips_table.doubleClicked.connect(self._open_motif_clip)
         self._t2_clips_table.hide()
         cl.addWidget(self._t2_clips_table)
+
+        cl.addStretch()
 
         scroll.setWidget(content)
         lay.addWidget(scroll, stretch=1)
@@ -544,9 +616,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t3_placeholder = _placeholder(
             "No quantification data found.\n\n"
@@ -661,9 +731,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t5_placeholder = _placeholder(
             "No fear index data found.\n\n"
@@ -747,9 +815,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t6_placeholder = _placeholder(
             "Import Jess protein data above, then click 'Run Correlation'."
@@ -863,7 +929,7 @@ class AnalysisView(QWidget):
     def _update_active_run_banner(self) -> None:
         rm = self._data.get("run_manifest") if self._data else None
         if not rm:
-            self._active_run_banner.setVisible(False)
+            self._active_run_bar.setVisible(False)
             return
         run_id = rm.get("run_id", "")
         n = rm.get("n_clusters", "?")
@@ -873,9 +939,9 @@ class AnalysisView(QWidget):
         ms_res = rm.get("min_samples_resolved", rm.get("hdbscan_min_samples", ""))
         ms_text = f" | min_samples=Auto (→{ms_res})" if ms_req == 0 and ms_res else ""
         self._active_run_banner.setText(
-            f"Active: {run_id}  |  {n} states  |  noise: {noise_pct}{ms_text}"
+            f"Active cluster: {run_id}  |  {n} states  |  noise: {noise_pct}{ms_text}"
         )
-        self._active_run_banner.setVisible(True)
+        self._active_run_bar.setVisible(True)
 
     # ─────────────────────── Tab 1 loader ──
 
@@ -997,6 +1063,13 @@ class AnalysisView(QWidget):
     # ─────────────────────── Tab 2 loader ──
 
     def _load_tab2(self) -> None:
+        # Sections A (transitions), C (bout duration) and D (clips) are
+        # independent of the motif enrichment table, so render them before any
+        # early return — clips can exist even without comparison/motifs.csv.
+        self._load_transition_section()
+        self._load_bout_duration_section()
+        self._load_motif_clips()
+
         motifs = self._data.get("motifs") if isinstance(self._data, dict) else None
         if motifs is None or motifs.empty:
             motif_path = RESULTS / "comparison" / "motifs.csv"
@@ -1005,6 +1078,12 @@ class AnalysisView(QWidget):
                     motifs = pd.read_csv(motif_path)
                 except Exception:
                     motifs = None
+
+        # Defensive guard: drop degenerate motifs (e.g. (48, 48)) from older CSVs
+        # that predate the source-side filter. These encode bout duration only.
+        if motifs is not None and not motifs.empty and "motif" in motifs.columns:
+            keep = ~motifs["motif"].map(self._motif_is_degenerate)
+            motifs = motifs[keep]
 
         has_data = motifs is not None and not motifs.empty
         self._t2_placeholder.setVisible(not has_data)
@@ -1048,6 +1127,7 @@ class AnalysisView(QWidget):
                     txt = f"{val:.4f}" if isinstance(val, float) else str(val)
                 self._t2_table.setItem(ri, ci, QTableWidgetItem(txt))
         self._t2_table.setSortingEnabled(True)
+        _set_table_height_for_rows(self._t2_table, max_height=1200)
 
         if not self._t2_canvas or not _MPL:
             return
@@ -1083,11 +1163,80 @@ class AnalysisView(QWidget):
         canvas.fig.tight_layout()
         canvas.draw()
 
-        # Load motif clips index
-        self._load_motif_clips()
+    @staticmethod
+    def _motif_is_degenerate(motif_str) -> bool:
+        """True if every state in a motif tuple string is identical, e.g. '(48, 48)'.
+
+        Parse failures default to False (keep the row).
+        """
+        try:
+            value = ast.literal_eval(str(motif_str))
+        except (ValueError, SyntaxError):
+            return False
+        if isinstance(value, (list, tuple)):
+            return len(set(value)) <= 1
+        return False
+
+    def _load_transition_section(self) -> None:
+        """Section A — render transition_by_context.png from --report."""
+        canvas = getattr(self, "_t2_trans_canvas", None)
+        png_path = RESULTS / "comparison" / "transition_by_context.png"
+        has_png = png_path.exists()
+        self._t2_trans_placeholder.setVisible(not has_png)
+        if canvas is None:
+            return
+        canvas.setVisible(has_png)
+        if not has_png or not _MPL:
+            return
+        try:
+            canvas.fig.clf()
+            ax = canvas.fig.add_subplot(111)
+            ax.imshow(mpimg.imread(str(png_path)))
+            ax.axis("off")
+            canvas.fig.tight_layout()
+            canvas.draw()
+        except Exception:
+            self._t2_trans_placeholder.setVisible(True)
+            canvas.setVisible(False)
+
+    def _load_bout_duration_section(self) -> None:
+        """Section C — bout_duration_by_context.csv table."""
+        p = RESULTS / "comparison" / "bout_duration_by_context.csv"
+        df = None
+        if p.exists():
+            try:
+                df = pd.read_csv(p)
+            except Exception:
+                df = None
+        has_data = df is not None and not df.empty
+        self._t2_dur_placeholder.setVisible(not has_data)
+        self._t2_dur_table.setVisible(has_data)
+        if not has_data:
+            self._t2_dur_table.setRowCount(0)
+            return
+
+        df = df.sort_values(
+            [c for c in ("state_id", "context") if c in df.columns]
+        )
+        self._t2_dur_table.setSortingEnabled(False)
+        self._t2_dur_table.setRowCount(len(df))
+        for ri, (_, row) in enumerate(df.iterrows()):
+            def _fmt(val, suffix=""):
+                try:
+                    return f"{float(val):.2f}{suffix}"
+                except (TypeError, ValueError):
+                    return str(val)
+            self._t2_dur_table.setItem(ri, 0, QTableWidgetItem(str(row.get("state_id", ""))))
+            self._t2_dur_table.setItem(ri, 1, QTableWidgetItem(str(row.get("context", ""))))
+            self._t2_dur_table.setItem(ri, 2, QTableWidgetItem(str(row.get("bout_count", ""))))
+            self._t2_dur_table.setItem(ri, 3, QTableWidgetItem(_fmt(row.get("mean_bout_dur_sec"))))
+            self._t2_dur_table.setItem(ri, 4, QTableWidgetItem(_fmt(row.get("median_bout_dur_sec"))))
+            self._t2_dur_table.setItem(ri, 5, QTableWidgetItem(_fmt(row.get("duration_enrichment"), "×")))
+        self._t2_dur_table.setSortingEnabled(True)
+        _set_table_height_for_rows(self._t2_dur_table, max_height=900)
 
     def _load_motif_clips(self) -> None:
-        idx_path = RESULTS / "motifs" / "motif_clip_index.csv"
+        idx_path = RESULTS / "motifs" / "motif_exemplars.csv"
         if not idx_path.exists():
             self._t2_clips_placeholder.show()
             self._t2_clips_table.hide()
@@ -1121,6 +1270,7 @@ class AnalysisView(QWidget):
                 f"{dur:.1f}s" if isinstance(dur, (int, float)) else str(dur)
             ))
         self._t2_clips_table.setSortingEnabled(True)
+        _set_table_height_for_rows(self._t2_clips_table, max_height=900)
 
     def _generate_motif_clips(self) -> None:
         self._run_command(
@@ -1144,7 +1294,7 @@ class AnalysisView(QWidget):
         clip_rel = self._t2_clips_table.item(row, 2)
         if not clip_rel:
             return
-        idx_path = RESULTS / "motifs" / "motif_clip_index.csv"
+        idx_path = RESULTS / "motifs" / "motif_exemplars.csv"
         if not idx_path.exists():
             return
         try:
@@ -1771,9 +1921,7 @@ class AnalysisView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        cl = QVBoxLayout(content)
-        cl.setSpacing(16)
+        content, cl = _scroll_content_widget()
 
         self._t7_placeholder = _placeholder(
             "No event alignment data found.\n\n"
@@ -1901,8 +2049,12 @@ class AnalysisView(QWidget):
     def _build_tab8(self) -> QWidget:
         from views.state_characterization import StateCharacterizationView
         self._scv_widget = StateCharacterizationView(self.cfg)
-        self._scv_widget.worker_running.connect(self.worker_running.emit)
+        self._scv_widget.worker_running.connect(self._on_state_characterization_running)
         return self._scv_widget
+
+    def _on_state_characterization_running(self, running: bool) -> None:
+        self._running_command = getattr(self._scv_widget, "_running_command", "") if running else ""
+        self.worker_running.emit(running)
 
     def _load_tab8(self) -> None:
         if self._data:
@@ -2135,24 +2287,29 @@ class AnalysisView(QWidget):
             ok_lbl.setStyleSheet("color:#2e7d32; font-size:12px; padding:8px 0;")
             self._diag_warnings_lay.addWidget(ok_lbl)
         for w in warnings:
-            level = w.get("level", "info")
+            if isinstance(w, dict):
+                level   = w.get("level", "info")
+                message = w.get("message", "")
+                action  = w.get("action")
+            else:
+                level, message, action = "warning", str(w), None
             if level == "error":
                 color, icon = "#c62828", "✕"
             elif level == "warning":
                 color, icon = "#e65100", "⚠"
             else:
                 color, icon = "#1565c0", "ℹ"
-            lbl = QLabel(f"{icon}  {w.get('message', '')}")
+            lbl = QLabel(f"{icon}  {message}")
             lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color:{color}; font-size:12px; padding:4px 0;")
-            if w.get("action"):
-                lbl.setToolTip(w["action"])
+            if action:
+                lbl.setToolTip(action)
             self._diag_warnings_lay.addWidget(lbl)
 
         # -- Recommended action (first error or warning with an action) --
         action_text = None
         for w in warnings:
-            if w.get("level") in ("error", "warning") and w.get("action"):
+            if isinstance(w, dict) and w.get("level") in ("error", "warning") and w.get("action"):
                 action_text = w["action"]
                 break
         if action_text:
@@ -2193,7 +2350,9 @@ class AnalysisView(QWidget):
     def _run_command(self, args: list[str], terminal: TerminalBox) -> None:
         if self._worker and self._worker.isRunning():
             return
-        terminal.set_command("python " + " ".join(str(a) for a in args))
+        command = "python " + " ".join(str(a) for a in args)
+        terminal.set_command(command)
+        self._running_command = command
         self._worker = SubprocessWorker(args)
         self._worker.log.connect(terminal.append_output)
         self._worker.done.connect(self._on_run_done)
@@ -2206,6 +2365,7 @@ class AnalysisView(QWidget):
 
     def _on_run_done(self, ok: bool) -> None:
         self.worker_running.emit(False)
+        self._running_command = ""
         # Pipeline output changed — all tabs need a fresh render on next visit.
         self._mark_all_dirty()
         self._load_current_tab()

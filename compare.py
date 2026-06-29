@@ -756,14 +756,16 @@ def cmd_fix_features(fps: float = 30.0):
 
     # ---- Update index metadata to reflect the now-consistent settings ----
     old_meta = index.get("_meta", {})
-    new_meta = {
-        "n_keypoints": target_n_keypoints,
-        "n_features": target_n_features,
-        "use_wavelets": use_wavelets,
-        "vieb_version": old_meta.get("vieb_version", "1.0"),
-    }
-    if "pose_source" in old_meta:
-        new_meta["pose_source"] = old_meta["pose_source"]
+    # Start from a copy so no existing field is silently dropped.
+    new_meta = dict(old_meta)
+    new_meta["n_keypoints"] = target_n_keypoints
+    new_meta["n_features"] = target_n_features
+    new_meta["use_wavelets"] = use_wavelets
+    new_meta.setdefault("vieb_version", "1.0")
+    # Rebuild feature_names and semantic_features from the now-configured extractor.
+    _fm = extractor.get_feature_meta(n_keypoints=target_n_keypoints)
+    new_meta["feature_names"] = _fm.get("feature_names", [])
+    new_meta["semantic_features"] = _fm.get("semantic_features", [])
     index["_meta"] = new_meta
 
     with open(index_path, "w") as f:
@@ -987,6 +989,22 @@ def _auto_save_previous_run() -> str | None:
     return run_id
 
 
+def _migrate_index_meta(meta: dict) -> dict:
+    """Normalize old _meta formats to the current schema in-memory.
+
+    - ``feature_count`` (old key) → ``n_features``
+    - ``use_wavelets`` absent → left as absent (not defaulted to True/False)
+
+    Does NOT write to disk; callers persist if needed.
+    """
+    if not isinstance(meta, dict):
+        return {}
+    out = dict(meta)
+    if "n_features" not in out and "feature_count" in out:
+        out["n_features"] = out["feature_count"]
+    return out
+
+
 def _write_current_run_manifest(
     min_cluster_size: int,
     umap_dims: int,
@@ -1037,6 +1055,22 @@ def _write_current_run_manifest(
         "assignment_method": assignment_method,
         "saved": False,
     }
+
+    # Attach feature metadata so the manifest is self-contained.
+    _index_path = os.path.join(_res(), "features", "index.json")
+    if os.path.exists(_index_path):
+        try:
+            with open(_index_path) as _f:
+                _idx = json.load(_f)
+            _feat_meta = _migrate_index_meta(_idx.get("_meta", {}))
+            _nf = _feat_meta.get("n_features")
+            if _nf is not None:
+                manifest["n_features"] = int(_nf)
+            _uw = _feat_meta.get("use_wavelets")
+            manifest["use_wavelets"] = bool(_uw) if _uw is not None else None
+        except Exception:
+            pass
+
     with open(os.path.join(_res(), "shared", "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
@@ -1053,6 +1087,75 @@ def _write_current_run_manifest(
         json.dump(cfg_data, f, indent=2)
 
     return run_id
+
+
+def _write_overview_summary(
+    summary: pd.DataFrame,
+    cluster_info: dict,
+    feature_index: dict,
+    *,
+    active_run_id: str | None = None,
+) -> None:
+    """Write the small Overview-only summary used by GUI startup."""
+    shared_dir = os.path.join(_res(), "shared")
+    os.makedirs(shared_dir, exist_ok=True)
+
+    n_states = int(cluster_info.get("n_clusters", 0) or 0)
+    state_cols = [
+        f"state_{i}_frac"
+        for i in range(n_states)
+        if f"state_{i}_frac" in summary.columns
+    ]
+    state_means = {
+        str(int(col.split("_")[1])): float(summary[col].mean())
+        for col in state_cols
+    }
+    noise_fraction = None
+    if state_cols:
+        noise_fraction = max(0.0, 1.0 - float(summary[state_cols].sum(axis=1).mean()))
+
+    total_frames = 0
+    if isinstance(feature_index, dict):
+        for key, value in feature_index.items():
+            if key == "_meta" or not isinstance(value, dict):
+                continue
+            total_frames += int(value.get("n_frames", 0) or 0)
+
+    run_manifest = {}
+    manifest_path = os.path.join(shared_dir, "run_manifest.json")
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                run_manifest = json.load(f)
+        except Exception:
+            run_manifest = {}
+
+    from datetime import datetime as _dt
+    now = _dt.now().isoformat()
+    overview = {
+        "schema_version": 1,
+        "generated_at": now,
+        "last_run_time": run_manifest.get("finished_at") or run_manifest.get("date") or now,
+        "active_run_id": active_run_id or run_manifest.get("run_id") or "",
+        "total_videos": int(len(summary)),
+        "total_frames": int(total_frames),
+        "n_states": n_states,
+        "noise_fraction": noise_fraction,
+        "state_means": state_means,
+        "markers": {
+            "features": os.path.exists(os.path.join(_res(), "features", "index.json")),
+            "clusters": os.path.exists(os.path.join(_res(), "shared", "cluster_info.json")),
+            "report": True,
+            "summary": True,
+            "motifs": (
+                os.path.exists(os.path.join(_res(), "comparison", "motifs.csv"))
+                or os.path.exists(os.path.join(_res(), "motifs", "motif_summary.csv"))
+            ),
+        },
+    }
+    with open(os.path.join(shared_dir, "overview_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(overview, f, indent=2)
+    print("Overview summary saved: results/shared/overview_summary.json")
 
 
 def _extract_hdbscan_outputs(clusterer_model) -> tuple[np.ndarray, np.ndarray]:
@@ -1246,7 +1349,7 @@ def cmd_cluster(
         sys.exit("Index is empty. Run --extract first.")
 
     # ---- Validate feature dimension consistency ----
-    meta_info = index.get("_meta")
+    meta_info = _migrate_index_meta(index.get("_meta") or {}) or None
     if meta_info:
         expected_n_features = meta_info.get("n_features")
         expected_n_keypoints = meta_info.get("n_keypoints")
@@ -1921,15 +2024,16 @@ def _generate_diagnostics(
     # ---- Load index metadata for feature info ----
     index_path = os.path.join(_res(), "features", "index.json")
     n_features = 0
-    use_wavelets = True
+    use_wavelets = None  # None = unknown; never infer True/False when key is absent
     semantic_features: list[str] = []
     keypoint_groups: dict = {}
     if os.path.exists(index_path):
         with open(index_path) as f:
             idx = json.load(f)
-        meta = idx.get("_meta", {})
+        meta = _migrate_index_meta(idx.get("_meta", {}))
         n_features = int(meta.get("n_features", 0))
-        use_wavelets = bool(meta.get("use_wavelets", True))
+        _uw = meta.get("use_wavelets")
+        use_wavelets = bool(_uw) if _uw is not None else None
         semantic_features = meta.get("semantic_features", [])
         keypoint_groups = meta.get("keypoint_groups", {})
 
@@ -2051,6 +2155,7 @@ def _generate_diagnostics(
 
     # ---- UMAP 2D sample for scatter visualization ----
     _save_umap_sample(all_labels, all_probs, pooled_umap, diag_dir, n_clusters)
+    _save_umap_embedding_plot(diag_dir)
 
     # ---- Overview plot ----
     _save_diagnostics_plot(diagnostics, occ_df, diag_dir)
@@ -2102,6 +2207,47 @@ def _save_umap_sample(
         "prob": sampled_probs,
     })
     sample_df.to_csv(os.path.join(diag_dir, "umap_sample.csv"), index=False)
+
+
+def _save_umap_embedding_plot(diag_dir: str) -> None:
+    """Save a standalone UMAP embedding visualization colored by state."""
+    umap_path = os.path.join(diag_dir, "umap_sample.csv")
+    if not os.path.exists(umap_path):
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+    except ImportError:
+        return
+
+    umap_df = pd.read_csv(umap_path)
+    if umap_df.empty:
+        return
+
+    valid = umap_df[umap_df["label"] >= 0]
+    noise = umap_df[umap_df["label"] < 0]
+    fig, ax = _plt.subplots(figsize=(7, 6))
+    if not noise.empty:
+        ax.scatter(
+            noise["umap_1"], noise["umap_2"],
+            c="#CCCCCC", s=1, alpha=0.25, rasterized=True, label="Noise",
+        )
+    if not valid.empty:
+        scatter = ax.scatter(
+            valid["umap_1"], valid["umap_2"],
+            c=valid["label"], cmap="tab20", s=1.2, alpha=0.55,
+            rasterized=True,
+        )
+        fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04, label="State")
+    ax.set_title("UMAP Embedding by State", fontsize=11, fontweight="bold")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(diag_dir, "umap_embedding_by_state.png"), dpi=150)
+    _plt.close(fig)
 
 
 def _save_diagnostics_plot(diagnostics: dict, occ_df: pd.DataFrame, diag_dir: str) -> None:
@@ -2572,6 +2718,34 @@ def _plot_animal_trajectories(df, state_cols, n_clusters):
     print(f"  Saved: {save_path}")
 
 
+def _save_state_occupancy_plot(df: pd.DataFrame, state_cols: list[str], save_path: str) -> None:
+    """Persist a compact global state occupancy figure for export/artifacts."""
+    if df.empty or not state_cols:
+        return
+    import matplotlib.pyplot as plt
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    means = df[state_cols].mean().fillna(0.0)
+    state_ids = [int(c.split("_")[1]) for c in state_cols]
+    fig_h = max(3.5, 0.24 * len(state_ids) + 1.4)
+    fig, ax = plt.subplots(figsize=(7.0, fig_h))
+    colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(state_ids))))
+    ax.barh(range(len(state_ids)), means.values * 100, color=colors, alpha=0.85)
+    ax.set_yticks(range(len(state_ids)))
+    ax.set_yticklabels([f"S{s}" for s in state_ids], fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("Mean session occupancy (%)")
+    ax.set_title("State Occupancy", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.xaxis.grid(True, color="#EEEEEE", zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> None:
     schema = _vc.get_metadata_schema()
     rows = []
@@ -2690,6 +2864,12 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         print(f"[warn] Could not write metadata schema report: {e}")
     df.to_csv(os.path.join(_res(), "comparison", "summary_table.csv"), index=False)
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
+    _write_overview_summary(
+        df,
+        cluster_info,
+        index,
+        active_run_id=cluster_info.get("run_id") or cluster_info.get("active_run_id"),
+    )
 
     # ---- Characterization: bouts.csv + state_summary.csv ----
     char_dir = os.path.join(_res(), "characterization")
@@ -2764,6 +2944,11 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     ss_path = os.path.join(char_dir, "state_summary.csv")
     pd.DataFrame(ss_rows).to_csv(ss_path, index=False)
     print(f"State summary saved: results/characterization/state_summary.csv  ({n_clusters} states)")
+    _save_state_occupancy_plot(
+        df,
+        state_cols,
+        os.path.join(char_dir, "state_occupancy.png"),
+    )
 
     # ---- Transition matrix outputs ----
     _trans_meta_cols = ["stem"] + [
@@ -2940,6 +3125,16 @@ def _format_motif(motif: tuple[int, ...]) -> str:
     return str(motif)
 
 
+def _is_degenerate_motif(motif: tuple[int, ...]) -> bool:
+    """True if every state in the tuple is identical, e.g. (48, 48), (3, 3, 3).
+
+    Such motifs encode bout duration (one state persisting), not sequence
+    structure, so they are excluded from motif ranking. Mixed tuples like
+    (12, 47) or (3, 3, 7) are not degenerate and are kept.
+    """
+    return len(set(motif)) <= 1
+
+
 def _pick_motif_contexts(context_values: list[str]) -> tuple[str, str]:
     available = sorted({str(v) for v in context_values if str(v) and str(v) != "nan"})
     if len(available) < 2:
@@ -3076,6 +3271,10 @@ def cmd_motifs(
         total_a = totals[context_a][typ]
         total_b = totals[context_b][typ]
         for motif in motifs:
+            # Skip degenerate motifs (a single state repeating); these encode
+            # bout duration, reported separately in bout_duration_by_context.csv.
+            if _is_degenerate_motif(motif):
+                continue
             count_a = int(counts[context_a][typ].get(motif, 0))
             count_b = int(counts[context_b][typ].get(motif, 0))
             freq_a = count_a / total_a if total_a else 0.0
@@ -3244,7 +3443,66 @@ def _write_bout_motifs(
     enrichment_df.to_csv(os.path.join(motifs_dir, "motif_context_enrichment.csv"), index=False)
     print(f"  Context enrichment: results/motifs/motif_context_enrichment.csv ({len(enrichment_df)} rows)")
 
+    # ---- Bout Duration by Context (separate from sequence motifs) ----
+    # Repeated-state "motifs" really measure how long a single state persists.
+    # That is a legitimate but distinct analysis, reported here rather than as a
+    # sequence motif.
+    _write_bout_duration_by_context(bouts, meta_by_stem)
+
     print(f"Motifs → results/motifs/")
+
+
+def _write_bout_duration_by_context(bouts: pd.DataFrame, meta_by_stem: pd.DataFrame):
+    """Per-(state, context) bout-duration summary → comparison/bout_duration_by_context.csv."""
+    if bouts is None or bouts.empty or "state" not in bouts.columns:
+        return
+
+    df = bouts.copy()
+    # Ensure a context column (bouts.csv has it when context is in metadata;
+    # otherwise derive from metadata by stem).
+    if "context" not in df.columns or df["context"].isna().all():
+        df["context"] = df["stem"].map(
+            lambda s: str(meta_by_stem.loc[s, "context"])
+            if s in meta_by_stem.index and "context" in meta_by_stem.columns else ""
+        )
+    df["context"] = df["context"].fillna("").astype(str)
+    df = df[df["context"].str.strip() != ""]
+    if df.empty:
+        return
+
+    # Duration: prefer existing column, else derive from frames (1 frame == 1 unit
+    # if start/end frames are present; left in frames is fine for relative compare,
+    # but we keep duration_sec semantics when available).
+    if "duration_sec" not in df.columns:
+        df = df.assign(duration_sec=df.get("end_frame", 0) - df.get("start_frame", 0) + 1)
+    df["duration_sec"] = pd.to_numeric(df["duration_sec"], errors="coerce")
+    df = df.dropna(subset=["duration_sec"])
+    if df.empty:
+        return
+
+    global_mean = df.groupby("state")["duration_sec"].mean()
+    rows = []
+    for (state, ctx), grp in df.groupby(["state", "context"]):
+        g_mean = float(global_mean.get(state, float("nan")))
+        ctx_mean = float(grp["duration_sec"].mean())
+        rows.append({
+            "state_id": int(state),
+            "context": ctx,
+            "bout_count": int(len(grp)),
+            "mean_bout_dur_sec": round(ctx_mean, 4),
+            "median_bout_dur_sec": round(float(grp["duration_sec"].median()), 4),
+            "global_mean_dur_sec": round(g_mean, 4) if g_mean == g_mean else float("nan"),
+            "duration_enrichment": (
+                round(ctx_mean / g_mean, 4) if g_mean and g_mean == g_mean else float("nan")
+            ),
+        })
+
+    out_df = pd.DataFrame(rows).sort_values(["state_id", "context"])
+    out_dir = os.path.join(_res(), "comparison")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "bout_duration_by_context.csv")
+    out_df.to_csv(out_path, index=False)
+    print(f"  Bout duration by context: results/comparison/bout_duration_by_context.csv ({len(out_df)} rows)")
 
 
 def cmd_summarize():
@@ -3316,6 +3574,45 @@ def cmd_event_align(min_confidence: float = 0.0):
                   f"  {info['dominant_state_A']}       {info['dominant_state_B']}")
 
 
+def _save_contrast_vector_comparison_plot(contrast_df: pd.DataFrame, save_path: str) -> None:
+    """Persist a comparison figure for per-cohort or per-animal contrast vectors."""
+    if contrast_df is None or contrast_df.empty or "contrast_magnitude" not in contrast_df.columns:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    plot_df = contrast_df.copy()
+    plot_df = plot_df[plot_df["contrast_magnitude"].notna()]
+    if plot_df.empty:
+        return
+    label_col = "cohort_label" if "cohort_label" in plot_df.columns else "animal_id"
+    if label_col not in plot_df.columns:
+        return
+
+    plot_df[label_col] = plot_df[label_col].astype(str)
+    plot_df = plot_df.sort_values("contrast_magnitude", ascending=True)
+    fig_h = max(3.5, 0.28 * len(plot_df) + 1.5)
+    fig, ax = plt.subplots(figsize=(8, fig_h))
+    colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(plot_df))))
+    ax.barh(plot_df[label_col].values, plot_df["contrast_magnitude"].astype(float).values, color=colors, alpha=0.85)
+    ax.set_xlabel("Contrast magnitude")
+    ax.set_ylabel("Cohort" if label_col == "cohort_label" else "Animal")
+    ax.set_title("Behavioral Contrast Vector Comparison", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.xaxis.grid(True, color="#EEEEEE", zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     """Build master_table.csv via quantify.py."""
     try:
@@ -3330,6 +3627,10 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
             summary_csv=os.path.join(_res(), "comparison", "summary_table.csv"),
             output_dir=os.path.join(_res(), "quantification"),
             cohort_csv=cohort,
+        )
+        _save_contrast_vector_comparison_plot(
+            contrast_df,
+            os.path.join(_res(), "comparison", "contrast_vector_comparison.png"),
         )
 
         master_path = os.path.join(_res(), "quantification", "master_table.csv")

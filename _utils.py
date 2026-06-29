@@ -318,68 +318,8 @@ def _wsl_elevate_install(extra_args: str = "") -> None:
     )
 
 
-STAGES = [
-    {
-        "id": 0,
-        "name": "Onboarding",
-        "desc": "Choose a project, import a session-defining data source, and prepare metadata.",
-        "cmd": "onboard project",
-    },
-    {
-        "id": 1,
-        "name": "Pose Estimation / DLC Analysis",
-        "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
-        "cmd": "python setup_dlc_training.py --analyze",
-    },
-    {
-        "id": 2,
-        "name": "Feature Extraction",
-        "desc": "Extract frame-level behavioral features from tracked keypoints.",
-        "cmd": "python compare.py --extract [--no-wavelets]",
-    },
-    {
-        "id": 3,
-        "name": "Preprocessing · UMAP · Clustering · Smoothing",
-        "desc": "Standardize features, reduce with UMAP, cluster with HDBSCAN, then smooth labels with HMM.",
-        "cmd": "python compare.py --cluster --min-cluster-size N --umap-dims N [--hdbscan-min-samples N] [--validate]",
-    },
-    {
-        "id": 4,
-        "name": "State Collapsing (optional)",
-        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
-        "cmd": "python compare.py --collapse --collapse-threshold 0.5",
-    },
-    {
-        "id": 5,
-        "name": "Report Generation",
-        "desc": "Build summary tables, transition outputs, and group comparison plots.",
-        "cmd": "python compare.py --report",
-    },
-    {
-        "id": 6,
-        "name": "Per-Animal Scalars",
-        "desc": "Compute freeze AUC and discrimination metrics for each animal.",
-        "cmd": "python compare.py --summarize",
-    },
-    {
-        "id": 7,
-        "name": "Motif Discovery",
-        "desc": "Find enriched bigram/trigram motifs between contexts.",
-        "cmd": "python compare.py --motifs",
-    },
-    {
-        "id": 8,
-        "name": "Generate Clips",
-        "desc": "Export exemplar video clips for each behavioral state.",
-        "cmd": "python generate_clips.py",
-    },
-    {
-        "id": 9,
-        "name": "Add Videos",
-        "desc": "Add more videos to the active project after a first pass or when expanding the dataset.",
-        "cmd": "open add videos",
-    },
-]
+# Stage registry lives in the dependency-free _stages module (single source of truth).
+from _stages import STAGES, _STAGE_BY_ID  # noqa: F401,E402
 
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},

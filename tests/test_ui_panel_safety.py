@@ -76,3 +76,20 @@ def test_panel_available_missing_optional_column():
 
     assert not ok
     assert "context" in reason
+
+
+def test_running_status_text_idle_running_without_command():
+    assert ui._running_status_text("") == "running"
+    assert ui._running_status_text(None) == "running"
+
+
+def test_running_status_text_includes_command():
+    assert ui._running_status_text("python compare.py --report") == "running: python compare.py --report"
+
+
+def test_running_status_text_elides_long_command():
+    text = ui._running_status_text("python " + "x" * 100, max_chars=24)
+
+    assert len(text) == 24
+    assert text.startswith("running: python")
+    assert text.endswith("\u2026")

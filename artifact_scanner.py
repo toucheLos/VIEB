@@ -39,20 +39,26 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("comparison/summary_table.csv", "Summary"),
     ("comparison/animal_scalars.csv", "Summary"),
     ("metadata_schema_report.json", "Summary"),
-    # States
-    ("characterization/state_summary.csv", "States"),
-    ("characterization/state_exemplars.csv", "States"),
-    ("characterization/labels_per_frame.csv", "States"),
-    ("characterization/context_report.csv", "States"),
+    # State characterization
+    ("characterization/state_occupancy.png", "State Characterization"),
+    ("characterization/state_summary.csv", "State Characterization"),
+    ("characterization/state_exemplars.csv", "State Characterization"),
+    ("characterization/labels_per_frame.csv", "State Characterization"),
+    ("characterization/context_report.csv", "State Characterization"),
+    ("characterization/state_", "State Characterization"),
     ("validation/state_labels.csv", "States"),
     # Bouts
     ("characterization/bouts.csv", "Bouts"),
     ("motifs/bouts.csv", "Bouts"),
     # Motifs
     ("comparison/motifs.csv", "Motifs"),
+    ("comparison/motif_", "Motifs"),
     ("motifs/", "Motifs"),
     # Transitions
     ("comparison/transition_", "Transitions"),
+    # Comparison
+    ("comparison/contrast_vector_comparison.png", "Comparison"),
+    ("comparison/state_by_", "Comparison"),
     # Diagnostics
     ("diagnostics/", "Diagnostics"),
     ("shared/cluster_info.json", "Diagnostics"),
@@ -149,11 +155,16 @@ _PUBLICATION_FILES = [
     "comparison/summary_table.csv",
     "characterization/state_summary.csv",
     "characterization/state_exemplars.csv",
+    "characterization/state_occupancy.png",
     "comparison/motifs.csv",
+    "comparison/bout_duration_by_context.csv",
     "comparison/transition_table.csv",
+    "comparison/contrast_vector_comparison.png",
     "motifs/motif_summary.csv",
     "motifs/motif_context_enrichment.csv",
+    "motifs/motif_exemplars.csv",
     "diagnostics/cluster_overview.png",
+    "diagnostics/umap_embedding_by_state.png",
     "diagnostics/cluster_diagnostics.json",
     "shared/cluster_info.json",
     "shared/run_manifest.json",

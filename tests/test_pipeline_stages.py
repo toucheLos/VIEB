@@ -46,7 +46,9 @@ def _make_project(root: Path, name: str = "proj", *, with_metadata: bool = True)
 
 
 def _load_stages():
-    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    # STAGES is the single source of truth in the dependency-free _stages module
+    # (user_interface.py and _utils.py import it from there).
+    src = Path(__file__).resolve().parents[1] / "_stages.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -439,6 +441,42 @@ def test_stage0_routes_to_existing_dialogs():
     assert "QLineEdit" not in class_body, "Stage0 must not define its own form fields"
 
 
+def test_stage0_secondary_buttons_hidden_by_default():
+    """Secondary buttons live inside _options_container which starts hidden."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    assert class_start != -1
+    build_start = text.find("def _build(self):", class_start)
+    assert build_start != -1
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert "_options_container" in build_body, "Stage0 _build must create _options_container"
+    assert "_options_container.hide()" in build_body, "Stage0 _build must hide _options_container"
+
+
+def test_stage0_has_more_options_toggle():
+    """Stage0 has a More options toggle and _toggle_options method."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "_options_toggle" in class_body, "Stage0 must have _options_toggle button"
+    assert "_toggle_options" in class_body, "Stage0 must have _toggle_options method"
+
+
+def test_stage0_single_primary_button():
+    """Stage0 _build creates exactly one primary button (stage0Primary)."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    build_start = text.find("def _build(self):", class_start)
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert build_body.count('"stage0Primary"') == 1, "Exactly one primary button"
+
+
 def _class_body(path: Path, class_name: str) -> str:
     text = path.read_text(encoding="utf-8")
     class_start = text.find(f"class {class_name}")
@@ -491,3 +529,54 @@ def test_expand_all_uses_stage_row_expansion_helper():
 
     assert "row._set_expanded(not any_expanded)" in fn_body
     assert "row._arrow.setText" not in fn_body
+
+
+def test_lightweight_loader_reads_overview_summary_not_large_csvs():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class DataLoader")
+    run_start = text.find("def run(self):", class_start)
+    run_end = text.find("\nclass ", run_start + 1)
+    run_body = text[run_start:run_end] if run_end != -1 else text[run_start:]
+    guard = "if not self._lightweight:"
+    assert 'data["overview_summary"] = _json("shared/overview_summary.json")' in run_body
+    assert "max_bytes = 1_000_000" in run_body
+    assert "path.stat().st_size > max_bytes" in run_body
+    assert guard in run_body
+    guarded_body = run_body[run_body.find(guard):]
+    assert 'data["summary"] = _csv("comparison/summary_table.csv")' in guarded_body
+    assert 'data["labels_per_frame"]' not in run_body
+
+
+def test_reload_button_runs_report_regen():
+    """Reload Data button runs compare.py --report (merged behavior after removing Regenerate Report button)."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _on_reload_clicked(self) -> None:")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    assert "_run_report_regen" in fn_body
+
+
+def test_overview_previous_session_alert_removed():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_body = _class_body(src, "OverviewView")
+
+    assert "Load Previous Session" not in text
+    assert "load_previous_requested" not in class_body
+    assert "_prev_banner" not in class_body
+    assert "_prev_load_btn" not in class_body
+    assert "Previous analysis results available" not in text
+
+
+def test_report_generation_writes_overview_summary():
+    src = Path(__file__).resolve().parents[1] / "compare.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "def _write_overview_summary(" in text
+    assert '"total_videos"' in text
+    assert '"total_frames"' in text
+    assert '"state_means"' in text
+    assert '_write_overview_summary(' in text[text.find("df.to_csv("):]

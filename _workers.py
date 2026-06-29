@@ -53,12 +53,13 @@ class DataLoader(QThread):
     loaded = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, cohort_csv_path: str = ""):
+    def __init__(self, cohort_csv_path: str = "", lightweight: bool = False):
         super().__init__()
         self._cohort_path = cohort_csv_path
+        self._lightweight = lightweight
 
     def run(self):
-        data = {}
+        data = {"_lightweight": self._lightweight}
         try:
             def _csv(rel):
                 p = RESULTS / rel
@@ -68,38 +69,51 @@ class DataLoader(QThread):
                 p = RESULTS / rel
                 return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
-            data["summary"] = _csv("comparison/summary_table.csv")
-            data["state_summary"] = _csv("characterization/state_summary.csv")
-            data["context_report"] = _csv("characterization/context_report.csv")
-            data["transition_table"] = _csv("comparison/transition_table.csv")
-            data["bouts"] = _csv("characterization/bouts.csv")
-            data["motifs"] = _csv("comparison/motifs.csv")
             data["cluster_info"] = _json("shared/cluster_info.json")
             data["feature_index"] = _json("features/index.json")
-            data["animal_scalars"] = _csv("comparison/animal_scalars.csv")
-            data["fingerprints"] = _csv("comparison/behavioral_fingerprints.csv")
-            data["deviation_scores"] = _csv("comparison/deviation_scores.csv")
-            data["reverse_results"] = (
-                json.loads((RESULTS / "comparison" / "reverse_model_results.json")
-                           .read_text(encoding="utf-8"))
-                if (RESULTS / "comparison" / "reverse_model_results.json").exists()
-                else None
-            )
-            data["labels_per_frame"] = _csv("characterization/labels_per_frame.csv")
-            data["validation_labels"] = _csv("validation/frame_labels.csv")
-            data["validation_sample"] = _csv("validation/current_sample.csv")
             data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
-            data["state_occupancy"] = _csv("diagnostics/state_occupancy.csv")
+            data["run_manifest"] = _json("shared/run_manifest.json")
+            data["overview_summary"] = _json("shared/overview_summary.json")
+            data["markers"] = {
+                "features": (RESULTS / "features" / "index.json").exists(),
+                "clusters": (RESULTS / "shared" / "cluster_info.json").exists(),
+                "summary": (RESULTS / "comparison" / "summary_table.csv").exists(),
+                "report": (RESULTS / "comparison" / "summary_table.csv").exists(),
+                "motifs": (RESULTS / "comparison" / "motifs.csv").exists(),
+            }
 
-            try:
-                import vieb_config as _vc
-                meta_p = Path(_vc.get_metadata_path())
-            except Exception:
-                meta_p = ROOT / "projects" / "_no_active_project" / "metadata.csv"
-            data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
+            if not self._lightweight:
+                data["summary"] = _csv("comparison/summary_table.csv")
+                data["state_summary"] = _csv("characterization/state_summary.csv")
+                data["context_report"] = _csv("characterization/context_report.csv")
+                data["transition_table"] = _csv("comparison/transition_table.csv")
+                data["bouts"] = _csv("characterization/bouts.csv")
+                data["motifs"] = _csv("comparison/motifs.csv")
+                data["animal_scalars"] = _csv("comparison/animal_scalars.csv")
+                data["fingerprints"] = _csv("comparison/behavioral_fingerprints.csv")
+                data["deviation_scores"] = _csv("comparison/deviation_scores.csv")
+                data["reverse_results"] = (
+                    json.loads((RESULTS / "comparison" / "reverse_model_results.json")
+                               .read_text(encoding="utf-8"))
+                    if (RESULTS / "comparison" / "reverse_model_results.json").exists()
+                    else None
+                )
+                data["labels_per_frame"] = _csv("characterization/labels_per_frame.csv")
+                data["validation_labels"] = _csv("validation/frame_labels.csv")
+                data["validation_sample"] = _csv("validation/current_sample.csv")
+                data["state_occupancy"] = _csv("diagnostics/state_occupancy.csv")
+
+            data["metadata"] = None
+            if not self._lightweight:
+                try:
+                    import vieb_config as _vc
+                    meta_p = Path(_vc.get_metadata_path())
+                except Exception:
+                    meta_p = ROOT / "projects" / "_no_active_project" / "metadata.csv"
+                data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
 
             data["cohort"] = None
-            if self._cohort_path:
+            if self._cohort_path and not self._lightweight:
                 cp = Path(self._cohort_path)
                 if cp.exists():
                     try:

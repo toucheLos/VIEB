@@ -35,6 +35,7 @@ class AddVideosView(QWidget):
         super().__init__()
         self.cfg = cfg
         self._worker = None
+        self._running_command = ""
         self._action_buttons: list[QPushButton] = []
         self._active_step_num: int | None = None
         self._step_results: dict[int, bool] = {}
@@ -426,13 +427,14 @@ class AddVideosView(QWidget):
         if self._active_step_num is not None:
             self._step_results.pop(self._active_step_num, None)
         self._set_buttons_enabled(False)
-        self.worker_running.emit(True)
         if use_dlc_python:
             python_exe = self.cfg.get("dlc_python") or str(ROOT / "venv-dlc" / "bin" / "python")
             if not os.path.exists(python_exe):
                 python_exe = sys.executable
         else:
             python_exe = sys.executable
+        self._running_command = "python " + " ".join(str(a) for a in args)
+        self.worker_running.emit(True)
         self._worker = SubprocessWorker(args, python_exe=python_exe)
         self._worker.log.connect(self._on_raw_log)
         self._worker.done.connect(self._on_worker_done)
@@ -441,6 +443,7 @@ class AddVideosView(QWidget):
     def _on_worker_done(self, ok: bool):
         self._set_buttons_enabled(True)
         self.worker_running.emit(False)
+        self._running_command = ""
         if ok:
             self._log_human("✓ Task completed successfully.")
         else:

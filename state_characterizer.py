@@ -108,10 +108,48 @@ def run(
     enrichment_df.to_csv(p, index=False)
     saved.append(str(p))
 
-    # ── 8. Top distinguishing features per state ────────────────────────────
+    # ── 8. Movement poles ───────────────────────────────────────────────────
+    n_kp = 8
+    try:
+        idx_path = features_dir / "index.json"
+        if idx_path.exists():
+            n_kp = int(json.loads(idx_path.read_text(encoding="utf-8"))
+                       .get("_meta", {}).get("n_keypoints", 8))
+    except Exception:
+        pass
+
+    poles = compute_movement_poles(centers, feature_names, bouts_df, n_keypoints=n_kp, fps=fps)
+    p = char_dir / "poles.json"
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(poles, fh, indent=2)
+    saved.append(str(p))
+
+    poles_rows = [
+        {
+            "pole_name":    "low_motion",
+            "type":         poles["low_motion"]["type"],
+            "state_id":     poles["low_motion"]["state_id"],
+            "speed_zscore": poles["low_motion"]["speed_zscore"],
+            "n_bouts":      poles["low_motion"]["n_bouts"],
+            "warning":      poles["low_motion"]["warning"],
+        },
+        {
+            "pole_name":    "high_motion",
+            "type":         poles["high_motion"]["type"],
+            "state_id":     poles["high_motion"]["state_id"],
+            "speed_zscore": poles["high_motion"]["speed_zscore"],
+            "n_bouts":      poles["high_motion"]["n_bouts"],
+            "warning":      poles["high_motion"]["warning"],
+        },
+    ]
+    p = char_dir / "movement_poles.csv"
+    pd.DataFrame(poles_rows).to_csv(p, index=False)
+    saved.append(str(p))
+
+    # ── 9. Top distinguishing features per state ────────────────────────────
     top_features = _compute_top_features(centers, feature_names, n=5)
 
-    # ── 9. Combined JSON summary ────────────────────────────────────────────
+    # ── 10. Combined JSON summary ───────────────────────────────────────────
     summary = {
         "n_states": n_states,
         "n_features": n_features,
@@ -166,6 +204,12 @@ def load_outputs(results_dir: str | Path) -> dict:
         out["characterization"] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     except Exception:
         out["characterization"] = {}
+
+    p = char_dir / "poles.json"
+    try:
+        out["poles"] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        out["poles"] = {}
 
     return out
 
@@ -375,6 +419,91 @@ def _safe_float(v) -> Optional[float]:
         return None if f != f else f  # NaN → None for JSON
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Movement poles
+# ---------------------------------------------------------------------------
+
+def _get_centroid_speed_index(feature_names: list[str], n_keypoints: int) -> Optional[int]:
+    """Find centroid_speed column index.
+    Primary: search feature_names for 'centroid_speed'.
+    Fallback: positional formula (standard VIEB model: base + 0).
+    """
+    for i, name in enumerate(feature_names):
+        if "centroid_speed" in name.lower():
+            return i
+    if n_keypoints > 0:
+        return n_keypoints + n_keypoints * (n_keypoints - 1) // 2
+    return None
+
+
+def compute_movement_poles(
+    centers: np.ndarray,
+    feature_names: list[str],
+    bouts_df: pd.DataFrame,
+    n_keypoints: int = 8,
+    fps: float = 30.0,
+) -> dict:
+    """Select low- and high-motion pole states from cluster centers.
+
+    Centers are z-scored; lower centroid_speed z-score = slower state.
+    Returns {"low_motion": {...}, "high_motion": {...}}.
+    """
+    n_states = len(centers)
+    _unavailable = {
+        "low_motion":  {"type": "unavailable", "state_id": None, "speed_zscore": None, "n_bouts": 0, "warning": "centroid_speed feature not found"},
+        "high_motion": {"type": "unavailable", "state_id": None, "speed_zscore": None, "n_bouts": 0, "warning": "centroid_speed feature not found"},
+    }
+
+    if n_states == 0:
+        return _unavailable
+
+    speed_idx = _get_centroid_speed_index(feature_names, n_keypoints)
+    if speed_idx is None or speed_idx >= centers.shape[1]:
+        return _unavailable
+
+    speed_vals = centers[:, speed_idx]
+    sorted_asc = np.argsort(speed_vals)
+
+    low_id  = int(sorted_asc[0])
+    high_id = int(sorted_asc[-1])
+
+    global_std = float(speed_vals.std()) if n_states > 1 else 1.0
+
+    def _bout_count(sid: int) -> int:
+        if bouts_df.empty or "state" not in bouts_df.columns:
+            return 0
+        return int((bouts_df["state"] == sid).sum())
+
+    def _ambiguity_warning(pole: str, ordered_ids: np.ndarray) -> str:
+        if len(ordered_ids) < 2:
+            return ""
+        gap = abs(float(speed_vals[ordered_ids[1]]) - float(speed_vals[ordered_ids[0]]))
+        if global_std > 1e-8 and gap < 0.3 * global_std:
+            label = "low" if pole == "low" else "high"
+            return f"Multiple states with similar {label} motion; selection may be ambiguous"
+        return ""
+
+    low_warn  = _ambiguity_warning("low",  sorted_asc)
+    high_warn = _ambiguity_warning("high", sorted_asc[::-1])
+
+    return {
+        "low_motion": {
+            "type":         "state",
+            "state_id":     low_id,
+            "speed_zscore": round(float(speed_vals[low_id]), 4),
+            "n_bouts":      _bout_count(low_id),
+            "warning":      low_warn,
+        },
+        "high_motion": {
+            "type":         "state",
+            "state_id":     high_id,
+            "speed_zscore": round(float(speed_vals[high_id]), 4),
+            "n_bouts":      _bout_count(high_id),
+            "warning":      high_warn,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

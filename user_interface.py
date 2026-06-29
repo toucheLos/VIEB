@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -33,6 +34,16 @@ def _perf(label: str, start: float | None = None) -> float:
     else:
         print(f"[timing] {label}: {(now - start) * 1000:.1f} ms")
     return now
+
+
+def _running_status_text(command: str | None, max_chars: int = 80) -> str:
+    command = (command or "").strip()
+    if not command:
+        return "running"
+    text = f"running: {command}"
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
 
 try:
     from PyQt5.QtCore import QFileSystemWatcher, QObject, QThread, QTimer, Qt, pyqtSignal
@@ -265,18 +276,6 @@ def _wsl_check_installed() -> bool:
     try:
         r = subprocess.run(["wsl", "--version"], capture_output=True, timeout=8)
         return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _probe_torch_cuda() -> bool:
-    """Return True if torch is installed and reports a usable CUDA GPU.
-
-    Used on Linux/macOS instead of the WSL2 + cuML probe.
-    """
-    try:
-        import torch
-        return torch.cuda.is_available()
     except Exception:
         return False
 
@@ -520,70 +519,9 @@ def safe_infer_target_state(
     return target, ""
 
 
-STAGES = [
-    {
-        "id": 0,
-        "name": "Onboarding",
-        "desc": "Choose a project, import a session-defining data source, and prepare metadata.",
-        "cmd": "onboard project",
-    },
-    {
-        "id": 1,
-        "name": "Pose Estimation / DLC Analysis",
-        "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
-        "cmd": "python setup_dlc_training.py --analyze",
-    },
-    {
-        "id": 2,
-        "name": "Feature Extraction",
-        "desc": "Extract frame-level behavioral features from tracked keypoints.",
-        "cmd": "python compare.py --extract [--no-wavelets]",
-    },
-    {
-        "id": 3,
-        "name": "Preprocessing · UMAP · Clustering · Smoothing",
-        "desc": "Standardize features, reduce with UMAP, cluster with HDBSCAN, then smooth labels with HMM.",
-        "cmd": "python compare.py --cluster --min-cluster-size N --umap-dims N [--hdbscan-min-samples N] [--validate]",
-    },
-    {
-        "id": 4,
-        "name": "State Collapsing (optional)",
-        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
-        "cmd": "python compare.py --collapse --collapse-threshold 0.5",
-    },
-    {
-        "id": 5,
-        "name": "Report Generation",
-        "desc": "Build summary tables, transition outputs, and group comparison plots.",
-        "cmd": "python compare.py --report",
-    },
-    {
-        "id": 6,
-        "name": "Per-Animal Scalars",
-        "desc": "Compute freeze AUC and discrimination metrics for each animal.",
-        "cmd": "python compare.py --summarize",
-    },
-    {
-        "id": 7,
-        "name": "Motif Discovery",
-        "desc": "Find enriched bigram/trigram motifs between contexts.",
-        "cmd": "python compare.py --motifs",
-    },
-    {
-        "id": 8,
-        "name": "Generate Clips",
-        "desc": "Export exemplar video clips for each behavioral state.",
-        "cmd": "python generate_clips.py",
-    },
-    {
-        "id": 9,
-        "name": "Add Videos",
-        "desc": "Add more videos to the active project after a first pass or when expanding the dataset.",
-        "cmd": "open add videos",
-    },
-]
-
-_STAGE_BY_ID = {s["id"]: s for s in STAGES}
+# Stage registry: single source of truth in the dependency-free _stages module
+# (imported here, not from _utils, to avoid eagerly loading matplotlib at startup).
+from _stages import STAGES, _STAGE_BY_ID  # noqa: E402
 
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
@@ -680,6 +618,7 @@ _SPINNER = ["|", "/", "-", "\\"]
 _NAV_VIEWS = [
     "Overview",
     "Pipeline",
+    "Cluster Runs",
     "Analysis",
     "Artifacts",
     "Settings",
@@ -746,6 +685,34 @@ def _fmt_ts(ts):
     if isinstance(ts, str):
         return ts
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _summary_mtime_text(data: dict) -> str:
+    overview = data.get("overview_summary")
+    if isinstance(overview, dict):
+        value = overview.get("last_run_time") or overview.get("generated_at")
+        if value:
+            return _fmt_ts(value)
+    p = RESULTS / "comparison" / "summary_table.csv"
+    if p.exists():
+        return _fmt_ts(p.stat().st_mtime)
+    return "-"
+
+
+def _overview_state_means(overview: dict | None) -> tuple[list[int], list[float]]:
+    if not isinstance(overview, dict):
+        return [], []
+    raw = overview.get("state_means")
+    if not isinstance(raw, dict):
+        return [], []
+    pairs = []
+    for key, value in raw.items():
+        try:
+            pairs.append((int(key), float(value)))
+        except (TypeError, ValueError):
+            continue
+    pairs.sort(key=lambda item: item[0])
+    return [sid for sid, _ in pairs], [val for _, val in pairs]
 
 
 def _state_key(stage_id):
@@ -868,13 +835,99 @@ class DataLoader(QThread):
         t0 = time.perf_counter()
         data = {"_lightweight": self._lightweight}
         try:
+            try:
+                resolved_results = _pm.resolve_project_path("results", ROOT, APP_CONFIG_PATH)
+            except Exception as exc:
+                data["project_warning"] = (
+                    "Previous results found but could not be loaded. "
+                    f"Active project results path is not ready: {exc}"
+                )
+                data["markers"] = {
+                    "metadata": False,
+                    "features": False,
+                    "clusters": False,
+                    "summary": False,
+                    "report": False,
+                    "motifs": False,
+                    "clips": False,
+                }
+                self.loaded.emit(data)
+                return
+            results_dir = Path(resolved_results)
+            clips_dir = results_dir.parent / "clips"
+
             def _csv(rel):
-                p = RESULTS / rel
+                p = results_dir / rel
                 return pd.read_csv(p) if p.exists() else None
 
             def _json(rel):
-                p = RESULTS / rel
-                return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+                p = results_dir / rel
+                if not p.exists():
+                    return None
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    data.setdefault("load_errors", []).append(f"{rel}: {exc}")
+                    return None
+
+            def _total_frames_from_index(feature_index):
+                total = 0
+                if isinstance(feature_index, dict):
+                    for key, value in feature_index.items():
+                        if key == "_meta" or not isinstance(value, dict):
+                            continue
+                        total += int(value.get("n_frames", 0) or 0)
+                elif isinstance(feature_index, list):
+                    for value in feature_index:
+                        if isinstance(value, dict):
+                            total += int(value.get("n_frames", 0) or 0)
+                return total
+
+            def _small_summary_from_csv(path: Path, cluster_info, feature_index, run_manifest):
+                max_bytes = 1_000_000
+                if not path.exists() or path.stat().st_size > max_bytes:
+                    return None
+                try:
+                    with path.open(newline="", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        fields = reader.fieldnames or []
+                        n_states = int((cluster_info or {}).get("n_clusters", 0) or 0)
+                        if n_states > 0:
+                            state_cols = [f"state_{i}_frac" for i in range(n_states) if f"state_{i}_frac" in fields]
+                        else:
+                            state_cols = [name for name in fields if name.startswith("state_") and name.endswith("_frac")]
+                        totals = {col: 0.0 for col in state_cols}
+                        rows = 0
+                        for row in reader:
+                            rows += 1
+                            for col in state_cols:
+                                try:
+                                    totals[col] += float(row.get(col) or 0.0)
+                                except ValueError:
+                                    pass
+                    state_means = {
+                        str(int(col.split("_")[1])): (totals[col] / rows if rows else 0.0)
+                        for col in state_cols
+                    }
+                    noise_fraction = None
+                    if rows and state_cols:
+                        noise_fraction = max(0.0, 1.0 - sum(state_means.values()))
+                    return {
+                        "schema_version": 1,
+                        "generated_at": _fmt_ts(path.stat().st_mtime),
+                        "last_run_time": _fmt_ts(path.stat().st_mtime),
+                        "active_run_id": (run_manifest or {}).get("run_id", ""),
+                        "total_videos": rows,
+                        "total_frames": _total_frames_from_index(feature_index),
+                        "n_states": int((cluster_info or {}).get("n_clusters", len(state_cols)) or len(state_cols)),
+                        "noise_fraction": noise_fraction,
+                        "state_means": state_means,
+                        "markers": {"summary": True, "report": True},
+                        "source": "summary_table_small_csv",
+                    }
+                except Exception as exc:
+                    data.setdefault("load_errors", []).append(f"comparison/summary_table.csv: {exc}")
+                    return None
 
             _t = time.perf_counter()
             import vieb_config as _vc_dl
@@ -886,11 +939,12 @@ class DataLoader(QThread):
             _t = time.perf_counter()
             marker_paths = {
                 "metadata": metadata_path,
-                "features": RESULTS / "features" / "index.json",
-                "clusters": RESULTS / "shared" / "cluster_info.json",
-                "summary": RESULTS / "comparison" / "summary_table.csv",
-                "motifs": RESULTS / "comparison" / "motifs.csv",
-                "clips": CLIPS,
+                "features": results_dir / "features" / "index.json",
+                "clusters": results_dir / "shared" / "cluster_info.json",
+                "summary": results_dir / "comparison" / "summary_table.csv",
+                "report": results_dir / "comparison" / "summary_table.csv",
+                "motifs": results_dir / "comparison" / "motifs.csv",
+                "clips": clips_dir,
             }
             data["markers"] = {
                 key: bool(path and path.exists())
@@ -902,6 +956,14 @@ class DataLoader(QThread):
             data["feature_index"] = _json("features/index.json")
             data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
             data["run_manifest"] = _json("shared/run_manifest.json")
+            data["overview_summary"] = _json("shared/overview_summary.json")
+            if data["overview_summary"] is None:
+                data["overview_summary"] = _small_summary_from_csv(
+                    results_dir / "comparison" / "summary_table.csv",
+                    data.get("cluster_info"),
+                    data.get("feature_index"),
+                    data.get("run_manifest"),
+                )
             print(f"[timing]   DL: JSON reads: {(time.perf_counter() - _t) * 1000:.1f} ms")
             if not self._lightweight:
                 data["summary"] = _csv("comparison/summary_table.csv")
@@ -919,9 +981,9 @@ class DataLoader(QThread):
                 data["fingerprints"] = _csv("comparison/behavioral_fingerprints.csv")
                 data["deviation_scores"] = _csv("comparison/deviation_scores.csv")
                 data["reverse_results"] = (
-                    json.loads((RESULTS / "comparison" / "reverse_model_results.json")
+                    json.loads((results_dir / "comparison" / "reverse_model_results.json")
                                .read_text(encoding="utf-8"))
-                    if (RESULTS / "comparison" / "reverse_model_results.json").exists()
+                    if (results_dir / "comparison" / "reverse_model_results.json").exists()
                     else None
                 )
                 data["validation_sample"] = _csv("validation/current_sample.csv")
@@ -1679,7 +1741,6 @@ class DiagnoseDialog(QDialog):
 
 class OverviewView(QWidget):
     export_requested = pyqtSignal()
-    load_previous_requested = pyqtSignal()
     cohort_path_changed = pyqtSignal(str)
     navigate_help = pyqtSignal(str)
 
@@ -1690,17 +1751,6 @@ class OverviewView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
-
-        self._prev_banner = QFrame()
-        self._prev_banner.setStyleSheet("QFrame{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;}")
-        pb = QHBoxLayout(self._prev_banner)
-        self._prev_lbl = QLabel("Previous analysis results available.")
-        pb.addWidget(self._prev_lbl, stretch=1)
-        self._prev_load_btn = QPushButton("Load Previous Session")
-        self._prev_load_btn.clicked.connect(self.load_previous_requested.emit)
-        pb.addWidget(self._prev_load_btn)
-        self._prev_banner.hide()
-        lay.addWidget(self._prev_banner)
 
         top = QHBoxLayout()
         title = QLabel("Overview")
@@ -1772,6 +1822,7 @@ class OverviewView(QWidget):
         summary = data.get("summary")
         ci = data.get("cluster_info")
         fi = data.get("feature_index")
+        overview = data.get("overview_summary")
         total = 0
         if isinstance(fi, dict):
             records = fi.values()
@@ -1784,13 +1835,27 @@ class OverviewView(QWidget):
                     total += int(v.get("n_frames", 0) or 0)
 
         if summary is None:
+            if isinstance(overview, dict):
+                videos = overview.get("total_videos")
+                frames = overview.get("total_frames") or total
+                states = overview.get("n_states")
+                if states is None and ci:
+                    states = ci.get("n_clusters", 0)
+                noise = overview.get("noise_fraction")
+                self._c_videos.set(videos if videos is not None else "-")
+                self._c_states.set(states if states is not None else "-")
+                self._c_frames.set(f"{int(frames):,}" if frames else "-")
+                self._c_noise.set(f"{float(noise) * 100:.1f}%" if noise is not None else "-")
+                self._run_lbl.setText(f"Last run: {_summary_mtime_text(data)}")
+                self._render_state_occupancy()
+                return
             self._c_videos.set("-")
             self._c_states.set(ci.get("n_clusters", 0) if ci else "-")
             self._c_frames.set(f"{total:,}" if total else "-")
             self._c_noise.set("-")
-            p = RESULTS / "comparison" / "summary_table.csv"
-            if p.exists():
-                self._run_lbl.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
+            run_text = _summary_mtime_text(data)
+            if run_text != "-":
+                self._run_lbl.setText(f"Last run: {run_text}")
             return
         self._c_videos.set(len(summary))
         self._c_states.set(ci.get("n_clusters", 0) if ci else "-")
@@ -1803,14 +1868,14 @@ class OverviewView(QWidget):
             noise = (1 - float(mean_sum)) * 100
             self._c_noise.set(f"{noise:.1f}%")
             self._render_state_occupancy()
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if p.exists():
-            self._run_lbl.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
+        self._run_lbl.setText(f"Last run: {_summary_mtime_text(data)}")
 
     def _render_state_occupancy(self):
         summary = self._data.get("summary")
         ci = self._data.get("cluster_info")
-        if summary is not None and self._canvas is None:
+        overview = self._data.get("overview_summary")
+        overview_ids, overview_vals = _overview_state_means(overview)
+        if (summary is not None or overview_ids) and self._canvas is None:
             if not _init_mpl():
                 self._canvas_placeholder.setText("Install matplotlib to view charts.")
                 return
@@ -1820,12 +1885,24 @@ class OverviewView(QWidget):
         if not self._canvas:
             return
         self._canvas.ax.clear()
-        if summary is None or ci is None:
+        if summary is None and overview_ids:
+            state_ids = overview_ids
+            vals = overview_vals
+            lead = state_ids[int(np.argmax(vals))] if vals else None
+            if self._hide_leading.isChecked() and lead is not None:
+                kept = [(sid, val) for sid, val in zip(state_ids, vals) if sid != lead]
+                state_ids = [sid for sid, _ in kept]
+                vals = [val for _, val in kept]
+                total = sum(vals)
+                if total > 0:
+                    vals = [v / total for v in vals]
+        elif summary is None or ci is None:
             self._canvas.ax.text(0.5, 0.5, "No summary data", ha="center", va="center")
             self._canvas.draw()
             return
-        n = int(ci.get("n_clusters", 0))
-        state_ids, vals, lead = _state_means(summary, n, self._hide_leading.isChecked())
+        else:
+            n = int(ci.get("n_clusters", 0))
+            state_ids, vals, lead = _state_means(summary, n, self._hide_leading.isChecked())
         colors = mpl_cm.tab20(np.linspace(0, 1, max(1, len(state_ids))))
         self._canvas.ax.bar(state_ids, vals, color=colors)
         self._canvas.ax.set_xlabel("State ID")
@@ -1837,13 +1914,8 @@ class OverviewView(QWidget):
         self._canvas.fig.tight_layout()
         self._canvas.draw()
 
-    def show_load_banner(self, has_results: bool):
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if has_results and p.exists():
-            self._prev_lbl.setText(f"Results from {_fmt_ts(p.stat().st_mtime)} available on disk.")
-            self._prev_banner.show()
-        else:
-            self._prev_banner.hide()
+    def show_load_banner(self, has_results: bool, data: dict | None = None):
+        pass
 
     def _upload_cohort_csv(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2352,7 +2424,23 @@ class Stage0ReadinessPanel(QFrame):
         self._primary_btn.setCursor(Qt.PointingHandCursor)
         lay.addWidget(self._primary_btn)
 
-        # C. Secondary actions — route to existing workflows
+        # C. Collapsible "More options" section
+        self._options_toggle = QPushButton("More options  ▾")
+        self._options_toggle.setFlat(True)
+        self._options_toggle.setCursor(Qt.PointingHandCursor)
+        self._options_toggle.setStyleSheet(
+            "color:#555;font-size:11px;text-align:left;padding:2px 0;"
+            "border:none;background:transparent;"
+        )
+        self._options_toggle.clicked.connect(self._toggle_options)
+        lay.addWidget(self._options_toggle)
+
+        self._options_container = QWidget()
+        self._options_container.setStyleSheet("background:transparent;")
+        opts_lay = QVBoxLayout(self._options_container)
+        opts_lay.setContentsMargins(0, 0, 0, 0)
+        opts_lay.setSpacing(8)
+
         actions = QHBoxLayout()
         actions.setSpacing(8)
         self._create_btn = QPushButton("Create Project")
@@ -2371,9 +2459,8 @@ class Stage0ReadinessPanel(QFrame):
             btn.setMinimumHeight(28)
             actions.addWidget(btn)
         actions.addStretch()
-        lay.addLayout(actions)
+        opts_lay.addLayout(actions)
 
-        # D. Collapsible details section
         self._details_toggle = QPushButton("Show details  ▾")
         self._details_toggle.setFlat(True)
         self._details_toggle.setCursor(Qt.PointingHandCursor)
@@ -2382,7 +2469,7 @@ class Stage0ReadinessPanel(QFrame):
             "border:none;background:transparent;"
         )
         self._details_toggle.clicked.connect(self._toggle_details)
-        lay.addWidget(self._details_toggle)
+        opts_lay.addWidget(self._details_toggle)
 
         self._details_container = QWidget()
         self._details_container.setStyleSheet("background:transparent;")
@@ -2392,7 +2479,17 @@ class Stage0ReadinessPanel(QFrame):
         self._checklist = QVBoxLayout()
         details_lay.addLayout(self._checklist)
         self._details_container.hide()
-        lay.addWidget(self._details_container)
+        opts_lay.addWidget(self._details_container)
+
+        self._options_container.hide()
+        lay.addWidget(self._options_container)
+
+    def _toggle_options(self):
+        visible = not self._options_container.isVisible()
+        self._options_container.setVisible(visible)
+        self._options_toggle.setText(
+            "Fewer options  ▴" if visible else "More options  ▾"
+        )
 
     def _toggle_details(self):
         visible = not self._details_container.isVisible()
@@ -2480,13 +2577,13 @@ class Stage0ReadinessPanel(QFrame):
             "no_project": ("Onboard Project", self._create_project),
             "picker_required": ("Choose Project", self._change_project),
             "auto_detected": ("Use This Project", self._use_detected_project),
-            "legacy_paths": ("Migrate Legacy Paths", self._migrate_legacy_paths),
-            "needs_data": ("Add Data Source", self._add_data_source),
-            "needs_metadata": ("Generate Metadata", self._generate_metadata_for_project),
-            "needs_column_mapping": ("Open Column Mapping", self._open_column_mapping),
-            "incomplete": ("Fix Setup", self._fix_setup),
-            "ready_for_stage1": ("Continue to Stage 1: Pose Estimation", self._continue_ready),
-            "ready_for_stage2": ("Continue to Stage 2: Feature Extraction", self._continue_ready),
+            "legacy_paths": ("Continue Onboarding", self._migrate_legacy_paths),
+            "needs_data": ("Continue Onboarding", self._add_data_source),
+            "needs_metadata": ("Continue Onboarding", self._generate_metadata_for_project),
+            "needs_column_mapping": ("Continue Onboarding", self._open_column_mapping),
+            "incomplete": ("Continue Onboarding", self._fix_setup),
+            "ready_for_stage1": ("Continue to Stage 1", self._continue_ready),
+            "ready_for_stage2": ("Continue to Stage 2", self._continue_ready),
         }
         label, handler = configs.get(state, ("Check", self._check_readiness))
         self._primary_btn.setText(label)
@@ -2538,32 +2635,31 @@ class Stage0ReadinessPanel(QFrame):
 
         action_text = {
             "no_project":
-                "Click Onboard Project to detect or create a project.",
+                "No project selected. Choose or create a project to begin.",
             "picker_required":
-                "Multiple projects detected — choose one to continue.",
+                "Multiple projects detected. Choose one to continue.",
             "auto_detected":
-                "A project was detected. Click ‘Use This Project’ to activate it.",
+                "A project was detected. Activate it to continue.",
             "legacy_paths":
-                "This project still points at legacy repo-root paths. Migrate or mark those paths external.",
+                "This project points to old repo-root metadata/results. "
+                "VIEB can migrate those into the project and keep raw videos external.",
             "needs_data":
-                "Add raw videos, pose CSVs, an H5 pose file, or a metadata CSV to define sessions.",
+                "No session-defining data source was found. "
+                "Add raw videos, pose CSVs, H5 pose data, or a metadata manifest.",
             "needs_metadata":
-                "Data was found. Generate metadata before continuing.",
+                "Metadata is missing. VIEB can create it from detected session files.",
             "needs_column_mapping":
-                "Metadata was found, but the session ID column needs to be mapped.",
+                "Metadata was found but the session identifier column "
+                "could not be determined.",
             "incomplete":
-                "Add a data source or check the project config "
-                "to complete readiness.",
+                "Check the project config to complete readiness.",
             "ready_for_stage1":
-                "Project ready. Continue to pose estimation.",
+                "Project ready for pose estimation. Continue to Stage 1.",
             "ready_for_stage2":
-                "Project ready with pose data. Continue to feature extraction.",
+                "Pose-tracking data and metadata are ready. You can skip Stage 1.",
         }
         self._next_action.setText(action_text.get(state, ""))
         self._update_primary_button(state)
-        has_project = validation is not None
-        self._change_btn.setVisible(has_project)
-        self._source_btn.setVisible(has_project)
 
     def _use_detected_project(self):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
@@ -2816,6 +2912,7 @@ class Stage0ReadinessPanel(QFrame):
 class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
+    worker_command = pyqtSignal(str)
     navigate_dlc = pyqtSignal()
     navigate_add_videos = pyqtSignal()
     navigate_cluster_runs = pyqtSignal()
@@ -2828,6 +2925,7 @@ class RunPipelineView(QWidget):
         self.cfg = cfg
         self._rows: dict[int, StageRow] = {}
         self._worker = None
+        self._running_command = ""
         self._active_stages = set()
         self._wsl_thread = None
         self._build()
@@ -2915,34 +3013,6 @@ class RunPipelineView(QWidget):
             v.addWidget(row)
             _perf(f"    StageRow {stage['id']}", _t_sr)
         _perf("  all StageRows", _t_stages)
-        # ── Clustering Diagnostics panel ──
-        self._diag_frame = QFrame()
-        self._diag_frame.setFrameShape(QFrame.StyledPanel)
-        self._diag_frame.setStyleSheet(
-            "QFrame { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 6px; }"
-        )
-        df_lay = QVBoxLayout(self._diag_frame)
-        df_lay.setContentsMargins(16, 12, 16, 12)
-        df_lay.setSpacing(8)
-
-        diag_hdr = QHBoxLayout()
-        diag_title = QLabel("Clustering Diagnostics")
-        diag_title.setFont(QFont("Arial", 12, QFont.Bold))
-        diag_hdr.addWidget(diag_title)
-        diag_hdr.addStretch()
-        df_lay.addLayout(diag_hdr)
-
-        self._diag_params = QLabel("")
-        self._diag_params.setWordWrap(True)
-        self._diag_params.setStyleSheet("font-size: 11px; color: #444; font-family: monospace;")
-        df_lay.addWidget(self._diag_params)
-
-        self._diag_warnings_lay = QVBoxLayout()
-        self._diag_warnings_lay.setSpacing(4)
-        df_lay.addLayout(self._diag_warnings_lay)
-
-        self._diag_frame.hide()
-        v.addWidget(self._diag_frame)
 
         v.addStretch()
         scroll.setWidget(holder)
@@ -3186,10 +3256,13 @@ class RunPipelineView(QWidget):
         self._worker.stage_done.connect(self._on_stage_done)
         self._worker.all_done.connect(self._on_all_done)
         self._set_buttons(False)
+        self._running_command = "pipeline"
         self.worker_running.emit(True)
         self._worker.start()
 
     def _on_stage_started(self, sid):
+        self._running_command = str(_STAGE_BY_ID[sid].get("cmd") or _STAGE_BY_ID[sid]["name"])
+        self.worker_command.emit(self._running_command)
         self._rows[sid].set_status("running")
         self._status.setText(f"Running stage {sid}: {_STAGE_BY_ID[sid]['name']}")
 
@@ -3209,6 +3282,7 @@ class RunPipelineView(QWidget):
         stopped = self._worker is not None and getattr(self._worker, "_stop_flag", False)
         self._set_buttons(True)
         self.worker_running.emit(False)
+        self._running_command = ""
         if stopped:
             self._status.setText("Pipeline stopped.")
         else:
@@ -3229,53 +3303,6 @@ class RunPipelineView(QWidget):
         dom_col = means.idxmax()
         row.set_cluster_quality(float(means[dom_col]), int(dom_col.split("_")[1]))
 
-    def update_diagnostics(self, data: dict):
-        """Populate the diagnostics panel from loaded cluster data."""
-        diag = data.get("diagnostics")
-        if not diag:
-            self._diag_frame.hide()
-            return
-
-        self._diag_frame.show()
-
-        lines = [
-            f"States: {diag.get('n_states', '?')}   "
-            f"Frames: {diag.get('n_frames', 0):,}   "
-            f"Noise: {diag.get('noise_frac', 0)*100:.1f}%",
-            f"Largest state: {diag.get('largest_state_frac', 0)*100:.1f}%   "
-            f"Mean confidence: {diag.get('mean_confidence', 0):.3f}   "
-            f"Low conf (<0.5): {diag.get('low_confidence_frac', 0)*100:.1f}%",
-            f"UMAP dims: {diag.get('umap_dims', '?')}   "
-            f"min_cluster_size: {diag.get('min_cluster_size', '?')}   "
-            f"Features: {diag.get('n_features', '?')}   "
-            f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
-        ]
-        self._diag_params.setText("\n".join(lines))
-
-        while self._diag_warnings_lay.count():
-            item = self._diag_warnings_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        warnings = diag.get("warnings", [])
-        if not warnings:
-            ok_lbl = QLabel("No warnings.")
-            ok_lbl.setStyleSheet("color: #2e7d32; font-size: 11px; padding: 2px 0;")
-            self._diag_warnings_lay.addWidget(ok_lbl)
-        for w in warnings:
-            level = w.get("level", "info")
-            if level == "error":
-                color, icon = "#c62828", "!"
-            elif level == "warning":
-                color, icon = "#e65100", "*"
-            else:
-                color, icon = "#1565c0", "i"
-            lbl = QLabel(f"  {icon}  {w.get('message', '')}")
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"color: {color}; font-size: 11px; padding: 2px 0;")
-            if w.get("action"):
-                lbl.setToolTip(w["action"])
-            self._diag_warnings_lay.addWidget(lbl)
 
     def _run_diagnose(self):
         dlg = DiagnoseDialog(self)
@@ -3322,12 +3349,14 @@ class RunPipelineView(QWidget):
 
         self._status.setText(label)
         self._set_buttons(False)
+        self._running_command = " ".join(str(a) for a in cmd)
         self.worker_running.emit(True)
         self._cmd_thread = _CmdThread(cmd)
         self._cmd_thread.log.connect(self._append_log)
         self._cmd_thread.done.connect(lambda ok: (
             self._set_buttons(True),
             self.worker_running.emit(False),
+            setattr(self, "_running_command", ""),
             self._status.setText("Done." if ok else "Failed."),
             self.pipeline_done.emit() if ok else None,
         ))
@@ -4244,7 +4273,13 @@ class MotifsView(QWidget):
     def __init__(self):
         super().__init__()
         self._data = {}
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 24, 24, 24)
         t = QLabel("Motifs")
         t.setFont(QFont("Arial", 18, QFont.Bold))
@@ -4283,6 +4318,9 @@ class MotifsView(QWidget):
         self._heat_lbl.setAlignment(Qt.AlignCenter)
         self._heat_lbl.hide()
         lay.addWidget(self._heat_lbl)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     def update_data(self, data):
         self._data = data
@@ -5048,6 +5086,9 @@ class MainWindow(QMainWindow):
         self._running = False
         self._pipeline_running = False
         self._clip_running = False
+        self._running_command = ""
+        self._pipeline_command = ""
+        self._clip_command = ""
         self._clip_worker = None
         self._clip_log_buf: list[str] = []
         self._initial_load_done = False
@@ -5077,6 +5118,11 @@ class MainWindow(QMainWindow):
         self._start_file_watcher()
         QTimer.singleShot(200, self._maybe_onboarding)
         QTimer.singleShot(300, self._check_dlc_setup)
+        QTimer.singleShot(500,  lambda: self._preload_one("Pipeline"))
+        QTimer.singleShot(900,  lambda: self._preload_one("Cluster Runs"))
+        QTimer.singleShot(1300, lambda: self._preload_one("Analysis"))
+        QTimer.singleShot(1700, lambda: self._preload_one("Artifacts"))
+        QTimer.singleShot(2100, lambda: self._preload_one("Settings"))
 
     def _build(self):
         self.setUpdatesEnabled(False)
@@ -5211,10 +5257,9 @@ class MainWindow(QMainWindow):
         self._sb_footer.setWordWrap(True)
         sl.addWidget(self._sb_footer)
 
-        self._reload_btn = QPushButton("⟳  Reload data")
+        self._reload_btn = QPushButton("⟳  Reload Data")
         self._reload_btn.setToolTip(
-            "Re-run comparison report and refresh all views with latest results.\n"
-            "Use this after changing cluster parameters or completing a new pipeline stage."
+            "Run compare.py --report, then refresh all views from disk."
         )
         self._reload_btn.setStyleSheet(
             "QPushButton {"
@@ -5241,7 +5286,6 @@ class MainWindow(QMainWindow):
         _t_ov = time.perf_counter()
         self._ov = OverviewView()
         self._ov.export_requested.connect(self._show_export_dialog)
-        self._ov.load_previous_requested.connect(self._load_session)
         self._ov.cohort_path_changed.connect(self._on_cohort_path_changed)
         self._ov.navigate_help.connect(self._navigate_to_help)
         add("Overview", self._ov)
@@ -5277,7 +5321,6 @@ class MainWindow(QMainWindow):
         else:
             _REMOVED_VIEW_MAP = {
                 "Add Videos": "Pipeline",
-                "Cluster Runs": "Pipeline",
                 "State Characterization": "Analysis",
                 "Results": "Artifacts",
             }
@@ -5307,7 +5350,7 @@ class MainWindow(QMainWindow):
 
         if collapsed:
             self._reload_btn.setText("⟳")
-            self._reload_btn.setToolTip("Reload data")
+            self._reload_btn.setToolTip("Reload Data")
             self._reload_btn.setStyleSheet(
                 "QPushButton {"
                 "  background:transparent; border:none; color:#9B9B9B;"
@@ -5316,11 +5359,8 @@ class MainWindow(QMainWindow):
                 "QPushButton:hover { color:#1a73e8; background:#EBEBEB; }"
             )
         else:
-            self._reload_btn.setText("⟳  Reload data")
-            self._reload_btn.setToolTip(
-                "Re-run comparison report and refresh all views with latest results.\n"
-                "Use this after changing cluster parameters or completing a new pipeline stage."
-            )
+            self._reload_btn.setText("⟳  Reload Data")
+            self._reload_btn.setToolTip("Run compare.py --report, then refresh all views from disk.")
             self._reload_btn.setStyleSheet(
                 "QPushButton {"
                 "  background:transparent; border:none; color:#9B9B9B;"
@@ -5364,7 +5404,7 @@ class MainWindow(QMainWindow):
         self._sb_stop.setToolTip("Stop running process")
         self._sb_stop.setStyleSheet(
             "QPushButton{border:none;background:transparent;color:#c62828;"
-            "font-size:14px;padding:0;}"
+            "font-size:14px;padding:0 0 3px 0;}"
             "QPushButton:hover{color:#e53935;}"
         )
         self._sb_stop.setCursor(Qt.PointingHandCursor)
@@ -5415,19 +5455,45 @@ class MainWindow(QMainWindow):
         _save_cfg(self.cfg)
         self._load_data()
 
-    def _set_running(self, running: bool):
+    def _set_running(self, running: bool, command: str | None = None):
         self._pipeline_running = running
+        if running:
+            self._pipeline_command = command if command is not None else self._pipeline_command
+        else:
+            self._pipeline_command = ""
         self._sync_running()
+
+    def _set_running_from_source(self, running: bool, source, fallback: str = ""):
+        command = getattr(source, "_running_command", "") or fallback
+        self._set_running(running, command if running else None)
+
+    def _set_running_command(self, command: str):
+        if self._pipeline_running:
+            self._pipeline_command = command
+        else:
+            self._running_command = command
+        if self._running:
+            self._sb_stage.setText(_running_status_text(command))
+            self._sb_stage.setToolTip(command)
 
     def _sync_running(self):
         self._running = self._pipeline_running or self._clip_running
+        self._running_command = (
+            self._pipeline_command
+            if self._pipeline_running
+            else self._clip_command if self._clip_running else ""
+        )
         self._sb_stop.setVisible(self._running)
         self._sb_stop.setEnabled(self._running)
         if self._running:
             self._pulse_timer.start(300)
+            self._sb_stage.setText(_running_status_text(self._running_command))
+            self._sb_stage.setToolTip(self._running_command)
         else:
             self._pulse_timer.stop()
             self._sb_dot.setStyleSheet("color:#999;")
+            self._sb_stage.setText("idle")
+            self._sb_stage.setToolTip("")
 
     def _stop_all(self):
         if hasattr(self._pv, '_stop_pipeline'):
@@ -5449,6 +5515,7 @@ class MainWindow(QMainWindow):
         self._clip_worker.log.connect(self._on_clip_log)
         self._clip_worker.done.connect(self._on_clip_done)
         self._clip_running = True
+        self._clip_command = f"python generate_clips.py --fps {self.cfg.get('fps', 30)}"
         self._sync_running()
         self.statusBar().showMessage("Background clip generation started.", 5000)
         self._clip_worker.start()
@@ -5460,6 +5527,7 @@ class MainWindow(QMainWindow):
 
     def _on_clip_done(self, ok):
         self._clip_running = False
+        self._clip_command = ""
         self._sync_running()
         if ok:
             self.statusBar().showMessage("Clip generation complete.", 7000)
@@ -5484,11 +5552,13 @@ class MainWindow(QMainWindow):
         if not self._running:
             self._sb_dot.setStyleSheet(mono + "color:#9B9B9B;")
             self._sb_stage.setText("idle")
+            self._sb_stage.setToolTip("")
             return
         self._pulse_idx = (self._pulse_idx + 1) % 2
         color = "#27AE60" if self._pulse_idx else "#6FCF97"
         self._sb_dot.setStyleSheet(mono + f"color:{color};")
-        self._sb_stage.setText("running")
+        self._sb_stage.setText(_running_status_text(self._running_command))
+        self._sb_stage.setToolTip(self._running_command)
 
     def _show_cluster_runs(self):
         self._ensure_view("Cluster Runs")
@@ -5507,6 +5577,22 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(widget)
         self._views[name] = widget
 
+    def _preload_one(self, name: str) -> None:
+        """Warm-load a view shell in idle time without navigating to it."""
+        current = self._views.get(name)
+        if current is None or not isinstance(current, QLabel):
+            return  # not registered, or already built by a user click
+        t0 = time.perf_counter()
+        self._ensure_view(name)
+        _perf(f"[preload] {name}", t0)
+        if self._cached_data:
+            if name == "Pipeline" and self._pv is not None:
+                self._pv.estimate_times(self._cached_data)
+                self._pv.update_from_cfg()
+                self._pv.update_cluster_quality(self._cached_data)
+            elif name == "Analysis" and self._av is not None:
+                self._av.update_data(self._cached_data)
+
     def _ensure_view(self, name: str) -> None:
         current = self._views.get(name)
         if current is not None and not isinstance(current, QLabel):
@@ -5517,7 +5603,8 @@ class MainWindow(QMainWindow):
         if name == "Pipeline":
             self._pv = RunPipelineView(self.cfg)
             self._pv.pipeline_done.connect(self._load_data)
-            self._pv.worker_running.connect(self._set_running)
+            self._pv.worker_running.connect(lambda running: self._set_running_from_source(running, self._pv))
+            self._pv.worker_command.connect(self._set_running_command)
             self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
             self._pv.navigate_add_videos.connect(lambda: self._switch("Add Videos"))
             self._pv.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
@@ -5528,12 +5615,13 @@ class MainWindow(QMainWindow):
         elif name == "Analysis":
             from views.analysis import AnalysisView
             self._av = AnalysisView(self.cfg)
-            self._av.worker_running.connect(self._set_running)
+            self._av.worker_running.connect(lambda running: self._set_running_from_source(running, self._av))
+            self._av.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
             self._replace_view(name, self._av)
         elif name == "Artifacts":
             from views.artifacts import ArtifactsView
             self._artv = ArtifactsView(self.cfg)
-            self._artv.worker_running.connect(self._set_running)
+            self._artv.worker_running.connect(lambda running: self._set_running_from_source(running, self._artv))
             self._replace_view(name, self._artv)
         elif name == "Settings":
             from views.settings import SettingsView
@@ -5556,7 +5644,7 @@ class MainWindow(QMainWindow):
             self._adv = AddVideosView(self.cfg)
             self._adv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
             self._adv.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
-            self._adv.worker_running.connect(self._set_running)
+            self._adv.worker_running.connect(lambda running: self._set_running_from_source(running, self._adv))
             self._adv.pipeline_done.connect(self._load_data)
             self._replace_view(name, self._adv)
         elif name == "Cluster Runs":
@@ -5564,7 +5652,6 @@ class MainWindow(QMainWindow):
             self._crv = ClusterRunsView(self.cfg)
             self._crv.run_activated.connect(self._manual_reload)
             self._crv.cluster_changed.connect(self._on_cluster_changed)
-            self._crv.queue_start_requested.connect(self._start_cluster_queue)
             self._replace_view(name, self._crv)
         elif name == "Browse States":
             self._sv = BrowseStatesView(self.cfg)
@@ -5595,6 +5682,8 @@ class MainWindow(QMainWindow):
             self._load_data()
         if name == "Artifacts" and self._artv is not None:
             self._artv.refresh()
+        if name == "Cluster Runs" and self._crv is not None:
+            self._crv.refresh()
 
     _FULL_DATA_VIEWS = {"Analysis", "Browse States", "Validation", "Quantification"}
 
@@ -5606,6 +5695,11 @@ class MainWindow(QMainWindow):
         return ""
 
     def _reload_for_current_view(self) -> None:
+        if self._current_view_name() == "Cluster Runs":
+            if self._crv is not None:
+                self._crv.refresh()
+            self.statusBar().showMessage("Data reloaded", 3000)
+            return
         if self._current_view_name() in self._FULL_DATA_VIEWS:
             self._load_data()
         else:
@@ -5660,13 +5754,14 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == regen_btn:
             self._run_report_regen()
         else:
+            self.statusBar().showMessage("Reloading view data...", 2000)
             self._load_data()
-            self.statusBar().showMessage("Reloading results from disk…", 2000)
 
     def _on_cluster_changed(self) -> None:
         """Reload cfg after the active cluster run changes."""
         self.cfg = _load_cfg()
         self._watch_result_files()
+        self._propagate_cfg()
 
     # --- Cluster queue ---
 
@@ -5680,7 +5775,7 @@ class MainWindow(QMainWindow):
         if self._crv:
             self._crv.set_queue_running(True)
             self._crv._queue_worker = self._cluster_queue_worker
-        self._set_running(True)
+        self._set_running(True, f"cluster queue: {len(configs)} runs")
         self._cluster_queue_worker.start()
 
     def _on_queue_log(self, text: str) -> None:
@@ -5688,6 +5783,7 @@ class MainWindow(QMainWindow):
 
     def _on_queue_run_started(self, index: int, label: str) -> None:
         total = len(self._cluster_queue_worker.configs) if self._cluster_queue_worker else 0
+        self._set_running_command(f"cluster queue: {index + 1}/{total} ({label})")
         self.statusBar().showMessage(f"Cluster queue: running {index + 1}/{total} ({label})")
         if self._crv:
             self._crv.set_queue_progress(index, total)
@@ -5708,8 +5804,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Cluster queue finished.", 5000)
 
     def _on_reload_clicked(self) -> None:
-        """Re-run compare.py --report and refresh all views with the latest results."""
-        self.statusBar().showMessage("Reloading…", 2000)
+        self.statusBar().showMessage("Running report…", 2000)
         self._run_report_regen()
 
     def _run_report_regen(self) -> None:
@@ -5727,6 +5822,7 @@ class MainWindow(QMainWindow):
     def _on_report_done(self, ok: bool) -> None:
         self._reload_btn.setEnabled(True)
         if ok:
+            self._post_report_reload = True
             self._load_data()
             self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
         else:
@@ -5737,13 +5833,13 @@ class MainWindow(QMainWindow):
     def _load_lightweight_data(self):
         self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""), lightweight=True)
         self._loader.loaded.connect(self._on_loaded)
-        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Load error: {e}", 6000))
+        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Reload failed: {e}", 6000))
         self._loader.start()
 
     def _load_data(self):
         self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""), lightweight=False)
         self._loader.loaded.connect(self._on_loaded)
-        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Load error: {e}", 6000))
+        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Reload failed: {e}", 6000))
         self._loader.start()
 
     def _on_loaded(self, data):
@@ -5751,15 +5847,20 @@ class MainWindow(QMainWindow):
         summary = data.get("summary")
         ci = data.get("cluster_info")
         markers = data.get("markers", {})
+        overview = data.get("overview_summary")
         self._cached_data = data
         self._cached_data_full = not bool(data.get("_lightweight"))
         if summary is not None:
             self._sb_vid.setText(f"Videos: {len(summary)}")
+        elif isinstance(overview, dict) and overview.get("total_videos") is not None:
+            self._sb_vid.setText(f"Videos: {overview.get('total_videos')}")
         if ci:
             self._sb_states.setText(f"States: {ci.get('n_clusters', '-')}")
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if p.exists():
-            self._sb_run.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
+        elif isinstance(overview, dict) and overview.get("n_states") is not None:
+            self._sb_states.setText(f"States: {overview.get('n_states')}")
+        run_text = _summary_mtime_text(data)
+        if run_text != "-":
+            self._sb_run.setText(f"Last run: {run_text}")
         if summary is not None:
             state_cols = [c for c in summary.columns if c.startswith("state_") and c.endswith("_frac")]
             if state_cols:
@@ -5772,19 +5873,26 @@ class MainWindow(QMainWindow):
                 f"Project\n{self.cfg.get('project_name', 'VIEB')}\n"
                 f"{n_animals} animals · {n_days} days"
             )
+        elif isinstance(overview, dict):
+            noise = overview.get("noise_fraction")
+            if noise is not None:
+                self._sb_noise.setText(f"Noise: {float(noise) * 100:.1f}%")
+            self._sb_footer.setText(
+                f"Project\n{self.cfg.get('project_name', 'VIEB')}\n"
+                f"{overview.get('total_videos', '—')} videos"
+            )
 
         if self._pv is not None:
             self._pv.estimate_times(data)
             self._pv.update_from_cfg()
             self._pv.update_cluster_quality(data)
-            self._pv.update_diagnostics(data)
         if not self._initial_load_done:
             self._initial_load_done = True
             has_results = any(
                 data.get(k) is not None
-                for k in ("summary", "state_summary", "motifs", "animal_scalars")
-            ) or any(markers.get(k) for k in ("features", "clusters", "summary", "motifs"))
-            self._ov.show_load_banner(has_results)
+                for k in ("summary", "overview_summary", "state_summary", "motifs", "animal_scalars")
+            ) or any(markers.get(k) for k in ("features", "clusters", "summary", "report", "motifs"))
+            self._ov.show_load_banner(has_results, data)
         self._ov.update_data(data)
         if self._sv is not None:
             self._sv.update_data(data)
@@ -5796,6 +5904,13 @@ class MainWindow(QMainWindow):
             self._av.update_data(data)
         if hasattr(self._sv, "refresh"):
             self._sv.refresh(data)
+        if self._crv is not None:
+            self._crv.refresh()
+        if getattr(self, "_post_report_reload", False):
+            self._post_report_reload = False
+            self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
+        else:
+            self.statusBar().showMessage("Data reloaded", 3000)
 
     def _load_session(self):
         if self._cached_data:

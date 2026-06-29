@@ -98,10 +98,13 @@ def test_diagnostics_with_passed_arrays(tmp_path, monkeypatch):
 
     labels = np.random.randint(0, 5, size=5000).astype(np.int32)
     probs = np.random.uniform(0.5, 1.0, size=5000).astype(np.float32)
+    pooled_umap = np.random.normal(size=(5000, 2)).astype(np.float32)
 
-    diag = _generate_diagnostics(all_labels=labels, all_probs=probs)
+    diag = _generate_diagnostics(all_labels=labels, all_probs=probs, pooled_umap=pooled_umap)
     assert diag["n_frames"] == 5000
     assert diag["n_states"] == 5
+    assert (results / "diagnostics" / "umap_sample.csv").exists()
+    assert (results / "diagnostics" / "umap_embedding_by_state.png").exists()
 
 
 def test_diagnostics_handles_no_umap(tmp_path, monkeypatch):

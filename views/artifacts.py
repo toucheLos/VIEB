@@ -28,7 +28,19 @@ PREVIEW_TEXT_BYTES = 64_000
 SMALL_JSON_BYTES = 256_000
 ROW_BATCH_SIZE = 150
 BINARY_TYPES = {"Model", "NumPy", "HDF5"}
-BINARY_SUFFIXES = {".pkl", ".pt", ".pth", ".ckpt", ".npy", ".npy.gz", ".h5", ".hdf5"}
+BINARY_SUFFIXES = {
+    ".pkl", ".pt", ".pth", ".ckpt", ".npy", ".npy.gz", ".h5", ".hdf5",
+    ".mp4", ".avi", ".mov",
+}
+
+
+def binary_preview_disabled(file_type: str, filename: str) -> bool:
+    suffixes = "".join(s.lower() for s in Path(filename).suffixes)
+    return (
+        file_type in BINARY_TYPES
+        or file_type == "Video"
+        or any(suffixes.endswith(s) for s in BINARY_SUFFIXES)
+    )
 
 
 class ArtifactScanWorker(QThread):
@@ -62,6 +74,7 @@ class ArtifactsView(QWidget):
         self._artifacts: list[dict] = []
         self._filtered: list[dict] = []
         self._worker = None
+        self._running_command = ""
         self._pending_rows: list[dict] = []
         self._row_timer = QTimer(self)
         self._row_timer.timeout.connect(self._insert_next_rows)
@@ -212,6 +225,7 @@ class ArtifactsView(QWidget):
         self._worker = ArtifactScanWorker(str(results_dir), str(clips_dir) if clips_dir else None)
         self._worker.done.connect(self._on_scan_done)
         self._worker.failed.connect(self._on_scan_failed)
+        self._running_command = "artifact scan"
         self.worker_running.emit(True)
         self._worker.start()
 
@@ -228,11 +242,13 @@ class ArtifactsView(QWidget):
 
     def _on_scan_failed(self, message: str) -> None:
         self.worker_running.emit(False)
+        self._running_command = ""
         self._summary_lbl.setText("Artifact scan failed")
         self._show_info(f"Artifact scan failed:\n{message}")
 
     def _on_scan_done(self, artifacts: list[dict]) -> None:
         self.worker_running.emit(False)
+        self._running_command = ""
         self._artifacts = artifacts
 
         categories = sorted(set(a["category"] for a in self._artifacts))
@@ -364,8 +380,6 @@ class ArtifactsView(QWidget):
         t0 = time.perf_counter()
         ftype = art["file_type"]
         path = art["abs_path"]
-        path_obj = Path(path)
-        suffixes = "".join(s.lower() for s in path_obj.suffixes)
 
         def _metadata_text(message: str | None = None) -> str:
             lines = [
@@ -380,7 +394,7 @@ class ArtifactsView(QWidget):
             return "\n".join(lines)
 
         try:
-            if ftype in BINARY_TYPES or any(suffixes.endswith(s) for s in BINARY_SUFFIXES):
+            if binary_preview_disabled(ftype, path):
                 self._show_info(
                     _metadata_text(
                         "Binary artifact preview is disabled. Use Open File, Reveal in Folder, or Export."
@@ -554,6 +568,7 @@ class ArtifactsView(QWidget):
         from _workers import ArtifactExportWorker
         self._worker = ArtifactExportWorker("all", dest)
         self._worker.done.connect(self._on_export_done)
+        self._running_command = "artifact export: all"
         self.worker_running.emit(True)
         self._worker.start()
 
@@ -568,11 +583,13 @@ class ArtifactsView(QWidget):
         from _workers import ArtifactExportWorker
         self._worker = ArtifactExportWorker("publication", dest)
         self._worker.done.connect(self._on_export_done)
+        self._running_command = "artifact export: publication"
         self.worker_running.emit(True)
         self._worker.start()
 
     def _on_export_done(self, ok: bool) -> None:
         self.worker_running.emit(False)
+        self._running_command = ""
         QMessageBox.information(
             self, "Export",
             "Export complete." if ok else "Export failed — see log.",

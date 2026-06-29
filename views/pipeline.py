@@ -12,13 +12,11 @@ from PyQt5.QtWidgets import (
 )
 
 from _utils import (
-    ROOT, RESULTS, STAGES, APP_CONFIG_PATH, _has_pose_csvs, _open_folder, _save_cfg,
+    ROOT, RESULTS, STAGES, _STAGE_BY_ID, APP_CONFIG_PATH, _has_pose_csvs, _open_folder, _save_cfg,
     wsl_cuml_available, wsl_cuml_reset_cache, _probe_wsl_cuml, _state_key, _MPL,
 )
 from _workers import PipelineRunner, SubprocessWorker
 from _widgets import StageRow
-
-_STAGE_BY_ID = {s["id"]: s for s in STAGES}
 from _dialogs import WslSetupDialog, DiagnoseDialog
 
 if _MPL:

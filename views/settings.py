@@ -20,7 +20,13 @@ class SettingsView(QWidget):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 24, 24, 24)
 
         top_row = QHBoxLayout()
@@ -434,6 +440,9 @@ class SettingsView(QWidget):
         save.clicked.connect(self._save)
         lay.addWidget(save)
         lay.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     def load_from_cfg(self):
         """Repopulate widgets from self.cfg (e.g. after switching projects)."""

@@ -1,29 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
-    QLabel, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, _save_cfg, _load_cfg
-from cluster_run_manager import (
-    ClusterRunConfig,
-    ClusterRunManifest,
-    ClusterRunManager,
-)
+from _utils import ROOT, RESULTS, _save_cfg
+from cluster_run_manager import ClusterRunManager
 
 
 def _manager() -> ClusterRunManager:
-    cfg_path = ROOT / "config.json"
-    return ClusterRunManager(RESULTS, config_path=cfg_path)
+    return ClusterRunManager(RESULTS, config_path=ROOT / "config.json")
 
 
 def _load_manifest(path: Path) -> dict | None:
@@ -163,252 +155,6 @@ class _RunCard(QFrame):
 
 
 # ---------------------------------------------------------------------------
-# Run Queue Table
-# ---------------------------------------------------------------------------
-
-class _QueueTable(QFrame):
-    """Editable table of ClusterRunConfig objects for queued execution."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "QFrame{background:#FFFFFF;border:1px solid #E5E5E5;border-radius:6px;}"
-        )
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
-
-        hdr = QLabel("Run Queue")
-        hdr.setFont(QFont("Arial", 13, QFont.Bold))
-        hdr.setStyleSheet("color:#444;")
-        lay.addWidget(hdr)
-
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels([
-            "min_cluster_size", "min_samples", "umap_dims", "hdbscan_sample",
-        ])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table.setFixedHeight(160)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
-        lay.addWidget(self._table)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-
-        _btn_style = (
-            "QPushButton{border:1px solid #bbb;border-radius:4px;padding:4px 12px;background:#f5f5f5;}"
-            "QPushButton:hover{background:#e0e0e0;}"
-            "QPushButton:disabled{background:#eee;color:#aaa;}"
-        )
-
-        add_btn = QPushButton("Add Config")
-        add_btn.setStyleSheet(_btn_style)
-        add_btn.clicked.connect(self._add_row)
-        btn_row.addWidget(add_btn)
-
-        dup_btn = QPushButton("Duplicate")
-        dup_btn.setStyleSheet(_btn_style)
-        dup_btn.clicked.connect(self._duplicate_row)
-        btn_row.addWidget(dup_btn)
-
-        rm_btn = QPushButton("Remove")
-        rm_btn.setStyleSheet(_btn_style)
-        rm_btn.clicked.connect(self._remove_row)
-        btn_row.addWidget(rm_btn)
-
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
-
-    def _add_row(self, mcs=2000, ms=0, umap=10, sample=300000):
-        r = self._table.rowCount()
-        self._table.insertRow(r)
-        self._table.setItem(r, 0, QTableWidgetItem(str(mcs)))
-        auto_item = QTableWidgetItem("Auto" if ms == 0 else str(ms))
-        self._table.setItem(r, 1, auto_item)
-        self._table.setItem(r, 2, QTableWidgetItem(str(umap)))
-        self._table.setItem(r, 3, QTableWidgetItem(str(sample)))
-
-    def _duplicate_row(self):
-        row = self._table.currentRow()
-        if row < 0:
-            return
-        vals = self._read_row(row)
-        if vals:
-            self._add_row(*vals)
-
-    def _remove_row(self):
-        row = self._table.currentRow()
-        if row >= 0:
-            self._table.removeRow(row)
-
-    def _read_row(self, row: int) -> tuple | None:
-        try:
-            mcs = int(self._table.item(row, 0).text())
-            ms_text = self._table.item(row, 1).text().strip()
-            ms = 0 if ms_text.lower() == "auto" else int(ms_text)
-            umap = int(self._table.item(row, 2).text())
-            sample = int(self._table.item(row, 3).text())
-            return mcs, ms, umap, sample
-        except (ValueError, AttributeError):
-            return None
-
-    def get_configs(self) -> list[ClusterRunConfig]:
-        configs = []
-        for r in range(self._table.rowCount()):
-            vals = self._read_row(r)
-            if vals:
-                mcs, ms, umap, sample = vals
-                configs.append(ClusterRunConfig(
-                    min_cluster_size=mcs,
-                    min_samples=ms,
-                    umap_dims=umap,
-                    hdbscan_sample=sample,
-                ))
-        return configs
-
-    def set_enabled(self, enabled: bool):
-        self._table.setEnabled(enabled)
-
-
-# ---------------------------------------------------------------------------
-# Run Comparison Table
-# ---------------------------------------------------------------------------
-
-class _ComparisonTable(QFrame):
-    """Read-only table comparing all saved runs."""
-
-    activate_requested = pyqtSignal(str)
-
-    _COLUMNS = [
-        ("run_id", "Run ID"),
-        ("date", "Date"),
-        ("status", "Status"),
-        ("n_clusters", "States"),
-        ("min_cluster_size", "MCS"),
-        ("min_samples_requested", "MS Req"),
-        ("min_samples_resolved", "MS Res"),
-        ("umap_dims", "UMAP"),
-        ("hdbscan_sample", "Sample"),
-        ("noise_frac", "Noise %"),
-        ("largest_state_occupancy", "Largest %"),
-        ("mean_confidence", "Conf"),
-        ("health_status", "Health"),
-        ("warnings_count", "Warns"),
-        ("assignment_method", "Assign"),
-        ("runtime_seconds", "Time (s)"),
-        ("notes", "Notes"),
-    ]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "QFrame{background:#FFFFFF;border:1px solid #E5E5E5;border-radius:6px;}"
-        )
-        self._active_run = ""
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
-
-        hdr_row = QHBoxLayout()
-        hdr = QLabel("Run Comparison")
-        hdr.setFont(QFont("Arial", 13, QFont.Bold))
-        hdr.setStyleSheet("color:#444;")
-        hdr_row.addWidget(hdr)
-        hdr_row.addStretch()
-
-        self._activate_btn = QPushButton("Set Active")
-        self._activate_btn.setFixedHeight(26)
-        self._activate_btn.setStyleSheet(
-            "QPushButton{background:#1565c0;color:#fff;border:none;border-radius:4px;padding:0 12px;font-weight:600;}"
-            "QPushButton:hover{background:#0d47a1;}"
-            "QPushButton:disabled{background:#90caf9;color:#fff;}"
-        )
-        self._activate_btn.setEnabled(False)
-        self._activate_btn.clicked.connect(self._on_activate_clicked)
-        hdr_row.addWidget(self._activate_btn)
-        lay.addLayout(hdr_row)
-
-        col_labels = [c[1] for c in self._COLUMNS]
-        self._table = QTableWidget(0, len(col_labels))
-        self._table.setHorizontalHeaderLabels(col_labels)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, len(col_labels)):
-            self._table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._table.setMinimumHeight(120)
-        self._table.currentCellChanged.connect(self._on_selection_changed)
-        lay.addWidget(self._table)
-
-    def refresh(self, manifests: list[ClusterRunManifest], active_run: str):
-        self._active_run = active_run
-        self._manifests = manifests
-        self._table.setRowCount(0)
-
-        for m in manifests:
-            row = self._table.rowCount()
-            self._table.insertRow(row)
-            d = m.to_dict()
-
-            for col_idx, (key, _label) in enumerate(self._COLUMNS):
-                val = d.get(key, "")
-                if key == "noise_frac" and isinstance(val, (int, float)):
-                    text = f"{val * 100:.1f}%"
-                elif key == "largest_state_occupancy" and isinstance(val, (int, float)):
-                    text = f"{val * 100:.1f}%"
-                elif key == "mean_confidence" and isinstance(val, (int, float)):
-                    text = f"{val:.3f}"
-                elif key == "runtime_seconds" and isinstance(val, (int, float)) and val > 0:
-                    text = f"{val:.0f}"
-                elif key == "min_samples_requested" and val == 0:
-                    text = "Auto"
-                else:
-                    text = str(val) if val else ""
-
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-
-                if m.run_id == active_run:
-                    item.setBackground(QColor("#E3F2FD"))
-
-                if key == "health_status":
-                    if val == "failed":
-                        item.setForeground(QColor("#c62828"))
-                    elif val == "suspicious":
-                        item.setForeground(QColor("#e65100"))
-                    elif val == "good":
-                        item.setForeground(QColor("#2e7d32"))
-
-                self._table.setItem(row, col_idx, item)
-
-        self._activate_btn.setEnabled(False)
-
-    def _on_selection_changed(self, row, _col, _prev_row, _prev_col):
-        if 0 <= row < len(self._manifests):
-            m = self._manifests[row]
-            self._activate_btn.setEnabled(
-                m.status == "completed" and m.run_id != self._active_run
-            )
-        else:
-            self._activate_btn.setEnabled(False)
-
-    def _on_activate_clicked(self):
-        row = self._table.currentRow()
-        if 0 <= row < len(self._manifests):
-            self.activate_requested.emit(self._manifests[row].run_id)
-
-
-# ---------------------------------------------------------------------------
 # Main view
 # ---------------------------------------------------------------------------
 
@@ -417,12 +163,10 @@ class ClusterRunsView(QWidget):
 
     run_activated = pyqtSignal()
     cluster_changed = pyqtSignal()
-    queue_start_requested = pyqtSignal(list)  # list[dict] of configs
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self._queue_worker = None
         self._build()
         self.refresh()
 
@@ -435,72 +179,46 @@ class ClusterRunsView(QWidget):
         title.setFont(QFont("Arial", 18, QFont.Bold))
         outer.addWidget(title)
 
-        # --- Queue section ---
-        self._queue_table = _QueueTable()
-        outer.addWidget(self._queue_table)
-
-        queue_action_row = QHBoxLayout()
-        queue_action_row.setSpacing(6)
-
-        self._start_queue_btn = QPushButton("Start Queue")
-        self._start_queue_btn.setFixedHeight(30)
-        self._start_queue_btn.setStyleSheet(
-            "QPushButton{background:#2e7d32;color:#fff;border:none;border-radius:4px;padding:0 16px;font-weight:600;}"
-            "QPushButton:hover{background:#1b5e20;}"
-            "QPushButton:disabled{background:#a5d6a7;color:#fff;}"
-        )
-        self._start_queue_btn.clicked.connect(self._start_queue)
-        queue_action_row.addWidget(self._start_queue_btn)
-
-        self._stop_queue_btn = QPushButton("Stop After Current")
-        self._stop_queue_btn.setFixedHeight(30)
-        self._stop_queue_btn.setStyleSheet(
-            "QPushButton{background:#e65100;color:#fff;border:none;border-radius:4px;padding:0 16px;font-weight:600;}"
-            "QPushButton:hover{background:#bf360c;}"
-            "QPushButton:disabled{background:#ffcc80;color:#fff;}"
-        )
-        self._stop_queue_btn.setEnabled(False)
-        self._stop_queue_btn.clicked.connect(self._stop_queue)
-        queue_action_row.addWidget(self._stop_queue_btn)
-
-        queue_action_row.addStretch()
-
-        self._queue_progress = QLabel("")
-        self._queue_progress.setStyleSheet("color:#555;font-style:italic;")
-        queue_action_row.addWidget(self._queue_progress)
-
-        outer.addLayout(queue_action_row)
-
-        # --- Divider ---
-        div1 = QFrame()
-        div1.setFrameShape(QFrame.HLine)
-        div1.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
-        outer.addWidget(div1)
-
-        # --- Current run ---
         self._current_area = QWidget()
         self._current_layout = QVBoxLayout(self._current_area)
         self._current_layout.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._current_area)
 
-        # --- Divider ---
-        div2 = QFrame()
-        div2.setFrameShape(QFrame.HLine)
-        div2.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
-        outer.addWidget(div2)
+        self._diag_frame = QFrame()
+        self._diag_frame.setFrameShape(QFrame.StyledPanel)
+        self._diag_frame.setStyleSheet(
+            "QFrame{background:#FAFAFA;border:1px solid #E0E0E0;border-radius:6px;}"
+        )
+        df_lay = QVBoxLayout(self._diag_frame)
+        df_lay.setContentsMargins(16, 12, 16, 12)
+        df_lay.setSpacing(8)
 
-        # --- Comparison table ---
-        self._comparison = _ComparisonTable()
-        self._comparison.activate_requested.connect(self._activate_run)
-        outer.addWidget(self._comparison)
+        diag_hdr = QHBoxLayout()
+        diag_title = QLabel("Clustering Diagnostics")
+        diag_title.setFont(QFont("Arial", 12, QFont.Bold))
+        diag_hdr.addWidget(diag_title)
+        diag_hdr.addStretch()
+        df_lay.addLayout(diag_hdr)
 
-        # --- Divider ---
-        div3 = QFrame()
-        div3.setFrameShape(QFrame.HLine)
-        div3.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
-        outer.addWidget(div3)
+        self._diag_params = QLabel("")
+        self._diag_params.setWordWrap(True)
+        self._diag_params.setStyleSheet(
+            "font-size:11px;color:#444;font-family:monospace;border:none;background:transparent;"
+        )
+        df_lay.addWidget(self._diag_params)
 
-        # --- Saved runs (card list) ---
+        self._diag_warnings_lay = QVBoxLayout()
+        self._diag_warnings_lay.setSpacing(4)
+        df_lay.addLayout(self._diag_warnings_lay)
+
+        self._diag_frame.hide()
+        outer.addWidget(self._diag_frame)
+
+        div = QFrame()
+        div.setFrameShape(QFrame.HLine)
+        div.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
+        outer.addWidget(div)
+
         saved_hdr = QLabel("Saved Runs")
         saved_hdr.setFont(QFont("Arial", 13, QFont.Bold))
         saved_hdr.setStyleSheet("color:#444;")
@@ -527,19 +245,8 @@ class ClusterRunsView(QWidget):
 
     def refresh(self):
         self._refresh_current()
+        self._refresh_diagnostics()
         self._refresh_saved()
-        self._refresh_comparison()
-
-    def set_queue_running(self, running: bool):
-        self._start_queue_btn.setEnabled(not running)
-        self._stop_queue_btn.setEnabled(running)
-        self._queue_table.set_enabled(not running)
-
-    def set_queue_progress(self, index: int, total: int):
-        self._queue_progress.setText(f"Running {index + 1}/{total}...")
-
-    def clear_queue_progress(self):
-        self._queue_progress.setText("")
 
     # ------------------------------------------------------------------
     # Current run
@@ -552,8 +259,7 @@ class ClusterRunsView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        shared = RESULTS / "shared"
-        manifest_path = shared / "run_manifest.json"
+        manifest_path = RESULTS / "shared" / "run_manifest.json"
         if not manifest_path.exists():
             lbl = QLabel("No current run. Run --cluster to create one.")
             lbl.setStyleSheet("color:#888;font-style:italic;")
@@ -579,6 +285,124 @@ class ClusterRunsView(QWidget):
         lay.addWidget(card)
 
     # ------------------------------------------------------------------
+    # Diagnostics panel
+    # ------------------------------------------------------------------
+
+    def _refresh_diagnostics(self):
+        manifest = _load_manifest(RESULTS / "shared" / "run_manifest.json") or {}
+        ci       = _load_manifest(RESULTS / "shared" / "cluster_info.json") or {}
+
+        if not manifest and not ci:
+            self._diag_frame.hide()
+            return
+
+        feat_meta: dict = {}
+        idx_path = RESULTS / "features" / "index.json"
+        if idx_path.exists():
+            idx = _load_manifest(idx_path)
+            if idx:
+                raw_meta = idx.get("_meta", {})
+                # Inline schema migration: feature_count → n_features
+                feat_meta = dict(raw_meta)
+                if "n_features" not in feat_meta and "feature_count" in feat_meta:
+                    feat_meta["n_features"] = feat_meta["feature_count"]
+
+        def _v(m1, m2, key, default="—"):
+            v = m1.get(key)
+            if v is None:
+                v = m2.get(key)
+            return v if v is not None else default
+
+        n_clusters  = _v(manifest, ci, "n_clusters")
+        noise_pct   = manifest.get("noise_frac") or ci.get("noise_frac") or ci.get("low_confidence_frac") or 0
+        mean_conf   = manifest.get("mean_confidence") or ci.get("mean_confidence") or 0
+        umap_dims   = _v(manifest, ci, "umap_dims")
+        mcs         = _v(manifest, ci, "min_cluster_size")
+        ms_req      = manifest.get("min_samples_requested")
+        ms_res      = manifest.get("min_samples_resolved", manifest.get("hdbscan_min_samples"))
+        assign      = manifest.get("assignment_method", ci.get("assignment_method", "—"))
+        health      = manifest.get("health_status", "—")
+
+        # n_features: index.json _meta is primary; manifest is fallback (written since this fix)
+        n_features = feat_meta.get("n_features")
+        if n_features is None:
+            n_features = manifest.get("n_features", ci.get("n_features", "—"))
+
+        # use_wavelets: index.json _meta is primary; manifest fallback; None = unknown
+        use_wavelets = feat_meta.get("use_wavelets")
+        if use_wavelets is None:
+            uw_fallback = manifest.get("use_wavelets")
+            if uw_fallback is not None:
+                use_wavelets = uw_fallback
+
+        if ms_req == 0 and ms_res:
+            ms_text = f"min_samples=Auto (→{ms_res})"
+        elif ms_res:
+            ms_text = f"min_samples={ms_res}"
+        else:
+            ms_text = ""
+
+        if use_wavelets is True:
+            wav_text = "yes"
+        elif use_wavelets is False:
+            wav_text = "no"
+        else:
+            wav_text = "—"
+
+        health_colors = {"good": "#2e7d32", "suspicious": "#e65100", "failed": "#c62828"}
+        health_color = health_colors.get(str(health), "#555")
+
+        line1 = f"States: {n_clusters}   Noise: {float(noise_pct) * 100:.1f}%   Conf: {float(mean_conf):.3f}"
+        line2_parts = [f"mcs={mcs}", f"umap={umap_dims}"]
+        if ms_text:
+            line2_parts.append(ms_text)
+        line2 = "   ".join(line2_parts)
+        line3_parts = [f"Features: {n_features}", f"Wavelets: {wav_text}", f"Assign: {assign}"]
+        line3 = "   ".join(line3_parts)
+
+        self._diag_params.setText(f"{line1}\n{line2}\n{line3}")
+
+        while self._diag_warnings_lay.count():
+            item = self._diag_warnings_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        health_lbl = QLabel(f"Health: {health}")
+        health_lbl.setStyleSheet(f"color:{health_color};font-size:11px;font-weight:600;padding:2px 0;border:none;background:transparent;")
+        self._diag_warnings_lay.addWidget(health_lbl)
+
+        warnings = manifest.get("warnings", [])
+        if isinstance(warnings, str):
+            warnings = [warnings]
+        elif not isinstance(warnings, list):
+            warnings = []
+        if not warnings:
+            ok_lbl = QLabel("No warnings.")
+            ok_lbl.setStyleSheet("color:#2e7d32;font-size:11px;padding:2px 0;border:none;background:transparent;")
+            self._diag_warnings_lay.addWidget(ok_lbl)
+        for w in warnings:
+            if isinstance(w, dict):
+                level   = w.get("level", "info")
+                message = w.get("message", "")
+                action  = w.get("action")
+            else:
+                level, message, action = "warning", str(w), None
+            if level == "error":
+                color, icon = "#c62828", "!"
+            elif level == "warning":
+                color, icon = "#e65100", "*"
+            else:
+                color, icon = "#1565c0", "i"
+            lbl = QLabel(f"  {icon}  {message}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color:{color};font-size:11px;padding:2px 0;border:none;background:transparent;")
+            if action:
+                lbl.setToolTip(action)
+            self._diag_warnings_lay.addWidget(lbl)
+
+        self._diag_frame.show()
+
+    # ------------------------------------------------------------------
     # Saved runs list
     # ------------------------------------------------------------------
 
@@ -590,8 +414,7 @@ class ClusterRunsView(QWidget):
                 item.widget().deleteLater()
 
         mgr = _manager()
-        all_runs = mgr.list_runs()
-        saved_runs = [(m.run_id, m.to_dict()) for m in all_runs if m.saved]
+        saved_runs = [(m.run_id, m.to_dict()) for m in mgr.list_runs() if m.saved]
 
         if not saved_runs:
             self._no_saved_lbl.show()
@@ -606,32 +429,6 @@ class ClusterRunsView(QWidget):
             vl.insertWidget(vl.count() - 1, card)
 
     # ------------------------------------------------------------------
-    # Comparison table
-    # ------------------------------------------------------------------
-
-    def _refresh_comparison(self):
-        mgr = _manager()
-        manifests = mgr.list_runs()
-        active = mgr.get_active_run()
-        self._comparison.refresh(manifests, active)
-
-    # ------------------------------------------------------------------
-    # Queue actions
-    # ------------------------------------------------------------------
-
-    def _start_queue(self):
-        configs = self._queue_table.get_configs()
-        if not configs:
-            QMessageBox.warning(self, "Empty Queue", "Add at least one configuration to the queue.")
-            return
-        self.queue_start_requested.emit([c.to_dict() for c in configs])
-
-    def _stop_queue(self):
-        if self._queue_worker:
-            self._queue_worker.stop_after_current()
-        self._stop_queue_btn.setEnabled(False)
-
-    # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
@@ -640,19 +437,18 @@ class ClusterRunsView(QWidget):
         manifest_path = shared / "run_manifest.json"
         if not manifest_path.exists():
             return
-
         manifest = _load_manifest(manifest_path)
         if manifest is None:
             return
 
+        run_id = manifest.get("run_id", "")
+        if not run_id:
+            return
+
+        _manager().save_run(run_id)
+
         manifest["saved"] = True
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-        run_id = manifest.get("run_id", "")
-        if run_id:
-            mgr = _manager()
-            mgr.save_run(run_id)
-
         self.cfg["current_run_saved"] = True
         _save_cfg(self.cfg)
 
@@ -662,20 +458,16 @@ class ClusterRunsView(QWidget):
     def _delete_current_run(self):
         reply = QMessageBox.question(
             self, "Delete Current Run",
-            "Delete the current unsaved run? This cannot be undone.",
+            "Delete the current run? This cannot be undone.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
         shared = RESULTS / "shared"
-        cluster_files = (
-            list(shared.glob("*.npy"))
-            + list(shared.glob("*.pkl"))
-            + [shared / "cluster_info.json", shared / "run_manifest.json",
-               shared / "validation_report.json"]
-        )
-        for p in cluster_files:
+        for p in (list(shared.glob("*.npy")) + list(shared.glob("*.pkl"))
+                  + [shared / "cluster_info.json", shared / "run_manifest.json",
+                     shared / "validation_report.json"]):
             try:
                 if p.exists():
                     p.unlink()
@@ -696,8 +488,8 @@ class ClusterRunsView(QWidget):
             QMessageBox.warning(self, "Not Found", f"Run directory not found: {run_name}")
             return
 
-        manifest = mgr.load_run_manifest(run_name)
-        run_id = manifest.run_id if manifest else run_name
+        m = mgr.load_run_manifest(run_name)
+        run_id = m.run_id if m else run_name
         self.cfg["current_run_id"] = run_id
         self.cfg["active_cluster_run"] = run_id
         self.cfg["current_run_saved"] = True
@@ -717,14 +509,10 @@ class ClusterRunsView(QWidget):
             return
 
         old_id = manifest.get("run_id", "")
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Run", "New name:", text=old_id
-        )
-        if not ok or not new_name.strip():
+        new_name, ok = QInputDialog.getText(self, "Rename Run", "New name:", text=old_id)
+        if not ok or not new_name.strip() or new_name.strip() == old_id:
             return
         new_name = new_name.strip()
-        if new_name == old_id:
-            return
 
         runs_dir = RESULTS / "runs"
         if (runs_dir / new_name).exists():
@@ -738,63 +526,51 @@ class ClusterRunsView(QWidget):
         if old_dir.is_dir():
             new_dir = runs_dir / new_name
             old_dir.rename(new_dir)
-            saved_manifest_path = new_dir / "run_manifest.json"
-            saved_manifest = _load_manifest(saved_manifest_path)
-            if saved_manifest is not None:
-                saved_manifest["run_id"] = new_name
-                saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+            saved_mp = new_dir / "run_manifest.json"
+            saved_m = _load_manifest(saved_mp)
+            if saved_m is not None:
+                saved_m["run_id"] = new_name
+                saved_mp.write_text(json.dumps(saved_m, indent=2), encoding="utf-8")
 
-        if self.cfg.get("current_run_id") == old_id:
-            self.cfg["current_run_id"] = new_name
-            _save_cfg(self.cfg)
-        if self.cfg.get("active_cluster_run") == old_id:
-            self.cfg["active_cluster_run"] = new_name
-            _save_cfg(self.cfg)
-
+        for key in ("current_run_id", "active_cluster_run"):
+            if self.cfg.get(key) == old_id:
+                self.cfg[key] = new_name
+        _save_cfg(self.cfg)
         self.refresh()
 
     def _rename_saved_run(self, run_name: str):
         runs_dir = RESULTS / "runs"
-        run_dir = runs_dir / run_name
-        if not run_dir.is_dir():
+        if not (runs_dir / run_name).is_dir():
             QMessageBox.warning(self, "Not Found", f"Run directory not found: {run_name}")
             return
 
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Run", "New name:", text=run_name
-        )
-        if not ok or not new_name.strip():
+        new_name, ok = QInputDialog.getText(self, "Rename Run", "New name:", text=run_name)
+        if not ok or not new_name.strip() or new_name.strip() == run_name:
             return
         new_name = new_name.strip()
-        if new_name == run_name:
-            return
 
         if (runs_dir / new_name).exists():
             QMessageBox.warning(self, "Name Taken", f"A run named '{new_name}' already exists.")
             return
 
-        new_dir = runs_dir / new_name
-        run_dir.rename(new_dir)
+        (runs_dir / run_name).rename(runs_dir / new_name)
 
-        saved_manifest_path = new_dir / "run_manifest.json"
-        saved_manifest = _load_manifest(saved_manifest_path)
-        if saved_manifest is not None:
-            saved_manifest["run_id"] = new_name
-            saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+        saved_mp = runs_dir / new_name / "run_manifest.json"
+        saved_m = _load_manifest(saved_mp)
+        if saved_m is not None:
+            saved_m["run_id"] = new_name
+            saved_mp.write_text(json.dumps(saved_m, indent=2), encoding="utf-8")
 
-        current_manifest_path = RESULTS / "shared" / "run_manifest.json"
-        current_manifest = _load_manifest(current_manifest_path)
-        if current_manifest and current_manifest.get("run_id") == run_name:
-            current_manifest["run_id"] = new_name
-            current_manifest_path.write_text(json.dumps(current_manifest, indent=2), encoding="utf-8")
+        current_mp = RESULTS / "shared" / "run_manifest.json"
+        current_m = _load_manifest(current_mp)
+        if current_m and current_m.get("run_id") == run_name:
+            current_m["run_id"] = new_name
+            current_mp.write_text(json.dumps(current_m, indent=2), encoding="utf-8")
 
-        if self.cfg.get("current_run_id") == run_name:
-            self.cfg["current_run_id"] = new_name
-            _save_cfg(self.cfg)
-        if self.cfg.get("active_cluster_run") == run_name:
-            self.cfg["active_cluster_run"] = new_name
-            _save_cfg(self.cfg)
-
+        for key in ("current_run_id", "active_cluster_run"):
+            if self.cfg.get(key) == run_name:
+                self.cfg[key] = new_name
+        _save_cfg(self.cfg)
         self.refresh()
 
     def _delete_saved_run(self, run_name: str):
@@ -806,15 +582,11 @@ class ClusterRunsView(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        mgr = _manager()
-        mgr.delete_run(run_name)
+        _manager().delete_run(run_name)
 
-        current_run_id = self.cfg.get("current_run_id", "")
-        active_run = self.cfg.get("active_cluster_run", "")
-        run_manifest = _load_manifest(RESULTS / "shared" / "run_manifest.json")
-        shared_run_id = run_manifest.get("run_id", "") if run_manifest else ""
-
-        if run_name in (shared_run_id, current_run_id, active_run):
+        run_m = _load_manifest(RESULTS / "shared" / "run_manifest.json")
+        shared_id = run_m.get("run_id", "") if run_m else ""
+        if run_name in (shared_id, self.cfg.get("current_run_id", ""), self.cfg.get("active_cluster_run", "")):
             shared = RESULTS / "shared"
             for p in (list(shared.glob("*.npy")) + list(shared.glob("*.pkl"))
                       + [shared / "cluster_info.json", shared / "run_manifest.json",
