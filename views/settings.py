@@ -696,6 +696,9 @@ class SettingsView(QWidget):
         }
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
+        paths = self.cfg.setdefault("paths", {})
+        paths["results"]    = self._results.text()
+        paths["raw_videos"] = self._raw.text()
         self.cfg["dlc_python"] = self._dlc_python_le.text().strip()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
         self.cfg["cohort_csv_path"] = self._cohort_csv.text().strip()

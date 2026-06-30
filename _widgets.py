@@ -4,9 +4,9 @@ import os
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtGui import QCursor, QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QSlider, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -27,6 +27,45 @@ if _MPL:
             super().__init__(self.fig)
             self.setParent(parent)
             self.ax = self.fig.add_subplot(111)
+            self.setCursor(QCursor(Qt.PointingHandCursor))
+            self.setToolTip("Click to expand")
+
+        def mousePressEvent(self, event):
+            super().mousePressEvent(event)
+            self._show_expanded()
+
+        def _show_expanded(self):
+            from io import BytesIO
+            buf = BytesIO()
+            try:
+                self.fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+            except Exception:
+                return
+            buf.seek(0)
+            pix = QPixmap()
+            pix.loadFromData(buf.read())
+            if pix.isNull():
+                return
+            dlg = QDialog(self.parent())
+            dlg.setWindowTitle("Chart — click anywhere or press Esc to close")
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+            dlg.resize(min(pix.width() + 40, 1400), min(pix.height() + 80, 900))
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(4, 4, 4, 4)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            lbl = QLabel()
+            lbl.setPixmap(pix)
+            lbl.setAlignment(Qt.AlignCenter)
+            scroll.setWidget(lbl)
+            lay.addWidget(scroll, stretch=1)
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.clicked.connect(dlg.accept)
+            lay.addWidget(close_btn, alignment=Qt.AlignRight)
+            dlg.exec_()
+
 else:
     class MplCanvas(QWidget):
         def __init__(self, parent=None, figsize=(6, 4)):

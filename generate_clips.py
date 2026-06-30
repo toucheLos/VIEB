@@ -508,6 +508,18 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     else:
         bouts_df = _build_bouts_df(index, fps, meta)
 
+    # Preflight: check all unique video paths before starting any clip export
+    _unique_video_paths = bouts_df["video_path"].dropna().unique() if "video_path" in bouts_df.columns else []
+    _missing_videos = [p for p in _unique_video_paths if p and not os.path.exists(str(p))]
+    for _p in _missing_videos:
+        print(f"  WARN: video not found: {_p}")
+    if _missing_videos and len(_missing_videos) == len(_unique_video_paths):
+        raise RuntimeError(
+            f"All {len(_unique_video_paths)} video files are missing — no clips can be written.\n"
+            f"  raw_videos dir : {_vc.get_raw_videos_dir()}\n"
+            "Check that the directory is mounted and readable, then re-run."
+        )
+
     # Load preprocessor for "typical" ranking
     preprocessor = None
     pp_path = os.path.join(_res(), "shared", "preprocessor.pkl")

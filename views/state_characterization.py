@@ -94,6 +94,7 @@ class StateCharacterizationView(QWidget):
         self._kin_metrics: dict[str, float] = {}
         self._exemplar_df: pd.DataFrame | None = None
         self._poles: dict = {}
+        self._pending_command: list | None = None
         self._ref_width = 900
         self._build()
 
@@ -110,6 +111,11 @@ class StateCharacterizationView(QWidget):
         lbl.setFont(QFont("Arial", 14, QFont.Bold))
         top.addWidget(lbl)
         top.addStretch()
+        run_both_btn = QPushButton("Run + Generate")
+        run_both_btn.setFixedHeight(30)
+        run_both_btn.setToolTip("Run characterization then generate exemplar clips sequentially")
+        run_both_btn.clicked.connect(self._run_characterize_and_generate)
+        top.addWidget(run_both_btn)
         run_btn = QPushButton(run_label)
         run_btn.setFixedHeight(30)
         run_btn.clicked.connect(run_slot)
@@ -256,6 +262,23 @@ class StateCharacterizationView(QWidget):
         self._sort_row_widget = QWidget()
         self._sort_row_widget.setLayout(sort_row)
         ll.addWidget(self._sort_row_widget)
+
+        state_nav_row = QHBoxLayout()
+        state_nav_row.setContentsMargins(0, 0, 0, 0)
+        state_nav_row.setSpacing(4)
+        self._prev_state_btn = QPushButton("← State")
+        self._prev_state_btn.setFixedHeight(24)
+        self._prev_state_btn.setStyleSheet("font-size:11px;")
+        self._prev_state_btn.clicked.connect(self._prev_state)
+        self._next_state_btn = QPushButton("State →")
+        self._next_state_btn.setFixedHeight(24)
+        self._next_state_btn.setStyleSheet("font-size:11px;")
+        self._next_state_btn.clicked.connect(self._next_state)
+        state_nav_row.addWidget(self._prev_state_btn, stretch=1)
+        state_nav_row.addWidget(self._next_state_btn, stretch=1)
+        self._state_nav_widget = QWidget()
+        self._state_nav_widget.setLayout(state_nav_row)
+        ll.addWidget(self._state_nav_widget)
 
         self._state_list = QListWidget()
         self._state_list.currentRowChanged.connect(self._on_state_selected)
@@ -421,10 +444,22 @@ class StateCharacterizationView(QWidget):
 
         # ── Clip controls ──
         clip_row = QHBoxLayout()
+        self._prev_clip_btn = QPushButton("←")
+        self._prev_clip_btn.setFixedWidth(28)
+        self._prev_clip_btn.setFixedHeight(26)
+        self._prev_clip_btn.setToolTip("Previous clip")
+        self._prev_clip_btn.clicked.connect(self._prev_clip)
+        clip_row.addWidget(self._prev_clip_btn)
         self._load_clip_btn = QPushButton("Load Selected Exemplar")
         self._load_clip_btn.setEnabled(False)
         self._load_clip_btn.clicked.connect(self._load_clip)
         clip_row.addWidget(self._load_clip_btn)
+        self._next_clip_btn = QPushButton("→")
+        self._next_clip_btn.setFixedWidth(28)
+        self._next_clip_btn.setFixedHeight(26)
+        self._next_clip_btn.setToolTip("Next clip")
+        self._next_clip_btn.clicked.connect(self._next_clip)
+        clip_row.addWidget(self._next_clip_btn)
         self._gen_exemplars_btn = QPushButton("Generate State Exemplars")
         self._gen_exemplars_btn.clicked.connect(
             lambda: self._run_command(["generate_clips.py"], self._terminal)
@@ -565,6 +600,32 @@ class StateCharacterizationView(QWidget):
         self._load()
 
     def refresh(self, data: dict) -> None:
+        self._data = data
+        self._load()
+
+    def _load_from_disk(self) -> None:
+        """Read characterization outputs from disk and refresh the view."""
+        def _csv(rel: str) -> pd.DataFrame | None:
+            p = RESULTS / rel
+            try:
+                return pd.read_csv(p) if p.exists() else None
+            except Exception:
+                return None
+
+        def _json(rel: str) -> dict:
+            p = RESULTS / rel
+            try:
+                import json as _json_mod
+                return _json_mod.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            except Exception:
+                return {}
+
+        data = dict(self._data)
+        data["state_summary"] = _csv("characterization/state_summary.csv")
+        data["context_report"] = _csv("characterization/context_report.csv")
+        data["feature_zscores"] = _csv("characterization/state_feature_zscores.csv")
+        data["duration_summary"] = _csv("characterization/state_duration_summary.csv")
+        data["cluster_info"] = _json("shared/cluster_info.json")
         self._data = data
         self._load()
 
@@ -1461,6 +1522,36 @@ class StateCharacterizationView(QWidget):
 
     # ─────────────────────────────────────── Command runner ──
 
+    def _prev_state(self) -> None:
+        cur = self._state_list.currentRow()
+        for r in range(cur - 1, -1, -1):
+            if not self._state_list.item(r).isHidden():
+                self._state_list.setCurrentRow(r)
+                return
+
+    def _next_state(self) -> None:
+        cur = self._state_list.currentRow()
+        for r in range(cur + 1, self._state_list.count()):
+            if not self._state_list.item(r).isHidden():
+                self._state_list.setCurrentRow(r)
+                return
+
+    def _prev_clip(self) -> None:
+        row = self._exemplar_table.currentRow()
+        if row > 0:
+            self._exemplar_table.selectRow(row - 1)
+            self._load_clip()
+
+    def _next_clip(self) -> None:
+        row = self._exemplar_table.currentRow()
+        if row < self._exemplar_table.rowCount() - 1:
+            self._exemplar_table.selectRow(row + 1)
+            self._load_clip()
+
+    def _run_characterize_and_generate(self) -> None:
+        self._pending_command = ["generate_clips.py"]
+        self._run_command(["state_characterizer.py"], self._terminal)
+
     def _run_command(self, args: list[str], terminal: TerminalBox) -> None:
         if self._worker and self._worker.isRunning():
             return
@@ -1480,4 +1571,10 @@ class StateCharacterizationView(QWidget):
     def _on_run_done(self, ok: bool) -> None:
         self.worker_running.emit(False)
         self._running_command = ""
+        if ok and self._pending_command:
+            next_cmd = self._pending_command
+            self._pending_command = None
+            self._run_command(next_cmd, self._terminal)
+            return
+        self._pending_command = None
         self._load()

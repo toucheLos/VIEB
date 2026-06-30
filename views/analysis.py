@@ -218,21 +218,20 @@ class AnalysisView(QWidget):
         #   1  State Characterization                → stack 0
         #   2  State Comparison                      → stack 1
         #   3  Transitions & Motifs                  → stack 2
-        #   4  Diagnostics                           → stack 3
-        #   5  section header "OPTIONAL ANALYSIS"    (non-selectable)
-        #   6  Cohort Analysis                       → stack 4
-        #   7  Quantification                        → stack 5
-        #   8  [metric label]                        → stack 6
-        #   9  Jess Correlation                      → stack 7
-        #  10  Event Alignment                       → stack 8
-        #  11  Column Mapping                        → stack 9
+        #   4  section header "OPTIONAL ANALYSIS"    (non-selectable)
+        #   5  Cohort Analysis                       → stack 3
+        #   6  Quantification                        → stack 4
+        #   7  [metric label]                        → stack 5
+        #   8  Jess Correlation                      → stack 6
+        #   9  Event Alignment                       → stack 7
+        #  10  Column Mapping                        → stack 8
 
-        self._separator_rows: set[int] = {0, 5}
+        self._separator_rows: set[int] = {0, 4}
         self._row_to_stack: dict[int, int] = {
-            1: 0, 2: 1, 3: 2, 4: 3,
-            6: 4, 7: 5, 8: 6, 9: 7, 10: 8, 11: 9,
+            1: 0, 2: 1, 3: 2,
+            5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 10: 8,
         }
-        self._metric_label_row: int = 8
+        self._metric_label_row: int = 7
 
         def _add_section(label: str) -> None:
             item = QListWidgetItem(label)
@@ -252,7 +251,6 @@ class AnalysisView(QWidget):
         _add_tab("State Characterization")
         _add_tab("State Comparison")
         _add_tab("Transitions & Motifs")
-        _add_tab("Diagnostics")
         _add_section("OPTIONAL ANALYSIS")
         _add_tab("Cohort Analysis")
         _add_tab("Quantification")
@@ -266,20 +264,19 @@ class AnalysisView(QWidget):
         root_lay.addWidget(self._tab_list)
 
         # ── Content stack (one page per real tab, no separator pages) ────
-        # Tabs are built lazily on first visit to avoid constructing all 10
+        # Tabs are built lazily on first visit to avoid constructing all 9
         # tab pages (with ~15-20 MplCanvas figures) during AnalysisView init.
         self._stack = QStackedWidget()
         self._tab_builders = [
             self._build_tab8,              # stack 0: State Characterization
             self._build_tab1,              # stack 1: State Comparison
             self._build_tab2,              # stack 2: Transitions & Motifs
-            self._build_tab_diagnostics,   # stack 3: Diagnostics
-            self._build_tab3,              # stack 4: Cohort Analysis
-            self._build_tab4,              # stack 5: Quantification
-            self._build_tab5,              # stack 6: [metric label]
-            self._build_tab6,              # stack 7: Jess Correlation
-            self._build_tab7,              # stack 8: Event Alignment
-            self._build_tab0,              # stack 9: Column Mapping
+            self._build_tab3,              # stack 3: Cohort Analysis
+            self._build_tab4,              # stack 4: Quantification
+            self._build_tab5,              # stack 5: [metric label]
+            self._build_tab6,              # stack 6: Jess Correlation
+            self._build_tab7,              # stack 7: Event Alignment
+            self._build_tab0,              # stack 8: Column Mapping
         ]
         self._tab_built = [False] * len(self._tab_builders)
         for _ in self._tab_builders:
@@ -863,13 +860,12 @@ class AnalysisView(QWidget):
             self._load_tab8,              # stack 0: State Characterization
             self._load_tab1,              # stack 1: State Comparison
             self._load_tab2,              # stack 2: Transitions & Motifs
-            self._load_tab_diagnostics,   # stack 3: Diagnostics
-            self._load_tab3,              # stack 4: Cohort Analysis
-            self._load_tab4,              # stack 5: Quantification
-            self._load_tab5,              # stack 6: [metric label]
-            self._load_tab6,              # stack 7: Jess Correlation
-            self._load_tab7,              # stack 8: Event Alignment
-            self._load_tab0,              # stack 9: Column Mapping
+            self._load_tab3,              # stack 3: Cohort Analysis
+            self._load_tab4,              # stack 4: Quantification
+            self._load_tab5,              # stack 5: [metric label]
+            self._load_tab6,              # stack 6: Jess Correlation
+            self._load_tab7,              # stack 7: Event Alignment
+            self._load_tab0,              # stack 8: Column Mapping
         ]
 
     def _ensure_tab_built(self, stack_idx: int) -> None:
