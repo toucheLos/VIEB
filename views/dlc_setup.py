@@ -29,6 +29,7 @@ _ROLE_OPTIONS = [
 from _utils import ROOT, _save_cfg, _register_project, _find_dlc_project
 from _workers import SubprocessWorker
 from _dialogs import _CreateProjectDialog
+from dlc_project_utils import normalize_dlc_project_path
 
 try:
     from vieb_config import get_dlc_project_path
@@ -1251,6 +1252,8 @@ class DLCSetupView(QWidget):
     # ── Project management ────────────────────────────────────────────────────
 
     def _set_project_path(self, path: str):
+        project_path = normalize_dlc_project_path(path)
+        path = str(project_path) if project_path else path
         self._project_path = path
         try:
             import vieb_config

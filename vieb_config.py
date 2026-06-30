@@ -6,8 +6,7 @@ rather than hardcoding any directory name.  The DLC project path is resolved in
 this priority order:
 
   1. config.json key "dlc_project_path" (explicit override)
-  2. Auto-discovery: any directory in the project root matching VIEB-*-20YY-MM-DD
-     that also contains a config.yaml
+  2. Auto-discovery: a generated DLC*/ legacy VIEB-* directory that contains a config.yaml
   3. None  — DLC not yet configured; callers decide what to do
 """
 
@@ -15,20 +14,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from typing import Optional
 from pathlib import Path
 
 import project_manager as _pm
+from dlc_project_utils import discover_dlc_projects, normalize_dlc_project_path
 
 PROJECT_ROOT: str = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "config.json")
 _APP_CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "app_config.json")
-
-# Standard DLC project directory naming: VIEB-<anything>-YYYY-MM-DD
-_DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
-
 
 # ---------------------------------------------------------------------------
 # config.json helpers (thin wrappers — gui.py is the authoritative writer)
@@ -69,25 +64,16 @@ def get_dlc_project_path() -> Optional[str]:
     cfg = _load_config()
 
     # 1. Explicit entry in config.json
-    explicit = cfg.get("dlc_project_path")
-    if explicit and os.path.isdir(explicit):
-        if os.path.exists(os.path.join(explicit, "config.yaml")):
-            return explicit
+    explicit = normalize_dlc_project_path(cfg.get("dlc_project_path"))
+    if explicit and explicit.is_dir():
+        if (explicit / "config.yaml").exists():
+            return str(explicit)
         # Registered but config.yaml missing — fall through to discovery
 
-    # 2. Auto-discovery: scan project root for any matching directory
-    try:
-        entries = sorted(os.listdir(PROJECT_ROOT))
-    except OSError:
-        entries = []
-
-    for entry in entries:
-        if _DLC_NAME_RE.match(entry):
-            candidate = os.path.join(PROJECT_ROOT, entry)
-            if os.path.isdir(candidate) and os.path.exists(
-                os.path.join(candidate, "config.yaml")
-            ):
-                return candidate
+    # 2. Auto-discovery: scan project root for generated DLC projects
+    discovered = discover_dlc_projects(PROJECT_ROOT)
+    if discovered:
+        return str(discovered[0])
 
     return None
 
@@ -101,7 +87,8 @@ def get_dlc_config_path() -> Optional[str]:
 def set_dlc_project_path(path: str) -> None:
     """Persist a DLC project path to config.json so future calls find it immediately."""
     cfg = _load_config()
-    cfg["dlc_project_path"] = os.path.abspath(path)
+    project_path = normalize_dlc_project_path(path)
+    cfg["dlc_project_path"] = str(project_path) if project_path else os.path.abspath(path)
     _save_config(cfg)
 
 
