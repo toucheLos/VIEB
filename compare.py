@@ -1271,6 +1271,69 @@ def _fit_cpu_hdbscan_with_assignment(
     return clusterer_model, all_raw_labels, all_probs
 
 
+def _assign_by_nearest_centroid(
+    fit_points: np.ndarray,
+    fit_labels: np.ndarray,
+    predict_points: np.ndarray,
+    noise_distance_factor: float = 3.0,
+    batch_size: int = 100_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign labels to non-sampled frames by nearest cluster centroid.
+
+    Used for GPU HDBSCAN where approximate_predict is unavailable.
+    Computes the centroid of each cluster in UMAP space, then assigns
+    each predict_point to its nearest centroid.
+    Points farther than noise_distance_factor * (median within-cluster radius)
+    are labelled -1 (noise) with probability 0.
+
+    Batches the distance computation to avoid OOM on large predict sets.
+    """
+    unique_labels = np.unique(fit_labels[fit_labels >= 0])
+    if len(unique_labels) == 0:
+        return (
+            np.full(len(predict_points), -1, dtype=np.int32),
+            np.zeros(len(predict_points), dtype=np.float32),
+        )
+
+    centroids = np.stack([
+        fit_points[fit_labels == lbl].mean(axis=0)
+        for lbl in unique_labels
+    ])  # (n_clusters, n_dims)
+
+    # Noise threshold: noise_distance_factor × median within-cluster radius
+    noise_threshold: float | None = None
+    if noise_distance_factor > 0:
+        intra_dists = []
+        for i, lbl in enumerate(unique_labels):
+            pts = fit_points[fit_labels == lbl]
+            if len(pts) > 1:
+                intra_dists.append(float(np.median(np.linalg.norm(pts - centroids[i], axis=1))))
+        if intra_dists:
+            noise_threshold = noise_distance_factor * float(np.median(intra_dists))
+
+    n_predict = len(predict_points)
+    pred_labels = np.full(n_predict, -1, dtype=np.int32)
+    pred_probs  = np.zeros(n_predict, dtype=np.float32)
+
+    for start in range(0, n_predict, batch_size):
+        end = min(start + batch_size, n_predict)
+        batch = predict_points[start:end]
+        diffs = batch[:, np.newaxis, :] - centroids[np.newaxis, :, :]
+        dists = np.linalg.norm(diffs, axis=-1)  # (batch, n_clusters)
+        nearest_idx  = np.argmin(dists, axis=1)
+        nearest_dist = dists[np.arange(len(batch)), nearest_idx]
+        batch_labels = unique_labels[nearest_idx].astype(np.int32)
+        batch_probs  = (1.0 / (1.0 + nearest_dist)).astype(np.float32)
+        if noise_threshold is not None:
+            noise_mask = nearest_dist > noise_threshold
+            batch_labels[noise_mask] = -1
+            batch_probs[noise_mask]  = 0.0
+        pred_labels[start:end] = batch_labels
+        pred_probs[start:end]  = batch_probs
+
+    return pred_labels, pred_probs
+
+
 def _mark_run_saved() -> None:
     """Set saved=true in results/shared/run_manifest.json, save to runs/, and update config.json."""
     from cluster_run_manager import ClusterRunManager
@@ -1557,138 +1620,70 @@ def cmd_cluster(
         f"min_samples={effective_min_samples}, hdbscan_sample={hdbscan_sample})..."
     )
 
+    n_embedded = len(pooled_umap)
+
     if validate:
-        # Validation still fits only on the train partition; if needed, we
-        # subsample within that train partition before HDBSCAN fitting.
         train_fit_indices = np.asarray(train_indices, dtype=np.int64)
         test_indices = np.concatenate([
             np.arange(boundaries[s][0], boundaries[s][1]) for s in test_stems
         ]) if test_stems else np.array([], dtype=np.int64)
-        if use_gpu:
-            fit_indices = train_fit_indices
-            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} train frames...")
-        elif len(train_fit_indices) > hdbscan_sample:
-            rng = np.random.default_rng(42)
-            sampled_pos = np.sort(
-                rng.choice(len(train_fit_indices), hdbscan_sample, replace=False)
-            )
-            fit_indices = train_fit_indices[sampled_pos]
-            print(
-                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame train sample, "
-                f"then assigning remaining train/test frames..."
-            )
-        else:
-            fit_indices = train_fit_indices
-            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} train frames...")
-        actual_hdbscan_sample = int(len(fit_indices))
-
-        predict_mask = np.ones(len(pooled_umap), dtype=bool)
-        predict_mask[fit_indices] = False
-        predict_indices = np.flatnonzero(predict_mask)
-
-        if use_gpu:
-            clusterer_model = HDBSCANClass(
-                min_cluster_size=min_cluster_size,
-                min_samples=effective_min_samples,
-                cluster_selection_method="eom",
-            )
-            try:
-                clusterer_model.fit(pooled_umap[fit_indices])
-            except Exception as _gpu_err:
-                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
-                import hdbscan as _hdbscan_lib
-                use_gpu = False
-                HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                    HDBSCANClass,
-                    pooled_umap,
-                    fit_indices,
-                    predict_indices,
-                    min_cluster_size,
-                    effective_min_samples,
-                )
-            else:
-                fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
-                all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
-                all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
-                all_raw_labels[fit_indices] = fit_labels
-                all_probs[fit_indices] = fit_probs
-                if len(test_indices) > 0:
-                    try:
-                        test_result = clusterer_model.transform(pooled_umap[test_indices])
-                        if hasattr(test_result, "to_numpy"):
-                            test_result = test_result.to_numpy()
-                        elif hasattr(test_result, "get"):
-                            test_result = test_result.get()
-                        test_raw_labels = np.asarray(
-                            test_result[:, 0] if test_result.ndim > 1 else test_result,
-                            dtype=np.int32,
-                        )
-                        test_probs = np.ones(len(test_raw_labels), dtype=np.float32)
-                        test_probs[test_raw_labels < 0] = 0.0
-                    except Exception:
-                        test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
-                        test_probs = np.zeros(len(test_indices), dtype=np.float32)
-                    all_raw_labels[test_indices] = test_raw_labels
-                    all_probs[test_indices] = test_probs
-        else:
-            clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                HDBSCANClass,
-                pooled_umap,
-                fit_indices,
-                predict_indices,
-                min_cluster_size,
-                effective_min_samples,
-            )
-
+        base_indices = train_fit_indices
     else:
-        all_indices = np.arange(len(pooled_umap), dtype=np.int64)
-        if use_gpu:
-            fit_indices = all_indices
-            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} embedded frames...")
-        elif len(all_indices) > hdbscan_sample:
-            rng = np.random.default_rng(42)
-            sampled_pos = np.sort(
-                rng.choice(len(all_indices), hdbscan_sample, replace=False)
-            )
-            fit_indices = all_indices[sampled_pos]
-            print(
-                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame embedding sample, "
-                f"then assigning remaining frames..."
-            )
-        else:
-            fit_indices = all_indices
-            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} embedded frames...")
-        actual_hdbscan_sample = int(len(fit_indices))
+        base_indices = np.arange(n_embedded, dtype=np.int64)
 
-        predict_mask = np.ones(len(pooled_umap), dtype=bool)
-        predict_mask[fit_indices] = False
-        predict_indices = np.flatnonzero(predict_mask)
+    # ---- Sampling (GPU and CPU both respect hdbscan_sample) ----
+    n_base = len(base_indices)
+    if n_base > hdbscan_sample:
+        rng = np.random.default_rng(42)
+        sampled_pos = np.sort(rng.choice(n_base, hdbscan_sample, replace=False))
+        fit_indices = base_indices[sampled_pos]
+        _partition = "train " if validate else ""
+        print(
+            f"  Fitting HDBSCAN on {len(fit_indices):,} sampled {_partition}frames "
+            f"out of {n_embedded:,} total embedded "
+            f"({n_base:,} {_partition}frames); "
+            f"full-frame HDBSCAN disabled."
+        )
+        print(
+            f"  Assigning remaining {n_embedded - len(fit_indices):,} frames "
+            f"using {'approximate_predict' if not use_gpu else 'nearest-centroid'} assignment."
+        )
+    else:
+        fit_indices = base_indices
+        print(
+            f"  Fitting HDBSCAN on all {len(fit_indices):,} "
+            f"{'train ' if validate else ''}embedded frames "
+            f"(total embedded: {n_embedded:,})."
+        )
 
-        if use_gpu:
-            clusterer_model = HDBSCANClass(
-                min_cluster_size=min_cluster_size,
-                min_samples=effective_min_samples,
-                cluster_selection_method="eom",
-            )
-            try:
-                clusterer_model.fit(pooled_umap[fit_indices])
-            except Exception as _gpu_err:
-                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
-                import hdbscan as _hdbscan_lib
-                use_gpu = False
-                HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                    HDBSCANClass,
-                    pooled_umap,
-                    fit_indices,
-                    predict_indices,
-                    min_cluster_size,
-                    effective_min_samples,
-                )
-            else:
-                all_raw_labels, all_probs = _extract_hdbscan_outputs(clusterer_model)
-        else:
+    # Safety guard: never silently fit on more frames than the sample limit.
+    if len(fit_indices) > hdbscan_sample:
+        raise RuntimeError(
+            f"HDBSCAN safety guard: about to fit on {len(fit_indices):,} frames "
+            f"but hdbscan_sample={hdbscan_sample:,}. "
+            "This would likely OOM. This is a code bug — please report it."
+        )
+
+    actual_hdbscan_sample = int(len(fit_indices))
+
+    predict_mask = np.ones(n_embedded, dtype=bool)
+    predict_mask[fit_indices] = False
+    predict_indices = np.flatnonzero(predict_mask)
+
+    # ---- GPU HDBSCAN ----
+    if use_gpu:
+        clusterer_model = HDBSCANClass(
+            min_cluster_size=min_cluster_size,
+            min_samples=effective_min_samples,
+            cluster_selection_method="eom",
+        )
+        try:
+            clusterer_model.fit(pooled_umap[fit_indices])
+        except Exception as _gpu_err:
+            print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
+            import hdbscan as _hdbscan_lib
+            use_gpu = False
+            HDBSCANClass = _hdbscan_lib.HDBSCAN
             clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
                 HDBSCANClass,
                 pooled_umap,
@@ -1697,8 +1692,39 @@ def cmd_cluster(
                 min_cluster_size,
                 effective_min_samples,
             )
+        else:
+            fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
+            all_raw_labels = np.full(n_embedded, -1, dtype=np.int32)
+            all_probs = np.zeros(n_embedded, dtype=np.float32)
+            all_raw_labels[fit_indices] = fit_labels
+            all_probs[fit_indices] = fit_probs
+            if len(predict_indices) > 0:
+                print(f"  Assigning {len(predict_indices):,} non-sampled frames via nearest-centroid…")
+                pred_labels, pred_probs = _assign_by_nearest_centroid(
+                    pooled_umap[fit_indices],
+                    fit_labels,
+                    pooled_umap[predict_indices],
+                )
+                all_raw_labels[predict_indices] = pred_labels
+                all_probs[predict_indices] = pred_probs
 
-    _assignment_method = "direct" if len(predict_indices) == 0 else "approximate_predict"
+    # ---- CPU HDBSCAN ----
+    if not use_gpu:
+        clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+            HDBSCANClass,
+            pooled_umap,
+            fit_indices,
+            predict_indices,
+            min_cluster_size,
+            effective_min_samples,
+        )
+
+    if len(predict_indices) == 0:
+        _assignment_method = "direct"
+    elif use_gpu:
+        _assignment_method = "nearest_centroid"
+    else:
+        _assignment_method = "approximate_predict"
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
     print(f"  Behavioral states discovered: {n_found}")

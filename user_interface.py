@@ -6404,9 +6404,22 @@ QMenu::separator {
     background: #E5E5E5;
     margin: 4px 6px;
 }
-QFileDialog {
+QDialog {
     background: #FAFAFA;
     color: #1A1A1A;
+}
+QFileDialog QWidget {
+    background: #FAFAFA;
+    color: #1A1A1A;
+}
+QFileDialog QListView, QFileDialog QTreeView {
+    background: #FFFFFF;
+}
+QFileDialog QLineEdit {
+    background: #FFFFFF;
+}
+QFileDialog QToolButton {
+    background: transparent;
 }
 QListView, QTreeView, QAbstractItemView {
     background: #FFFFFF;
