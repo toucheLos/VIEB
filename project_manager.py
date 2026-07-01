@@ -32,6 +32,23 @@ LEGACY_MARKERS = (
     Path("results/comparison/summary_table.csv"),
 )
 
+_startup_cache: dict = {}
+
+
+def _startup_cache_key(app_path: Path) -> str:
+    try:
+        if not app_path.exists():
+            return ""
+        mtime = app_path.stat().st_mtime
+        active = json.loads(app_path.read_text(encoding="utf-8")).get("active_project", "")
+        return f"{active}|{mtime:.6f}"
+    except Exception:
+        return ""
+
+
+def invalidate_project_cache() -> None:
+    _startup_cache.clear()
+
 
 class ProjectSelectionError(RuntimeError):
     """Raised when VIEB cannot resolve a valid active project."""
@@ -109,6 +126,7 @@ def load_app_config(app_config_path: Path | str = APP_CONFIG_PATH) -> dict[str, 
 
 
 def save_app_config(data: dict[str, Any], app_config_path: Path | str = APP_CONFIG_PATH) -> None:
+    invalidate_project_cache()
     path = Path(app_config_path)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -321,7 +339,22 @@ def resolve_project_paths(
     app_config_path: Path | str | None = None,
 ) -> dict[str, ResolvedProjectPath]:
     root = Path(repo_root).resolve()
-    project = get_active_project(root, app_config_path)
+    app_path = Path(app_config_path) if app_config_path else root / "app_config.json"
+    app_cfg = load_app_config(app_path)
+    active_raw = app_cfg.get("active_project") or ""
+    if not active_raw:
+        raise ProjectSelectionError(
+            "No active project. Complete Stage 0: Onboarding before running the pipeline."
+        )
+    project = Path(active_raw)
+    if not project.is_absolute():
+        project = root / project
+    project = project.resolve()
+    if not project.is_dir():
+        raise ProjectSelectionError(
+            f"Active project directory does not exist: {project}. "
+            "Complete Stage 0: Onboarding before running the pipeline."
+        )
     cfg = _read_project_config(project)
     return resolve_project_paths_for_project(project, cfg, root)
 
@@ -594,6 +627,11 @@ def _remember_project(app_cfg: dict[str, Any], project_path: Path, name: str) ->
 def select_startup_project(repo_root: Path | str = REPO_ROOT, app_config_path: Path | str | None = None) -> StartupSelection:
     root = Path(repo_root).resolve()
     app_path = Path(app_config_path) if app_config_path else root / "app_config.json"
+
+    cache_key = _startup_cache_key(app_path)
+    if cache_key and _startup_cache.get("key") == cache_key:
+        return _startup_cache["result"]
+
     app_cfg = load_app_config(app_path)
     legacy = detect_legacy_project(root)["detected"]
 
@@ -607,7 +645,10 @@ def select_startup_project(repo_root: Path | str = REPO_ROOT, app_config_path: P
         if validation.valid:
             _remember_project(app_cfg, active, validation.project_name)
             save_app_config(app_cfg, app_path)
-            return StartupSelection("use_active", active, [active], validation, legacy)
+            result = StartupSelection("use_active", active, [active], validation, legacy)
+            _startup_cache["key"] = _startup_cache_key(app_path)
+            _startup_cache["result"] = result
+            return result
 
     candidates = detect_projects(repo_root=root, app_config_path=app_path)
     paths = [c.path for c in candidates]
@@ -615,10 +656,17 @@ def select_startup_project(repo_root: Path | str = REPO_ROOT, app_config_path: P
         validation = candidates[0]
         _remember_project(app_cfg, validation.path, validation.project_name)
         save_app_config(app_cfg, app_path)
-        return StartupSelection("auto_selected", validation.path, paths, validation, legacy)
+        result = StartupSelection("auto_selected", validation.path, paths, validation, legacy)
+        _startup_cache["key"] = _startup_cache_key(app_path)
+        _startup_cache["result"] = result
+        return result
     if len(candidates) > 1:
-        return StartupSelection("picker_required", None, paths, None, legacy, "Multiple valid projects found.")
-    return StartupSelection("onboarding_required", None, [], None, legacy, "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.")
+        result = StartupSelection("picker_required", None, paths, None, legacy, "Multiple valid projects found.")
+    else:
+        result = StartupSelection("onboarding_required", None, [], None, legacy, "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.")
+    _startup_cache["key"] = cache_key
+    _startup_cache["result"] = result
+    return result
 
 
 def get_active_project(repo_root: Path | str = REPO_ROOT, app_config_path: Path | str | None = None) -> Path:
@@ -651,6 +699,7 @@ def set_active_project(
     app_config_path: Path | str | None = None,
 ) -> ProjectValidation:
     """Validate, remember, and return the active project."""
+    invalidate_project_cache()
     root = Path(repo_root).resolve()
     project = Path(project_path).expanduser()
     if not project.is_absolute():

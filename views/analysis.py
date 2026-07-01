@@ -1184,6 +1184,7 @@ class AnalysisView(QWidget):
         canvas.setVisible(has_png)
         if not has_png or not _MPL:
             return
+        canvas._expand_png_path = str(png_path)
         try:
             canvas.fig.clf()
             ax = canvas.fig.add_subplot(111)
@@ -1421,6 +1422,7 @@ class AnalysisView(QWidget):
         cohort_dir = RESULTS / "cohort"
         profiles_png = cohort_dir / "cohort_state_profiles.png"
         if profiles_png.exists() and self._t3_profiles_canvas:
+            self._t3_profiles_canvas._expand_png_path = str(profiles_png)
             try:
                 self._t3_profiles_canvas.fig.clf()
                 ax = self._t3_profiles_canvas.fig.add_subplot(111)
@@ -1828,6 +1830,7 @@ class AnalysisView(QWidget):
         # Heatmap PNG
         heatmap_png = RESULTS / "quantification" / "correlation_heatmap.png"
         if heatmap_png.exists() and self._t6_heatmap_canvas:
+            self._t6_heatmap_canvas._expand_png_path = str(heatmap_png)
             try:
                 self._t6_heatmap_canvas.show()
                 self._t6_heatmap_canvas.fig.clf()

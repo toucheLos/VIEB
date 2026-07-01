@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor, QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QSlider, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -29,27 +29,36 @@ if _MPL:
             self.ax = self.fig.add_subplot(111)
             self.setCursor(QCursor(Qt.PointingHandCursor))
             self.setToolTip("Click to expand")
+            # If set, _show_expanded loads this PNG directly (full resolution)
+            # instead of re-rendering the figure.
+            self._expand_png_path = None  # str path or None
 
         def mousePressEvent(self, event):
             super().mousePressEvent(event)
             self._show_expanded()
 
         def _show_expanded(self):
-            from io import BytesIO
-            buf = BytesIO()
-            try:
-                self.fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-            except Exception:
-                return
-            buf.seek(0)
-            pix = QPixmap()
-            pix.loadFromData(buf.read())
+            if self._expand_png_path:
+                pix = QPixmap(self._expand_png_path)
+            else:
+                from io import BytesIO
+                buf = BytesIO()
+                try:
+                    self.fig.savefig(buf, format="png", dpi=250, bbox_inches="tight")
+                except Exception:
+                    return
+                buf.seek(0)
+                pix = QPixmap()
+                pix.loadFromData(buf.read())
             if pix.isNull():
                 return
+            screen = QApplication.primaryScreen().availableGeometry()
+            max_w = int(screen.width() * 0.92)
+            max_h = int(screen.height() * 0.88)
             dlg = QDialog(self.parent())
             dlg.setWindowTitle("Chart — click anywhere or press Esc to close")
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
-            dlg.resize(min(pix.width() + 40, 1400), min(pix.height() + 80, 900))
+            dlg.resize(min(pix.width() + 40, max_w), min(pix.height() + 80, max_h))
             lay = QVBoxLayout(dlg)
             lay.setContentsMargins(4, 4, 4, 4)
             scroll = QScrollArea()

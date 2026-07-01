@@ -29,6 +29,12 @@ _APP_CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "app_config.json")
 # Standard DLC project directory naming: VIEB-<anything>-YYYY-MM-DD
 _DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
 
+_path_cache: dict[str, str] = {}
+
+
+def invalidate_path_cache() -> None:
+    _path_cache.clear()
+
 
 # ---------------------------------------------------------------------------
 # config.json helpers (thin wrappers — gui.py is the authoritative writer)
@@ -51,6 +57,8 @@ def _require_config() -> dict:
 
 
 def _save_config(data: dict) -> None:
+    _pm.invalidate_project_cache()
+    invalidate_path_cache()
     project = _pm.get_active_project(PROJECT_ROOT, _APP_CONFIG_PATH)
     _pm.write_project_config(project, data)
 
@@ -242,17 +250,23 @@ def normalize_metadata_columns(df) -> "pd.DataFrame":
 
 def get_raw_videos_dir() -> str:
     """Return the active project's raw-videos directory."""
-    return str(_pm.resolve_project_path("raw_videos", PROJECT_ROOT, _APP_CONFIG_PATH))
+    if "raw_videos_dir" not in _path_cache:
+        _path_cache["raw_videos_dir"] = str(_pm.resolve_project_path("raw_videos", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _path_cache["raw_videos_dir"]
 
 
 def get_results_dir() -> str:
     """Return the active project's results directory."""
-    return str(_pm.resolve_project_path("results", PROJECT_ROOT, _APP_CONFIG_PATH))
+    if "results_dir" not in _path_cache:
+        _path_cache["results_dir"] = str(_pm.resolve_project_path("results", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _path_cache["results_dir"]
 
 
 def get_metadata_path() -> str:
     """Return the active project's metadata CSV path."""
-    return str(_pm.resolve_project_path("metadata", PROJECT_ROOT, _APP_CONFIG_PATH))
+    if "metadata_path" not in _path_cache:
+        _path_cache["metadata_path"] = str(_pm.resolve_project_path("metadata", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _path_cache["metadata_path"]
 
 
 def get_pose_source() -> str:
@@ -305,8 +319,10 @@ def get_clips_dir() -> str:
     """Return the clips directory.
     Derived as the sibling of get_results_dir() named 'clips', which reproduces
     the default PROJECT_ROOT/clips when results_dir is PROJECT_ROOT/results."""
-    from pathlib import Path as _Path
-    return str(_Path(get_results_dir()).parent / "clips")
+    if "clips_dir" not in _path_cache:
+        from pathlib import Path as _Path
+        _path_cache["clips_dir"] = str(_Path(get_results_dir()).parent / "clips")
+    return _path_cache["clips_dir"]
 
 
 def require_dlc_project_path() -> str:

@@ -648,10 +648,18 @@ def _save_app_config(app_cfg: dict) -> None:
 
 
 def _get_project_config_path() -> Path | None:
-    """Return the config.json path for the currently active project."""
+    """Return config.json path for the active project without running the validation scan."""
     try:
-        return _pm.get_active_project(ROOT, APP_CONFIG_PATH) / "config.json"
-    except _pm.ProjectSelectionError:
+        app_cfg = _pm.load_app_config(APP_CONFIG_PATH)
+        active_raw = app_cfg.get("active_project") or ""
+        if not active_raw:
+            return None
+        project = Path(active_raw)
+        if not project.is_absolute():
+            project = ROOT / project
+        project = project.resolve()
+        return project / "config.json" if project.is_dir() else None
+    except Exception:
         return None
 
 
@@ -1042,13 +1050,18 @@ class PipelineRunner(QThread):
         )
         self._proc = p
         assert p.stdout is not None
+        tail: list[str] = []
         for line in p.stdout:
             if self._stop_flag:
                 p.terminate()
                 break
             self.log.emit(line)
+            tail.append(line.rstrip())
+            if len(tail) > 30:
+                tail.pop(0)
         rc = p.wait()
         self._proc = None
+        self._last_tail = tail if rc != 0 else []
         return rc == 0 and not self._stop_flag
 
     def _run_cluster_wsl(self, fps: float, mcs: int) -> bool:
@@ -1130,7 +1143,11 @@ class PipelineRunner(QThread):
                         if ok:
                             self.stage_done.emit(3, True)
                         else:
-                            raise RuntimeError("Clustering subprocess returned non-zero exit code.")
+                            tail = getattr(self, "_last_tail", [])
+                            tail_str = "\n".join(tail[-15:]) if tail else "(no output captured)"
+                            raise RuntimeError(
+                                f"Clustering subprocess failed.\n\n--- last output ---\n{tail_str}"
+                            )
                     except Exception:
                         self.log.emit(traceback.format_exc())
                         self.stage_done.emit(3, False)
@@ -2351,6 +2368,22 @@ class StageRow(QFrame):
         self._from_btn.setEnabled(enabled)
 
 
+class _ReadinessChecker(QThread):
+    """Runs _determine_state() off the main thread to avoid UI stalls."""
+    done = pyqtSignal(object)  # emits the (state, selected, validation, ctx) tuple
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception:
+            result = ("no_project", None, None, {})
+        self.done.emit(result)
+
+
 class Stage0ReadinessPanel(QFrame):
     project_changed = pyqtSignal()
 
@@ -2358,6 +2391,8 @@ class Stage0ReadinessPanel(QFrame):
         super().__init__(parent)
         self.cfg = cfg
         self._meta_worker = None
+        self._checker = None
+        self._refresh_pending = False
         self.setObjectName("stage0Panel")
         self.setStyleSheet(
             "QFrame#stage0Panel{background:transparent;border:none;}"
@@ -2590,7 +2625,32 @@ class Stage0ReadinessPanel(QFrame):
         self._primary_btn.clicked.connect(handler)
 
     def refresh(self):
-        state, selected, validation, ctx = self._determine_state()
+        if self._checker and self._checker.isRunning():
+            self._refresh_pending = True
+            return
+        self._status_badge.setText("checking…")
+        self._status_badge.setStyleSheet(
+            "background:#F5F5F5;color:#888;border-radius:4px;"
+            "padding:2px 8px;font-weight:600;font-size:11px;border:none;"
+        )
+        self._status_badge.show()
+        self._primary_btn.setEnabled(False)
+        self._checker = _ReadinessChecker(self._determine_state)
+        self._checker.done.connect(self._on_readiness_done)
+        self._checker.start()
+
+    def _on_readiness_done(self, result) -> None:
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._checker = _ReadinessChecker(self._determine_state)
+            self._checker.done.connect(self._on_readiness_done)
+            self._checker.start()
+            return
+        self._primary_btn.setEnabled(True)
+        state, selected, validation, ctx = result
+        self._apply_readiness(state, selected, validation, ctx)
+
+    def _apply_readiness(self, state, selected, validation, ctx):
         self._clear_checklist()
 
         if validation:
@@ -5429,10 +5489,14 @@ class MainWindow(QMainWindow):
     def _settings_changed(self, cfg):
         self.cfg = cfg
         _save_cfg(self.cfg)
+        _pm.invalidate_project_cache()
+        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         self._refresh_view_labels()
         self._reload_for_current_view()
 
     def _on_project_changed(self):
+        _pm.invalidate_project_cache()
+        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         _refresh_global_paths()
         self.cfg = _load_cfg()
         self._propagate_cfg()
@@ -6123,6 +6187,7 @@ class MainWindow(QMainWindow):
                 p["last_opened"] = now
         _save_app_config(app_cfg)
 
+        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         _refresh_global_paths()
         self.cfg = _load_cfg()
         self._propagate_cfg()
