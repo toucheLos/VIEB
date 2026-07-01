@@ -30,6 +30,11 @@ from _utils import (
     detect_nvidia_driver, select_gpu_stack, gpu_stack_message,
 )
 from _workers import ExportWorker, SubprocessWorker
+from dlc_project_utils import (
+    default_dlc_task_name,
+    expected_dlc_project_dir,
+    normalize_dlc_project_path,
+)
 
 if _MPL:
     from _utils import plt, PdfPages, Figure, mpl_cm, mpimg
@@ -70,12 +75,17 @@ class _CreateProjectDialog(QDialog):
             return le
 
         self._proj_name = field(
-            "Project name", "e.g. VIEB",
-            "Short name for this DLC project (no spaces recommended).",
+            "DLC project name",
+            "e.g. DLC-Luna-2026-06-30",
+            "Editable DeepLabCut task name. VIEB defaults this to DLC-<project>-<date>.",
         )
+        self._proj_name.setText(default_dlc_task_name(self.cfg.get("project_name")))
         self._experimenter = field(
             "Experimenter name", "e.g. Carlos",
-            "Your name — used to name the project directory (VIEB-<name>-<date>).",
+            "Your name — DeepLabCut includes this in the generated project directory.",
+        )
+        self._experimenter.setText(
+            str(self.cfg.get("dlc_experimenter") or os.environ.get("USER") or "").strip()
         )
 
         # Video directory row (with Browse button)
@@ -121,6 +131,20 @@ class _CreateProjectDialog(QDialog):
             self._status.setStyleSheet("color:#c62828;")
             return
 
+        expected_dir = expected_dlc_project_dir(ROOT, name, experimenter)
+        expected_config = expected_dir / "config.yaml"
+        if expected_dir.exists():
+            if expected_config.exists():
+                self._use_existing_project(expected_dir)
+                return
+            self._status.setText(
+                "⚠ A folder already exists for this DLC project name, but it does not "
+                f"contain config.yaml:\n{expected_dir}\n\n"
+                "Choose a different DLC project name or remove the incomplete folder."
+            )
+            self._status.setStyleSheet("color:#c62828;")
+            return
+
         try:
             import deeplabcut
         except ImportError:
@@ -142,16 +166,38 @@ class _CreateProjectDialog(QDialog):
                 working_directory=str(ROOT),
                 copy_videos=False,
             )
+            project_dir = normalize_dlc_project_path(project_path) or expected_dir
+            if not (project_dir / "config.yaml").exists() and expected_config.exists():
+                project_dir = expected_dir
+            if not (project_dir / "config.yaml").exists():
+                raise RuntimeError(
+                    "DeepLabCut did not create a config.yaml at the expected project path."
+                )
             import vieb_config
-            vieb_config.set_dlc_project_path(project_path)
-            _register_project(project_path)
-            self.result_path = project_path
-            self._status.setText(f"✓ Created: {project_path}")
+            vieb_config.set_dlc_project_path(str(project_dir))
+            self.cfg["dlc_project_path"] = str(project_dir)
+            self.cfg["dlc_experimenter"] = experimenter
+            _save_cfg(self.cfg)
+            _register_project(str(project_dir))
+            self.result_path = str(project_dir)
+            self._status.setText(f"✓ Created: {project_dir}")
             self._status.setStyleSheet("color:#2e7d32;")
             self.accept()
         except Exception as exc:
             self._status.setText(f"✕ Failed: {exc}")
             self._status.setStyleSheet("color:#c62828;")
+
+    def _use_existing_project(self, project_dir: Path):
+        import vieb_config
+        vieb_config.set_dlc_project_path(str(project_dir))
+        self.cfg["dlc_project_path"] = str(project_dir)
+        self.cfg["dlc_experimenter"] = self._experimenter.text().strip()
+        _save_cfg(self.cfg)
+        _register_project(str(project_dir))
+        self.result_path = str(project_dir)
+        self._status.setText(f"✓ Using existing DLC project: {project_dir}")
+        self._status.setStyleSheet("color:#2e7d32;")
+        self.accept()
 
 
 class WslSetupDialog(QDialog):

@@ -49,6 +49,8 @@ print(f"[timing] _utils.py cv2 import: {(_time.perf_counter() - _t_cv2) * 1000:.
 
 from PyQt5.QtGui import QImage, QPixmap
 
+from dlc_project_utils import discover_dlc_projects, normalize_dlc_project_path
+
 # ---------------------------------------------------------------------------
 # Path constants
 # ---------------------------------------------------------------------------
@@ -401,10 +403,19 @@ def _save_projects(projects: list) -> None:
 def _register_project(path: str) -> None:
     """Add or move a project to the top of the recent-projects list."""
     projects = _load_projects()
-    path = os.path.abspath(path)
-    projects = [p for p in projects if os.path.abspath(p.get("path", "")) != path]
+    project_path = normalize_dlc_project_path(path) or Path(path).expanduser().resolve()
+    path = str(project_path)
+
+    def _same_project(entry: dict) -> bool:
+        raw = entry.get("path", "")
+        normalized = normalize_dlc_project_path(raw)
+        if normalized is None:
+            return False
+        return str(normalized) == path
+
+    projects = [p for p in projects if not _same_project(p)]
     projects.insert(0, {
-        "name": os.path.basename(path),
+        "name": project_path.name,
         "path": path,
         "config": os.path.join(path, "config.yaml"),
         "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -469,8 +480,9 @@ def _results_exist():
 
 
 def _find_dlc_project():
-    for p in ROOT.glob("VIEB-*/config.yaml"):
-        return p.parent
+    projects = discover_dlc_projects(ROOT)
+    if projects:
+        return projects[0]
     return None
 
 
