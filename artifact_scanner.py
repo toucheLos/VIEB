@@ -42,7 +42,6 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     # State characterization
     ("characterization/state_occupancy.png", "State Characterization"),
     ("characterization/state_summary.csv", "State Characterization"),
-    ("characterization/state_exemplars.csv", "State Characterization"),
     ("characterization/labels_per_frame.csv", "State Characterization"),
     ("characterization/context_report.csv", "State Characterization"),
     ("characterization/state_", "State Characterization"),
@@ -154,7 +153,6 @@ def scan_artifacts(
 _PUBLICATION_FILES = [
     "comparison/summary_table.csv",
     "characterization/state_summary.csv",
-    "characterization/state_exemplars.csv",
     "characterization/state_occupancy.png",
     "comparison/motifs.csv",
     "comparison/bout_duration_by_context.csv",

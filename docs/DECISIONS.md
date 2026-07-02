@@ -345,3 +345,15 @@ existing `_full.pickle` outputs with no new `.h5` files, destabilizing
 analysis for already-processed videos.
 **Related:** `setup_dlc_training.py`, `pretrained_manager.py`, `views/dlc_setup.py`
 **Supersedes:** #40
+
+## 42 — State Characterization browses the full clips folder; curated exemplars removed
+**Decision/finding:** The State Characterization view lists every clip in
+`clips/state_<id>/` (longest/typical/context) instead of only 3 curated
+exemplars. The curated 3-cap selection (`select_state_exemplars`,
+`state_exemplars.csv`) was removed from `generate_clips.py` as redundant.
+Movement Poles panel replaced by a per-metric highest/lowest-state summary;
+technical ("More") categories removed; clip playback auto-loads/auto-advances.
+**Why:** `generate_clips.py` already exports all per-state clips; capping the UI
+at 3 curated clips hid most of them and duplicated the clips directory.
+**Related:** `views/state_characterization.py`, `generate_clips.py`,
+`artifact_scanner.py`, `characterize.load_clips`

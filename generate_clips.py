@@ -63,9 +63,6 @@ def _load_feature_index() -> dict:
 
 SMOOTH_FRAMES = 15   # 0.5 s at 30 fps
 MIN_BOUT_FRAMES = 6  # 0.2 s
-DEFAULT_STATE_EXEMPLARS = 3
-MIN_EXEMPLAR_DURATION_SEC = 1.0
-BOUNDARY_MARGIN_SEC = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -237,256 +234,8 @@ def _expand_clip(labels, anchor, target_state, clip_purity, max_frames):
     return left, right
 
 
-def _clean_value(value, default=""):
-    if value is None:
-        return default
-    try:
-        if pd.isna(value):
-            return default
-    except (TypeError, ValueError):
-        pass
-    return value
-
-
-def _state_exemplar_columns() -> list[str]:
-    return [
-        "state_id", "rank", "clip_path", "stem", "session_id",
-        "source_video", "subject_id", "animal_id", "context", "condition",
-        "day", "timepoint", "start_frame", "end_frame", "duration_sec",
-        "exemplar_score", "selection_reason", "mean_confidence",
-        "typicality_distance", "skipped_reason",
-    ]
-
-
-def _state_exemplar_row(
-    state_id, rank="", clip_path="", stem="", source_video="", start_frame="",
-    end_frame="", duration_sec="", exemplar_score="", selection_reason="",
-    mean_confidence="", typicality_distance="", skipped_reason="", **meta,
-) -> dict:
-    row = {
-        "state_id": state_id,
-        "rank": rank,
-        "clip_path": clip_path,
-        "stem": stem,
-        "session_id": meta.get("session_id", ""),
-        "source_video": source_video,
-        "subject_id": meta.get("subject_id", ""),
-        "animal_id": meta.get("animal_id", ""),
-        "context": meta.get("context", ""),
-        "condition": meta.get("condition", ""),
-        "day": meta.get("day", ""),
-        "timepoint": meta.get("timepoint", ""),
-        "start_frame": start_frame,
-        "end_frame": end_frame,
-        "duration_sec": duration_sec,
-        "exemplar_score": exemplar_score,
-        "selection_reason": selection_reason,
-        "mean_confidence": mean_confidence,
-        "typicality_distance": typicality_distance,
-        "skipped_reason": skipped_reason,
-    }
-    return {col: row.get(col, "") for col in _state_exemplar_columns()}
-
-
-def _candidate_meta(row) -> dict:
-    return {
-        "session_id": str(_clean_value(row.get("session_id", row.get("stem", "")), "")),
-        "subject_id": str(_clean_value(row.get("subject_id", ""), "")),
-        "animal_id": str(_clean_value(row.get("animal_id", ""), "")),
-        "context": str(_clean_value(row.get("context", ""), "")),
-        "condition": str(_clean_value(row.get("condition", ""), "")),
-        "day": str(_clean_value(row.get("day", ""), "")),
-        "timepoint": str(_clean_value(row.get("timepoint", ""), "")),
-    }
-
-
-def _safe_float(value, default=np.nan) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _load_prob_slice_mean(stem: str, start: int, end: int) -> tuple[float, str]:
-    prob_path = os.path.join(_res(), "shared", f"{stem}_probs.npy")
-    if not os.path.exists(prob_path):
-        return np.nan, "confidence unavailable"
-    try:
-        probs = np.load(prob_path)
-        if len(probs) == 0:
-            return np.nan, "confidence unavailable"
-        s = max(0, min(start, len(probs) - 1))
-        e = max(s, min(end, len(probs) - 1))
-        return float(np.nanmean(probs[s:e + 1])), "confidence scored"
-    except Exception:
-        return np.nan, "confidence unavailable"
-
-
-def _bout_typicality_distance(row, center, preprocessor=None) -> float:
-    fp = row.get("features_path", "")
-    if not fp or not os.path.exists(str(fp)):
-        return np.nan
-    try:
-        start = int(row.get("start_frame", 0))
-        end = int(row.get("end_frame", start))
-        feats = np.load(str(fp))[start:end + 1].astype(np.float64)
-        if len(feats) == 0:
-            return np.nan
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if preprocessor is not None:
-                feats = preprocessor.transform(feats)
-        if len(center) != feats.shape[1]:
-            return np.nan
-        return float(np.linalg.norm(feats.mean(axis=0) - np.asarray(center, dtype=np.float64)))
-    except Exception:
-        return np.nan
-
-
-def _video_frame_count(video_path: str, index_info: dict | None = None) -> int | None:
-    if index_info:
-        for key in ("n_frames", "frames", "frame_count"):
-            val = index_info.get(key)
-            try:
-                if val is not None and int(val) > 0:
-                    return int(val)
-            except (TypeError, ValueError):
-                pass
-    try:
-        import cv2
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            return None
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        return total if total > 0 else None
-    except Exception:
-        return None
-
-
-def select_state_exemplars(
-    bouts_df: pd.DataFrame,
-    cluster_info: dict,
-    index: dict,
-    fps: float = 30.0,
-    exemplars_per_state: int = DEFAULT_STATE_EXEMPLARS,
-    min_duration_sec: float = MIN_EXEMPLAR_DURATION_SEC,
-    boundary_margin_sec: float = BOUNDARY_MARGIN_SEC,
-    preprocessor=None,
-) -> tuple[list[dict], list[dict]]:
-    """Return selected exemplar candidate rows and skipped diagnostic rows.
-
-    Selection is deterministic and conservative: filter unusable bouts first,
-    rank clear/typical/high-confidence bouts, then greedily diversify across
-    sessions, subjects, contexts, and days.
-    """
-    if bouts_df is None or bouts_df.empty:
-        return [], []
-
-    n_clusters = int(cluster_info.get("n_clusters", 0) or 0)
-    centers = cluster_info.get("cluster_centers", [])
-    margin_frames = max(0, int(round(boundary_margin_sec * fps)))
-    selected: list[dict] = []
-    skipped: list[dict] = []
-
-    state_col = next((c for c in ("state", "state_id", "cluster_id") if c in bouts_df.columns), None)
-    if state_col is None:
-        return [], [
-            _state_exemplar_row("", skipped_reason="bouts table has no state column")
-        ]
-
-    for state_id in range(n_clusters):
-        state_bouts = bouts_df[bouts_df[state_col] == state_id].copy()
-        if state_bouts.empty:
-            skipped.append(_state_exemplar_row(state_id, skipped_reason="no bouts for state"))
-            continue
-
-        candidates: list[dict] = []
-        for _, bout in state_bouts.iterrows():
-            stem = str(_clean_value(bout.get("stem", ""), ""))
-            meta = _candidate_meta(bout)
-            video_path = str(_clean_value(bout.get("video_path", ""), ""))
-            if not video_path and stem in index:
-                video_path = _resolve_video_path(index[stem].get("video_path", ""))
-            start = int(_safe_float(bout.get("start_frame", 0), 0))
-            end = int(_safe_float(bout.get("end_frame", start), start))
-            duration = _safe_float(bout.get("duration_sec", (end - start + 1) / fps))
-
-            base_row = _state_exemplar_row(
-                state_id, stem=stem, source_video=video_path,
-                start_frame=start, end_frame=end,
-                duration_sec=round(duration, 4), **meta,
-            )
-            if not stem:
-                skipped.append({**base_row, "skipped_reason": "missing stem"})
-                continue
-            if duration < min_duration_sec:
-                skipped.append({**base_row, "skipped_reason": "short bout"})
-                continue
-            if not video_path or not os.path.exists(video_path):
-                skipped.append({**base_row, "skipped_reason": "source video missing"})
-                continue
-
-            total_frames = _video_frame_count(video_path, index.get(stem, {}))
-            if total_frames is not None and (
-                start < margin_frames or end > total_frames - margin_frames - 1
-            ):
-                skipped.append({**base_row, "skipped_reason": "too close to video boundary"})
-                continue
-
-            mean_conf, conf_reason = _load_prob_slice_mean(stem, start, end)
-            center = centers[state_id] if state_id < len(centers) else []
-            distance = _bout_typicality_distance(bout, center, preprocessor)
-            if np.isfinite(distance):
-                typicality_score = 1.0 / (1.0 + distance)
-                typical_reason = "near state centroid"
-            else:
-                typicality_score = 0.0
-                typical_reason = "typicality unavailable"
-            conf_score = float(mean_conf) if np.isfinite(mean_conf) else 0.5
-            duration_score = min(1.0, duration / max(min_duration_sec, 1.0) / 5.0)
-            score = (0.55 * typicality_score) + (0.30 * conf_score) + (0.15 * duration_score)
-            reason = f"{typical_reason}; {conf_reason}; duration {duration:.2f}s"
-            candidates.append({
-                **base_row,
-                "duration_sec": round(duration, 4),
-                "exemplar_score": round(float(score), 6),
-                "selection_reason": reason,
-                "mean_confidence": round(float(mean_conf), 6) if np.isfinite(mean_conf) else "",
-                "typicality_distance": round(float(distance), 6) if np.isfinite(distance) else "",
-                "_sort_score": float(score),
-            })
-
-        candidates.sort(key=lambda c: (-c["_sort_score"], -_safe_float(c["duration_sec"], 0), c["stem"]))
-        for rank, cand in enumerate(_select_diverse_candidates(candidates, exemplars_per_state), start=1):
-            cand = {k: v for k, v in cand.items() if not k.startswith("_")}
-            cand["rank"] = rank
-            selected.append(cand)
-
-    return selected, skipped
-
-
-def _write_state_exemplar_manifest(rows: list[dict], skipped_rows: list[dict]) -> str:
-    out_path = os.path.join(_res(), "characterization", "state_exemplars.csv")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    all_rows = rows + skipped_rows
-    df = pd.DataFrame(all_rows, columns=_state_exemplar_columns())
-    df.to_csv(out_path, index=False)
-    return out_path
-
-
-def _project_relative_clip_path(clip_path: str) -> str:
-    """Store clip paths relative to the active project's data root when possible."""
-    project_data_root = os.path.abspath(os.path.dirname(_res()))
-    try:
-        return os.path.relpath(clip_path, project_data_root).replace("\\", "/")
-    except ValueError:
-        return os.path.abspath(clip_path)
-
-
 def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
-              output_dir=None, exemplars_per_state=DEFAULT_STATE_EXEMPLARS,
-              min_exemplar_duration_sec=MIN_EXEMPLAR_DURATION_SEC):
+              output_dir=None):
     import cv2  # fail fast if not installed
 
     index, cluster_info, df_summary, meta = _load_prereqs()
@@ -555,23 +304,6 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
         if os.path.exists(lp):
             labels_cache[stem] = _smooth_labels(np.load(lp))
 
-    exemplar_rows, exemplar_skips = select_state_exemplars(
-        bouts_df,
-        cluster_info,
-        index,
-        fps=fps,
-        exemplars_per_state=exemplars_per_state,
-        min_duration_sec=min_exemplar_duration_sec,
-        preprocessor=preprocessor,
-    )
-    exemplar_by_state: dict[int, list[dict]] = {}
-    for row in exemplar_rows:
-        try:
-            exemplar_by_state.setdefault(int(row["state_id"]), []).append(row)
-        except (TypeError, ValueError):
-            continue
-    written_exemplar_rows: list[dict] = []
-
     skipped_states = []
     for k in range(n_clusters):
         kb = bouts_df[bouts_df["state"] == k].copy()
@@ -583,37 +315,6 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
         out_dir = os.path.join(base_clips_dir, f"state_{k}")
         os.makedirs(out_dir, exist_ok=True)
         print(f"\nState {k}: {len(kb)} bouts → {out_dir}")
-
-        # ── Curated exemplars ───────────────────────────────────────────────
-        n_ok = 0
-        selected_rows = exemplar_by_state.get(k, [])
-        for cand in selected_rows:
-            rank = int(cand.get("rank", n_ok + 1) or n_ok + 1)
-            out_path = os.path.join(out_dir, f"clip_{rank:03d}.mp4")
-            clips_attempted += 1
-            ok = _export_clip(
-                cand["source_video"],
-                int(cand["start_frame"]),
-                int(cand["end_frame"]),
-                out_path,
-                fps=fps,
-                pad_to_secs=5.0,
-                max_secs=max_clip_frames / fps,
-            )
-            row_out = dict(cand)
-            if ok:
-                row_out["clip_path"] = _project_relative_clip_path(out_path)
-                row_out["skipped_reason"] = ""
-                clips_written += 1
-                n_ok += 1
-            else:
-                row_out["clip_path"] = ""
-                row_out["skipped_reason"] = "clip export failed"
-            written_exemplar_rows.append(row_out)
-        if selected_rows:
-            print(f"  exemplars: {n_ok}/{len(selected_rows)} clips written")
-        else:
-            print("  exemplars: no valid representative bouts")
 
         # ── Longest bouts ──────────────────────────────────────────────────
         n_ok = 0
@@ -710,12 +411,6 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
             "  bouts.csv may be stale — re-run:  python characterize.py  (without --clips)\n"
             "  then re-run:                       python generate_clips.py"
         )
-
-    manifest_path = _write_state_exemplar_manifest(
-        written_exemplar_rows,
-        exemplar_skips,
-    )
-    print(f"\nState exemplar manifest: {manifest_path}")
 
     failed = clips_attempted - clips_written
     if clips_attempted == 0:
@@ -1228,14 +923,6 @@ def main():
         help="Hard cap on clip length in frames (default: 300 = 10 s at 30 fps).",
     )
     parser.add_argument(
-        "--state-exemplars", type=int, default=DEFAULT_STATE_EXEMPLARS,
-        help="Curated exemplar clips per state (default: 3).",
-    )
-    parser.add_argument(
-        "--min-exemplar-duration-sec", type=float, default=MIN_EXEMPLAR_DURATION_SEC,
-        help="Minimum bout duration for curated state exemplars (default: 1.0).",
-    )
-    parser.add_argument(
         "--top-motifs", type=int, default=10,
         help="Number of top motifs to generate clips for (default: 10)",
     )
@@ -1278,8 +965,6 @@ def main():
             clip_purity=args.clip_purity,
             max_clip_frames=args.max_clip_frames,
             output_dir=args.output,
-            exemplars_per_state=args.state_exemplars,
-            min_exemplar_duration_sec=args.min_exemplar_duration_sec,
         )
 
 
