@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import json
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QTabWidget, QTableWidget, QTableWidgetItem, QToolButton,
+    QLineEdit, QListWidget, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -27,25 +27,12 @@ _BEHAVIORAL_CATEGORIES = [
     "Freezing", "Walking", "Grooming", "Rearing",
     "Running", "Exploring", "Other",
 ]
-_TECHNICAL_CATEGORIES = [
-    "Low Velocity", "High Velocity",
-    "Low Elongation", "High Elongation",
-    "Short Bouts", "Long Bouts",
-    "High Angular Vel.", "Low Angular Vel.",
-    "High Rearing", "Low Rearing",
-]
 
 _CHIP_STYLE = (
     "QPushButton{background:#f0f0f0;border:1px solid #ccc;border-radius:12px;"
     "padding:4px 10px;font-size:11px;}"
     "QPushButton:checked{background:#4E79A7;color:white;border-color:#4E79A7;}"
     "QPushButton:hover:!checked{background:#e0e8f0;}"
-)
-_TECH_CHIP_STYLE = (
-    "QPushButton{background:#f5f5f5;border:1px solid #ddd;border-radius:12px;"
-    "padding:3px 8px;font-size:10px;color:#666;}"
-    "QPushButton:checked{background:#76B7B2;color:white;border-color:#76B7B2;}"
-    "QPushButton:hover:!checked{background:#e8f0f0;}"
 )
 _CARD_STYLE = (
     "QFrame{background:#F8F9FA;border:1px solid #E0E0E0;border-radius:6px;"
@@ -92,9 +79,11 @@ class StateCharacterizationView(QWidget):
         self._state_ids: list[int] = []
         self._heuristic_labels: dict[int, str] = {}
         self._kin_metrics: dict[str, float] = {}
-        self._exemplar_df: pd.DataFrame | None = None
-        self._poles: dict = {}
         self._pending_command: list | None = None
+        self._saved_labels: dict[int, dict] = {}
+        self._current_sid: int | None = None
+        self._current_clip_path: Path | None = None
+        self._last_run_kind: str = ""
         self._ref_width = 900
         self._build()
 
@@ -124,71 +113,110 @@ class StateCharacterizationView(QWidget):
         lay.addWidget(terminal)
         return outer
 
-    def _build_poles_panel(self) -> QWidget:
-        """Compact two-card panel showing low- and high-motion pole states."""
-        outer = QWidget()
-        vl = QVBoxLayout(outer)
-        vl.setContentsMargins(0, 0, 0, 4)
-        vl.setSpacing(4)
+    def _build_notice_banner(self) -> QFrame:
+        """Dismissible, non-blocking notice shown after generation completes."""
+        banner = QFrame()
+        banner.setStyleSheet(
+            "QFrame{background:#EDF7ED;border:1px solid #C3E6C3;border-radius:6px;}"
+        )
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(10, 6, 6, 6)
+        row.setSpacing(8)
+        self._notice_lbl = QLabel("")
+        self._notice_lbl.setWordWrap(True)
+        self._notice_lbl.setStyleSheet("color:#1E5620; font-size:11px; border:none; background:transparent;")
+        row.addWidget(self._notice_lbl, stretch=1)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setToolTip("Dismiss")
+        close_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#5A805A;border:none;font-size:15px;font-weight:bold;}"
+            "QPushButton:hover{color:#1E5620;}"
+        )
+        close_btn.clicked.connect(self._dismiss_notice)
+        row.addWidget(close_btn, alignment=Qt.AlignTop)
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._dismiss_notice)
+        return banner
 
-        title = QLabel("Movement Poles")
-        title.setStyleSheet("font-weight:bold; font-size:11px; color:#555; letter-spacing:0.5px;")
+    def _show_notice(self, text: str) -> None:
+        self._notice_lbl.setText(text)
+        self._notice_banner.show()
+        self._notice_timer.start(12000)
+
+    def _dismiss_notice(self) -> None:
+        self._notice_timer.stop()
+        self._notice_banner.hide()
+
+    # Metric columns surfaced in the extremes panel: (column, display name).
+    _EXTREME_METRICS = [
+        ("mean_centroid_speed", "Speed"),
+        ("mean_angular_vel", "Angular Velocity"),
+        ("mean_elongation", "Elongation"),
+        ("mean_bout_dur_sec", "Bout Duration"),
+        ("mean_rearing_score", "Rearing"),
+        ("mean_movement_entropy", "Movement Variability"),
+    ]
+
+    def _build_metric_extremes_panel(self) -> QFrame:
+        """Compact panel listing the highest/lowest state for each kinematic metric."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame{background:#F8F9FA;border:1px solid #E0E0E0;border-radius:6px;}"
+        )
+        vl = QVBoxLayout(frame)
+        vl.setContentsMargins(10, 6, 10, 6)
+        vl.setSpacing(2)
+
+        title = QLabel("Metric Extremes")
+        title.setStyleSheet(
+            "font-weight:bold; font-size:11px; color:#555; letter-spacing:0.5px;"
+            "background:transparent;border:none;"
+        )
         vl.addWidget(title)
 
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(8)
+        self._metrics_body = QLabel("")
+        self._metrics_body.setWordWrap(True)
+        self._metrics_body.setStyleSheet(
+            "font-size:11px; color:#333; background:transparent; border:none;"
+        )
+        self._metrics_body.setTextFormat(Qt.RichText)
+        vl.addWidget(self._metrics_body)
+        return frame
 
-        for attr_prefix, pole_title, color in [
-            ("_low",  "Frozen / Low-Motion Pole",      "#E8F4FD"),
-            ("_high", "Locomotion / High-Motion Pole",  "#EDF7ED"),
-        ]:
-            card = QFrame()
-            card.setStyleSheet(
-                f"QFrame{{background:{color};border:1px solid #D0D0D0;"
-                "border-radius:6px;padding:4px 8px;}}"
+    def _update_metric_extremes(self) -> None:
+        """Fill the metric-extremes panel from state_summary (highest/lowest per metric)."""
+        ss = self._data.get("state_summary")
+        id_col = getattr(self, "_id_col", None)
+        if ss is None or getattr(ss, "empty", True) or not id_col:
+            self._metrics_panel.hide()
+            return
+        ss = self._enrich_kinematic_columns(ss)
+        self._data["state_summary"] = ss
+        cols_lower = {c.lower(): c for c in ss.columns}
+
+        lines: list[str] = []
+        for col_name, display in self._EXTREME_METRICS:
+            col = cols_lower.get(col_name.lower())
+            if col is None:
+                continue
+            sub = ss[[id_col, col]].dropna()
+            if sub.empty:
+                continue
+            hi = sub.loc[sub[col].idxmax()]
+            lo = sub.loc[sub[col].idxmin()]
+            lines.append(
+                f"<b>{display}</b> — highest: State {int(hi[id_col])} "
+                f"({float(hi[col]):.3g}), lowest: State {int(lo[id_col])} "
+                f"({float(lo[col]):.3g})"
             )
-            cl = QVBoxLayout(card)
-            cl.setContentsMargins(6, 4, 6, 6)
-            cl.setSpacing(2)
-
-            t = QLabel(pole_title)
-            t.setStyleSheet("font-size:10px; font-weight:bold; color:#444;")
-            cl.addWidget(t)
-
-            state_lbl = QLabel("—")
-            state_lbl.setStyleSheet("font-size:12px; font-weight:bold; color:#1A1A1A;")
-            cl.addWidget(state_lbl)
-            setattr(self, attr_prefix + "_state_lbl", state_lbl)
-
-            speed_lbl = QLabel("Speed (z): —")
-            speed_lbl.setStyleSheet("font-size:10px; color:#555;")
-            cl.addWidget(speed_lbl)
-            setattr(self, attr_prefix + "_speed_lbl", speed_lbl)
-
-            bouts_lbl = QLabel("Bouts: —")
-            bouts_lbl.setStyleSheet("font-size:10px; color:#555;")
-            cl.addWidget(bouts_lbl)
-            setattr(self, attr_prefix + "_bouts_lbl", bouts_lbl)
-
-            warn_lbl = QLabel("")
-            warn_lbl.setWordWrap(True)
-            warn_lbl.setStyleSheet("font-size:9px; color:#B25E00; font-style:italic;")
-            warn_lbl.hide()
-            cl.addWidget(warn_lbl)
-            setattr(self, attr_prefix + "_warn_lbl", warn_lbl)
-
-            key = "low" if attr_prefix == "_low" else "high"
-            clip_btn = QPushButton("Load Exemplar")
-            clip_btn.setFixedHeight(22)
-            clip_btn.setStyleSheet("font-size:10px;")
-            clip_btn.clicked.connect(lambda _checked=False, k=key: self._load_pole_clip(k))
-            cl.addWidget(clip_btn)
-            setattr(self, attr_prefix + "_clip_btn", clip_btn)
-
-            cards_row.addWidget(card, stretch=1)
-
-        vl.addLayout(cards_row)
-        return outer
+        if not lines:
+            self._metrics_panel.hide()
+            return
+        self._metrics_body.setText("<br>".join(lines))
+        self._metrics_panel.show()
 
     def _build(self) -> None:
         lay = QVBoxLayout(self)
@@ -203,9 +231,13 @@ class StateCharacterizationView(QWidget):
         )
         lay.addWidget(hdr)
 
-        self._poles_panel = self._build_poles_panel()
-        self._poles_panel.hide()
-        lay.addWidget(self._poles_panel)
+        self._notice_banner = self._build_notice_banner()
+        self._notice_banner.hide()
+        lay.addWidget(self._notice_banner)
+
+        self._metrics_panel = self._build_metric_extremes_panel()
+        self._metrics_panel.hide()
+        lay.addWidget(self._metrics_panel)
 
         self._splitter = QSplitter(Qt.Horizontal)
         splitter = self._splitter
@@ -263,23 +295,8 @@ class StateCharacterizationView(QWidget):
         self._sort_row_widget.setLayout(sort_row)
         ll.addWidget(self._sort_row_widget)
 
-        state_nav_row = QHBoxLayout()
-        state_nav_row.setContentsMargins(0, 0, 0, 0)
-        state_nav_row.setSpacing(4)
-        self._prev_state_btn = QPushButton("← State")
-        self._prev_state_btn.setFixedHeight(24)
-        self._prev_state_btn.setStyleSheet("font-size:11px;")
-        self._prev_state_btn.clicked.connect(self._prev_state)
-        self._next_state_btn = QPushButton("State →")
-        self._next_state_btn.setFixedHeight(24)
-        self._next_state_btn.setStyleSheet("font-size:11px;")
-        self._next_state_btn.clicked.connect(self._next_state)
-        state_nav_row.addWidget(self._prev_state_btn, stretch=1)
-        state_nav_row.addWidget(self._next_state_btn, stretch=1)
-        self._state_nav_widget = QWidget()
-        self._state_nav_widget.setLayout(state_nav_row)
-        ll.addWidget(self._state_nav_widget)
-
+        # State-to-state navigation is intentionally the state list only — no
+        # prev/next state buttons (see plan Part 1).
         self._state_list = QListWidget()
         self._state_list.currentRowChanged.connect(self._on_state_selected)
         ll.addWidget(self._state_list, stretch=1)
@@ -442,52 +459,26 @@ class StateCharacterizationView(QWidget):
         sep.setStyleSheet("color:#DCDCDC;")
         rl.addWidget(sep)
 
-        # ── Clip controls ──
+        # ── Exemplar controls (generation only — clip playback lives below the
+        #    video player, see Part 3a) ──
         clip_row = QHBoxLayout()
-        self._prev_clip_btn = QPushButton("←")
-        self._prev_clip_btn.setFixedWidth(28)
-        self._prev_clip_btn.setFixedHeight(26)
-        self._prev_clip_btn.setToolTip("Previous clip")
-        self._prev_clip_btn.clicked.connect(self._prev_clip)
-        clip_row.addWidget(self._prev_clip_btn)
-        self._load_clip_btn = QPushButton("Load Selected Exemplar")
-        self._load_clip_btn.setEnabled(False)
-        self._load_clip_btn.clicked.connect(self._load_clip)
-        clip_row.addWidget(self._load_clip_btn)
-        self._next_clip_btn = QPushButton("→")
-        self._next_clip_btn.setFixedWidth(28)
-        self._next_clip_btn.setFixedHeight(26)
-        self._next_clip_btn.setToolTip("Next clip")
-        self._next_clip_btn.clicked.connect(self._next_clip)
-        clip_row.addWidget(self._next_clip_btn)
         self._gen_exemplars_btn = QPushButton("Generate State Exemplars")
         self._gen_exemplars_btn.clicked.connect(
             lambda: self._run_command(["generate_clips.py"], self._terminal)
         )
         clip_row.addWidget(self._gen_exemplars_btn)
-        self._autoplay_cb = QCheckBox("Autoplay")
-        self._autoplay_cb.setChecked(True)
-        clip_row.addWidget(self._autoplay_cb)
-        self._clip_status = QLabel("")
-        self._clip_status.setStyleSheet("color:#888; font-size:11px;")
-        clip_row.addWidget(self._clip_status, stretch=1)
+        clip_row.addStretch(1)
         rl.addLayout(clip_row)
 
         self._exemplar_placeholder = _placeholder(
-            "No curated exemplars for this state yet.\n"
-            "Click 'Generate State Exemplars' to create representative clips."
+            "No clips for this state yet.\n"
+            "Click 'Generate State Exemplars' to export clips for each state."
         )
-        self._exemplar_table = QTableWidget(0, 6)
-        self._exemplar_table.setHorizontalHeaderLabels(
-            ["Rank", "Clip", "Animal/Subject", "Context", "Duration", "Reason"]
-        )
+        self._exemplar_table = QTableWidget(0, 2)
+        self._exemplar_table.setHorizontalHeaderLabels(["Clip", "Type"])
         header = self._exemplar_table.horizontalHeader()
-        header.setSectionResizeMode(0, header.ResizeToContents)
-        header.setSectionResizeMode(1, header.Stretch)
-        header.setSectionResizeMode(2, header.ResizeToContents)
-        header.setSectionResizeMode(3, header.ResizeToContents)
-        header.setSectionResizeMode(4, header.ResizeToContents)
-        header.setSectionResizeMode(5, header.Stretch)
+        header.setSectionResizeMode(0, header.Stretch)
+        header.setSectionResizeMode(1, header.ResizeToContents)
         self._exemplar_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._exemplar_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._exemplar_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -509,16 +500,9 @@ class StateCharacterizationView(QWidget):
         self._label_input.setPlaceholderText("Free-text label, or select a category below")
         input_row.addWidget(self._label_input, stretch=1)
         self._save_btn = QPushButton("Save")
+        self._save_btn.setToolTip("Save this state's label; the list row updates in place")
         self._save_btn.clicked.connect(self._save_state_label)
         input_row.addWidget(self._save_btn)
-        self._back_btn = QPushButton("← Back")
-        self._back_btn.setToolTip("Go back to previous state")
-        self._back_btn.clicked.connect(self._go_back)
-        input_row.addWidget(self._back_btn)
-        self._save_next_btn = QPushButton("Save && Next")
-        self._save_next_btn.setToolTip("Save label and advance to next state")
-        self._save_next_btn.clicked.connect(self._save_and_next)
-        input_row.addWidget(self._save_next_btn)
         rl.addLayout(input_row)
 
         self._cat_group = QButtonGroup(self)
@@ -536,41 +520,19 @@ class StateCharacterizationView(QWidget):
             self._cat_group.addButton(btn)
             cat_row.addWidget(btn)
             self._cat_buttons[name] = btn
-        self._more_btn = QToolButton()
-        self._more_btn.setText("More ▸")
-        self._more_btn.setCheckable(True)
-        self._more_btn.setStyleSheet("font-size:11px; color:#666; border:none;")
-        self._more_btn.toggled.connect(self._toggle_technical_cats)
-        cat_row.addWidget(self._more_btn)
         cat_row.addStretch()
         rl.addLayout(cat_row)
-
-        self._tech_row_widget = QWidget()
-        tech_inner = QHBoxLayout(self._tech_row_widget)
-        tech_inner.setContentsMargins(0, 0, 0, 0)
-        tech_inner.setSpacing(4)
-        for name in _TECHNICAL_CATEGORIES:
-            btn = QPushButton(name)
-            btn.setCheckable(True)
-            btn.setStyleSheet(_TECH_CHIP_STYLE)
-            self._cat_group.addButton(btn)
-            tech_inner.addWidget(btn)
-            self._cat_buttons[name] = btn
-        tech_inner.addStretch()
-        self._tech_row_widget.hide()
-        rl.addWidget(self._tech_row_widget)
 
         self._custom_cat_row = QHBoxLayout()
         self._custom_cat_row.setSpacing(4)
         self._custom_cat_chips_layout = self._custom_cat_row
         self._cat_input = QLineEdit()
-        self._cat_input.setPlaceholderText("New category…")
-        self._cat_input.setMaximumWidth(160)
+        self._cat_input.setPlaceholderText("New category name…")
+        self._cat_input.setMaximumWidth(200)
         self._cat_input.returnPressed.connect(self._add_custom_category)
         self._custom_cat_row.addWidget(self._cat_input)
-        add_cat_btn = QPushButton("+")
-        add_cat_btn.setFixedWidth(28)
-        add_cat_btn.setToolTip("Add custom category")
+        add_cat_btn = QPushButton("＋ Add Custom Category")
+        add_cat_btn.setToolTip("Add a custom category")
         add_cat_btn.clicked.connect(self._add_custom_category)
         self._custom_cat_row.addWidget(add_cat_btn)
         self._custom_cat_row.addStretch()
@@ -580,12 +542,42 @@ class StateCharacterizationView(QWidget):
         try:
             from _widgets import VideoPlayer
             self._player = VideoPlayer()
+            self._player.video_finished.connect(self._on_video_finished)
             rl.addWidget(self._player, stretch=1)
         except Exception:
             self._player = None
             rl.addWidget(_placeholder(
                 "Video player unavailable.\nInstall opencv-python to enable."
             ))
+
+        # ── Clip navigation + export, directly below the video player (Autoplay
+        #    sits just under the player's Loop control) ──
+        clip_nav_row = QHBoxLayout()
+        clip_nav_row.setSpacing(6)
+        self._autoplay_cb = QCheckBox("Autoplay")
+        self._autoplay_cb.setChecked(True)
+        self._autoplay_cb.setToolTip("Automatically play the next clip when one ends")
+        clip_nav_row.addWidget(self._autoplay_cb)
+        self._prev_clip_btn = QPushButton("◀ Previous Clip")
+        self._prev_clip_btn.setToolTip("Play the previous exemplar clip for this state")
+        self._prev_clip_btn.setEnabled(False)
+        self._prev_clip_btn.clicked.connect(self._prev_clip)
+        clip_nav_row.addWidget(self._prev_clip_btn)
+        self._next_clip_btn = QPushButton("Next Clip ▶")
+        self._next_clip_btn.setToolTip("Play the next exemplar clip for this state")
+        self._next_clip_btn.setEnabled(False)
+        self._next_clip_btn.clicked.connect(self._next_clip)
+        clip_nav_row.addWidget(self._next_clip_btn)
+        clip_nav_row.addStretch(1)
+        self._clip_status = QLabel("")
+        self._clip_status.setStyleSheet("color:#888; font-size:11px;")
+        clip_nav_row.addWidget(self._clip_status, stretch=1)
+        self._export_clip_btn = QPushButton("Export Clip")
+        self._export_clip_btn.setToolTip("Copy the current clip to results/exports/")
+        self._export_clip_btn.setEnabled(False)
+        self._export_clip_btn.clicked.connect(self._export_current_clip)
+        clip_nav_row.addWidget(self._export_clip_btn)
+        rl.addLayout(clip_nav_row)
 
         scroll.setWidget(right)
         splitter.addWidget(scroll)
@@ -596,15 +588,37 @@ class StateCharacterizationView(QWidget):
     # ────────────────────────────────────────────────── Data loading ──
 
     def update_data(self, data: dict) -> None:
-        self._data = data
+        self._data = self._merge_incoming_data(data)
         self._load()
 
     def refresh(self, data: dict) -> None:
-        self._data = data
+        self._data = self._merge_incoming_data(data)
         self._load()
 
-    def _load_from_disk(self) -> None:
-        """Read characterization outputs from disk and refresh the view."""
+    @staticmethod
+    def _n_rows(df) -> int:
+        return 0 if df is None or getattr(df, "empty", True) else len(df)
+
+    def _merge_incoming_data(self, data: dict) -> dict:
+        """Never let a partial/lightweight payload shrink the state list.
+
+        The app's DataLoader only fills ``state_summary`` in its full (non-
+        lightweight) pass; a lightweight refresh would otherwise wipe the list.
+        Retain the last good ``state_summary`` (and companion frames) when the
+        incoming payload lacks it or has fewer states than we already show.
+        """
+        merged = dict(data or {})
+        prev = self._data or {}
+        if self._n_rows(merged.get("state_summary")) < self._n_rows(prev.get("state_summary")):
+            merged["state_summary"] = prev.get("state_summary")
+            for k in ("context_report", "feature_zscores", "duration_summary",
+                      "group_enrichment", "cluster_info"):
+                if merged.get(k) is None and prev.get(k) is not None:
+                    merged[k] = prev.get(k)
+        return merged
+
+    def _read_characterization_from_disk(self) -> dict:
+        """Return a copy of self._data with characterization outputs re-read from disk."""
         def _csv(rel: str) -> pd.DataFrame | None:
             p = RESULTS / rel
             try:
@@ -625,9 +639,103 @@ class StateCharacterizationView(QWidget):
         data["context_report"] = _csv("characterization/context_report.csv")
         data["feature_zscores"] = _csv("characterization/state_feature_zscores.csv")
         data["duration_summary"] = _csv("characterization/state_duration_summary.csv")
+        data["group_enrichment"] = _csv("characterization/state_group_enrichment.csv")
         data["cluster_info"] = _json("shared/cluster_info.json")
-        self._data = data
+        return data
+
+    def _load_from_disk(self) -> None:
+        """Read characterization outputs from disk and fully refresh the view."""
+        self._data = self._read_characterization_from_disk()
         self._load()
+
+    def on_cluster_changed(self) -> None:
+        """Re-read from disk after the active cluster run changes; flag stale clips.
+
+        Clips on disk belong to whichever run generated them, so after switching
+        runs they may be stale for the new clustering. We never auto-regenerate —
+        just refresh what's shown and prompt the user if clips look outdated.
+        """
+        self._load_from_disk()
+        if self._clips_are_stale():
+            self._show_notice(
+                "Clips may be stale for this cluster run — click "
+                "'Generate State Exemplars' to rebuild clips for the current clustering."
+            )
+
+    def _clips_are_stale(self) -> bool:
+        """True when no clips exist, or the newest clip predates cluster_info.json."""
+        try:
+            clips_root = Path(_vc.get_clips_dir())
+        except Exception:
+            return False
+        state_dirs = list(clips_root.glob("state_*")) if clips_root.is_dir() else []
+        if not state_dirs:
+            return True
+        ci = RESULTS / "shared" / "cluster_info.json"
+        if not ci.exists():
+            return False
+        newest = 0.0
+        for d in state_dirs:
+            for f in d.glob("*.mp4"):
+                try:
+                    newest = max(newest, f.stat().st_mtime)
+                except OSError:
+                    continue
+        return newest > 0 and newest < ci.stat().st_mtime
+
+    def _soft_refresh_after_generation(self, ok: bool) -> None:
+        """Refresh characterization/exemplar data after a generate/characterize run
+        WITHOUT rebuilding the state list or dropping saved labels (Part 5)."""
+        # Re-read fresh outputs, merged so the full state list is never shrunk.
+        self._data = self._merge_incoming_data(self._read_characterization_from_disk())
+
+        if not self._state_ids:
+            # First-ever population: safe to build the list from scratch.
+            self._load()
+        else:
+            ss = self._data.get("state_summary")
+            id_col = getattr(self, "_id_col", None)
+            if ss is not None and not ss.empty and id_col:
+                self._compute_heuristic_labels(ss, id_col)
+            self._saved_labels = self._load_saved_state_labels()
+            # Update each row's text in place (traits may change; saved labels kept).
+            for i, sid in enumerate(self._state_ids):
+                text, tooltip = self._state_row_display(sid)
+                item = self._state_list.item(i)
+                if item is not None:
+                    item.setText(text)
+                    item.setToolTip(tooltip)
+            if self._panel_collapsed:
+                self._sync_collapsed_list()
+            self._update_metric_extremes()
+            # Refresh the currently-selected state's kinematics/exemplars in place.
+            cur = self._state_list.currentRow()
+            if 0 <= cur < len(self._state_ids):
+                self._on_state_selected(cur)
+
+        if ok:
+            self._show_generation_notice()
+
+    def _show_generation_notice(self) -> None:
+        """Non-blocking summary of what the last run produced (Part 5)."""
+        kind = self._last_run_kind
+        if "generate_clips" in kind:
+            # States that actually have clips on disk.
+            sids = sorted(sid for sid in self._state_ids if self._clips_for_state(sid))
+            head = "Generated clips for"
+        else:
+            sids = sorted(self._state_ids)
+            head = "Ran characterization on"
+        n = len(sids)
+        if not n:
+            self._show_notice("Generation complete.")
+            return
+        examples = []
+        for sid in sids[:4]:
+            trait = self._heuristic_labels.get(sid, "")
+            examples.append(f"State {sid} ({trait})" if trait else f"State {sid}")
+        more = f", +{n - len(examples)} more" if n > len(examples) else ""
+        self._show_notice(f"{head} {n} state(s) — " + ", ".join(examples) + more)
 
     def _load(self) -> None:
         ss = self._data.get("state_summary")
@@ -635,8 +743,8 @@ class StateCharacterizationView(QWidget):
 
         self._state_list.clear()
         self._state_ids = []
-        self._load_clip_btn.setEnabled(False)
-        self._clip_status.setText("")
+        self._current_sid = None
+        self._clear_current_clip("")
         self._detail_placeholder.show()
         self._cards_widget.hide()
         self._profile_tabs.hide()
@@ -666,9 +774,9 @@ class StateCharacterizationView(QWidget):
 
         self._id_col = id_col
         self._ctx_enrich = ctx_enrich
+        self._saved_labels = self._load_saved_state_labels()
         self._compute_heuristic_labels(ss, id_col)
-        self._load_poles()
-        self._update_poles_panel()
+        self._update_metric_extremes()
         self._populate_list()
 
     def _compute_heuristic_labels(self, ss: pd.DataFrame, id_col: str) -> None:
@@ -730,16 +838,27 @@ class StateCharacterizationView(QWidget):
         self._state_ids = []
         for _, row in df.iterrows():
             sid = int(row.get(id_col, -1))
-            base = f"State {sid}"
-            trait = self._heuristic_labels.get(sid, "")
-            if trait and trait != base:
-                label = f"{base}  —  {trait}"
-            else:
-                label = base
-            self._state_list.addItem(label)
+            text, tooltip = self._state_row_display(sid)
+            self._state_list.addItem(text)
+            if tooltip:
+                self._state_list.item(self._state_list.count() - 1).setToolTip(tooltip)
             self._state_ids.append(sid)
         if self._panel_collapsed:
             self._sync_collapsed_list()
+
+    def _state_row_display(self, sid: int) -> tuple[str, str]:
+        """Return (row_text, tooltip) for a state.
+
+        A user-saved label is shown as the row text once saved; the auto-
+        generated kinematic description is preserved as the tooltip.
+        """
+        base = f"State {sid}"
+        trait = self._heuristic_labels.get(sid, "")
+        saved = str((self._saved_labels.get(sid) or {}).get("label", "")).strip()
+        display = saved or (trait if trait and trait != base else "")
+        text = f"{base}  —  {display}" if display else base
+        tooltip = f"Kinematic signature: {trait}" if trait and trait != base else ""
+        return text, tooltip
 
     def _on_sort_changed(self, _=None) -> None:
         self._sort_asc.setText("↑" if self._sort_asc.isChecked() else "↓")
@@ -799,9 +918,8 @@ class StateCharacterizationView(QWidget):
         if row < 0 or row >= len(self._state_ids):
             return
         sid = self._state_ids[row]
+        self._current_sid = sid
         self._detail_placeholder.hide()
-        self._load_clip_btn.setEnabled(True)
-        self._load_clip_btn.setProperty("_sid", sid)
 
         ss = self._data.get("state_summary")
         if ss is None:
@@ -879,8 +997,6 @@ class StateCharacterizationView(QWidget):
         self._cat_group.setExclusive(True)
         if cat and cat in self._cat_buttons:
             self._cat_buttons[cat].setChecked(True)
-            if cat in _TECHNICAL_CATEGORIES:
-                self._more_btn.setChecked(True)
 
         self._populate_exemplars(sid)
 
@@ -1120,38 +1236,17 @@ class StateCharacterizationView(QWidget):
             f"QPushButton:checked{{background:#4E79A7;color:white;border-color:#4E79A7;}}"
             f"QPushButton:hover:!checked{{background:#e0e8f0;}}"
         )
-        tech_fs = max(7, int(10 * s))
-        tech_pad_h = max(2, int(3 * s))
-        tech_pad_w = max(5, int(8 * s))
-        tech_style = (
-            f"QPushButton{{background:#f5f5f5;border:1px solid #ddd;"
-            f"border-radius:{chip_r}px;padding:{tech_pad_h}px {tech_pad_w}px;"
-            f"font-size:{tech_fs}px;color:#666;}}"
-            f"QPushButton:checked{{background:#76B7B2;color:white;border-color:#76B7B2;}}"
-            f"QPushButton:hover:!checked{{background:#e8f0f0;}}"
-        )
-        for name, btn in self._cat_buttons.items():
-            if name in _BEHAVIORAL_CATEGORIES:
-                btn.setStyleSheet(chip_style)
-            elif name in _TECHNICAL_CATEGORIES:
-                btn.setStyleSheet(tech_style)
-            else:
-                btn.setStyleSheet(chip_style)
+        for btn in self._cat_buttons.values():
+            btn.setStyleSheet(chip_style)
         lbl_fs = max(9, int(12 * s))
         self._lbl_title.setStyleSheet(
             f"font-weight:bold; font-size:{lbl_fs}px; color:#333;"
         )
         cat_fs = max(9, int(11 * s))
         self._cat_label.setStyleSheet(f"font-size:{cat_fs}px;")
-        more_fs = max(8, int(11 * s))
-        self._more_btn.setStyleSheet(
-            f"font-size:{more_fs}px; color:#666; border:none;"
-        )
         btn_fs = max(9, int(12 * s))
         btn_style = f"font-size:{btn_fs}px;"
         self._save_btn.setStyleSheet(btn_style)
-        self._save_next_btn.setStyleSheet(btn_style)
-        self._back_btn.setStyleSheet(btn_style)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1250,82 +1345,72 @@ class StateCharacterizationView(QWidget):
         ]
         pd.DataFrame(rows).to_csv(p, index=False)
 
-    # ─────────────────────────────────── Movement poles ──
+        # Update the list row in place (no full reload / re-selection).
+        self._saved_labels = existing
+        text, tooltip = self._state_row_display(sid)
+        item = self._state_list.item(row)
+        if item is not None:
+            item.setText(text)
+            item.setToolTip(tooltip)
+        if self._panel_collapsed:
+            self._sync_collapsed_list()
 
-    def _load_poles(self) -> None:
-        p = RESULTS / "characterization" / "poles.json"
-        if not p.exists():
-            self._poles = {}
-            return
+    # ─────────────────────────────────── State clips ──
+
+    def _clips_for_state(self, sid: int) -> list[Path]:
+        """All exported clips for a state, from clips/state_<sid>/*.mp4.
+
+        Mirrors characterize.load_clips() but scoped to one state directory so
+        every generated clip (longest/typical/context/representative) is shown.
+        """
         try:
-            self._poles = json.loads(p.read_text(encoding="utf-8"))
+            d = Path(_vc.get_clips_dir()) / f"state_{sid}"
         except Exception:
-            self._poles = {}
+            return []
+        if not d.is_dir():
+            return []
+        return sorted(d.glob("*.mp4"))
 
-    def _update_poles_panel(self) -> None:
-        if not self._poles:
-            self._poles_panel.hide()
+    @staticmethod
+    def _clip_type_label(name: str) -> str:
+        n = name.lower()
+        if n.startswith("longest"):
+            return "Longest bout"
+        if n.startswith("typical"):
+            return "Typical"
+        if n.startswith("context_"):
+            parts = name.split("_")
+            return f"Context {parts[1]}" if len(parts) >= 3 else "Context"
+        if n.startswith("clip"):
+            return "Representative"
+        return "Clip"
+
+    def _clear_current_clip(self, status: str = "") -> None:
+        """Reset clip state (no clip loaded) and disable clip nav/export."""
+        self._current_clip_path = None
+        self._clip_status.setText(status)
+        self._export_clip_btn.setEnabled(False)
+        self._prev_clip_btn.setEnabled(False)
+        self._next_clip_btn.setEnabled(False)
+
+    def _update_clip_nav_buttons(self) -> None:
+        n = self._exemplar_table.rowCount()
+        row = self._exemplar_table.currentRow()
+        self._prev_clip_btn.setEnabled(n > 1 and row > 0)
+        self._next_clip_btn.setEnabled(n > 1 and 0 <= row < n - 1)
+
+    def _play_clip(self, path: Path | None) -> None:
+        """Central clip loader: track the current clip, load it, honor Autoplay."""
+        if path is None or not str(path):
             return
-
-        for attr_prefix, pole_key in [("_low", "low_motion"), ("_high", "high_motion")]:
-            pole = self._poles.get(pole_key, {})
-            sid = pole.get("state_id")
-            speed = pole.get("speed_zscore")
-            n_bouts = pole.get("n_bouts", 0)
-            warn = pole.get("warning", "") or ""
-            pole_type = pole.get("type", "unavailable")
-
-            state_lbl: QLabel = getattr(self, attr_prefix + "_state_lbl")
-            speed_lbl: QLabel = getattr(self, attr_prefix + "_speed_lbl")
-            bouts_lbl: QLabel = getattr(self, attr_prefix + "_bouts_lbl")
-            warn_lbl:  QLabel = getattr(self, attr_prefix + "_warn_lbl")
-            clip_btn: QPushButton = getattr(self, attr_prefix + "_clip_btn")
-
-            if pole_type == "unavailable" or sid is None:
-                state_lbl.setText("—")
-                speed_lbl.setText("Speed (z): —")
-                bouts_lbl.setText("Bouts: —")
-                clip_btn.setEnabled(False)
-            else:
-                state_lbl.setText(f"State {sid}")
-                speed_lbl.setText(f"Speed (z): {speed:+.3f}" if speed is not None else "Speed (z): —")
-                bouts_lbl.setText(f"Bouts: {n_bouts}")
-                clip_btn.setEnabled(True)
-
-            if warn:
-                warn_lbl.setText(warn)
-                warn_lbl.show()
-            else:
-                warn_lbl.hide()
-
-        self._poles_panel.show()
-
-    def _load_pole_clip(self, pole_key: str) -> None:
-        """Load first available exemplar clip for the pole state (lazy)."""
-        pole = self._poles.get(pole_key + "_motion", {})
-        sid = pole.get("state_id")
-        if sid is None:
-            return
-        df = self._load_exemplar_manifest()
-        if df.empty or "state_id" not in df.columns:
-            self._clip_status.setText(f"No exemplar manifest found for State {sid}.")
-            return
-        mask = (
-            (pd.to_numeric(df["state_id"], errors="coerce") == sid)
-            & df["clip_path"].fillna("").astype(str).ne("")
-            & df.get("skipped_reason", pd.Series("", index=df.index)).fillna("").astype(str).eq("")
-        )
-        sub = df[mask]
-        if sub.empty:
-            self._clip_status.setText(f"No exemplar clips for State {sid}.")
-            return
-        if "rank" in sub.columns:
-            sub = sub.sort_values("rank", na_position="last")
-        path = self._resolve_exemplar_clip_path(str(sub.iloc[0]["clip_path"]))
-        if not path or not path.exists():
+        if not path.exists():
+            self._current_clip_path = None
+            self._export_clip_btn.setEnabled(False)
             self._clip_status.setText(f"Clip file not found: {path}")
             return
+        self._current_clip_path = path
         self._clip_status.setText(path.name)
+        self._export_clip_btn.setEnabled(True)
         if self._player:
             try:
                 self._player.load(str(path))
@@ -1334,148 +1419,77 @@ class StateCharacterizationView(QWidget):
             except Exception:
                 self._clip_status.setText(f"Error loading {path.name}")
 
-    def _load_exemplar_manifest(self) -> pd.DataFrame:
-        p = RESULTS / "characterization" / "state_exemplars.csv"
-        if not p.exists():
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(p)
-        except Exception:
-            return pd.DataFrame()
-
-    def _resolve_exemplar_clip_path(self, clip_path: str) -> Path:
-        raw = str(clip_path or "").strip()
-        if not raw:
-            return Path()
-        p = Path(raw)
-        if p.is_absolute():
-            return p
-        project_data_root = Path(_vc.get_results_dir()).parent
-        candidate = project_data_root / raw
-        if candidate.exists():
-            return candidate
-        return RESULTS / raw
-
     def _populate_exemplars(self, sid: int) -> None:
-        df = self._load_exemplar_manifest()
-        self._exemplar_df = df
+        clips = self._clips_for_state(sid)
         self._exemplar_table.setRowCount(0)
-        self._load_clip_btn.setEnabled(False)
-        if df.empty or "state_id" not in df.columns:
+        if not clips:
             self._exemplar_placeholder.show()
             self._exemplar_table.hide()
-            self._clip_status.setText("")
+            self._clear_current_clip("")
             return
 
-        state_ids = pd.to_numeric(df["state_id"], errors="coerce")
-        sub = df[
-            (state_ids == sid)
-            & df.get("clip_path", pd.Series("", index=df.index)).fillna("").astype(str).ne("")
-            & df.get("skipped_reason", pd.Series("", index=df.index)).fillna("").astype(str).eq("")
-        ].copy()
-        if sub.empty:
-            self._exemplar_placeholder.show()
-            self._exemplar_table.hide()
-            self._clip_status.setText("No curated exemplars for this state yet.")
-            return
-
-        if "rank" in sub.columns:
-            sub = sub.sort_values("rank", na_position="last")
         self._exemplar_placeholder.hide()
         self._exemplar_table.show()
         self._exemplar_table.setSortingEnabled(False)
-        self._exemplar_table.setRowCount(len(sub))
-        for row_i, (_, row) in enumerate(sub.iterrows()):
-            clip_path = str(row.get("clip_path", ""))
-            animal = str(row.get("animal_id", "") or row.get("subject_id", "") or "—")
-            context = str(row.get("context", "") or row.get("condition", "") or "—")
-            duration = row.get("duration_sec", "")
-            rank_item = QTableWidgetItem(str(row.get("rank", row_i + 1)))
-            rank_item.setTextAlignment(Qt.AlignCenter)
-            rank_item.setData(Qt.UserRole, clip_path)
-            self._exemplar_table.setItem(row_i, 0, rank_item)
-            clip_item = QTableWidgetItem(Path(clip_path).name or clip_path)
-            clip_item.setData(Qt.UserRole, clip_path)
-            self._exemplar_table.setItem(row_i, 1, clip_item)
-            self._exemplar_table.setItem(row_i, 2, QTableWidgetItem(animal))
-            self._exemplar_table.setItem(row_i, 3, QTableWidgetItem(context))
-            try:
-                dur_txt = f"{float(duration):.2f}s"
-            except (TypeError, ValueError):
-                dur_txt = str(duration)
-            self._exemplar_table.setItem(row_i, 4, QTableWidgetItem(dur_txt))
-            self._exemplar_table.setItem(row_i, 5, QTableWidgetItem(str(row.get("selection_reason", ""))))
+        self._exemplar_table.setRowCount(len(clips))
+        for row_i, path in enumerate(clips):
+            clip_item = QTableWidgetItem(path.name)
+            clip_item.setData(Qt.UserRole, str(path))
+            self._exemplar_table.setItem(row_i, 0, clip_item)
+            self._exemplar_table.setItem(row_i, 1, QTableWidgetItem(self._clip_type_label(path.name)))
         self._exemplar_table.setSortingEnabled(True)
+        # Auto-load the first clip when a state is selected.
         self._exemplar_table.selectRow(0)
-        self._clip_status.setText("Select an exemplar, then load it to preview.")
+        self._load_clip()
+        self._update_clip_nav_buttons()
 
     def _selected_exemplar_path(self) -> Path | None:
         row = self._exemplar_table.currentRow()
         if row < 0:
             return None
-        item = self._exemplar_table.item(row, 1) or self._exemplar_table.item(row, 0)
+        item = self._exemplar_table.item(row, 0)
         if item is None:
             return None
-        return self._resolve_exemplar_clip_path(str(item.data(Qt.UserRole) or ""))
+        raw = str(item.data(Qt.UserRole) or "")
+        return Path(raw) if raw else None
 
     def _on_exemplar_selected(self) -> None:
-        path = self._selected_exemplar_path()
-        if path is None:
-            self._load_clip_btn.setEnabled(False)
-            return
-        self._load_clip_btn.setEnabled(bool(str(path)))
-        self._clip_status.setText(path.name if path.name else "")
+        # Selecting a clip row loads it immediately (single source of clip playback).
+        self._update_clip_nav_buttons()
+        self._load_clip()
 
     def _load_clip(self) -> None:
-        sid = self._load_clip_btn.property("_sid")
-        if sid is None:
-            return
         chosen = self._selected_exemplar_path()
         if chosen is None or not str(chosen):
-            self._clip_status.setText("Select a curated exemplar first.")
             return
-        if not chosen.exists():
-            self._clip_status.setText(f"Clip file not found: {chosen}")
-            return
-        self._clip_status.setText(chosen.name)
-        if self._player:
-            try:
-                self._player.load(str(chosen))
-                if self._autoplay_cb.isChecked():
-                    self._player.play()
-            except Exception:
-                self._clip_status.setText(f"Error loading {chosen.name}")
+        self._play_clip(chosen)
 
-    def _toggle_technical_cats(self, expanded: bool) -> None:
-        self._tech_row_widget.setVisible(expanded)
-        self._more_btn.setText("More ▾" if expanded else "More ▸")
-
-    def _save_and_next(self) -> None:
-        self._save_state_label()
-        current_row = self._state_list.currentRow()
-        next_row = current_row + 1
-        while next_row < self._state_list.count():
-            if not self._state_list.item(next_row).isHidden():
-                break
-            next_row += 1
-        if next_row >= self._state_list.count():
-            self._clip_status.setText("All states labeled!")
+    def _export_current_clip(self) -> None:
+        """Copy the currently loaded clip to results/exports/ (single click)."""
+        src = self._current_clip_path
+        if src is None or not src.exists():
+            QMessageBox.information(self, "Export Clip", "No clip is currently loaded.")
             return
-        self._state_list.setCurrentRow(next_row)
-        self._load_clip()
-
-    def _go_back(self) -> None:
-        current_row = self._state_list.currentRow()
-        prev_row = current_row - 1
-        while prev_row >= 0:
-            if not self._state_list.item(prev_row).isHidden():
-                break
-            prev_row -= 1
-        if prev_row < 0:
-            self._clip_status.setText("Already at first state.")
+        export_dir = RESULTS / "exports"
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Clip", f"Could not create export folder:\n{exc}")
             return
-        self._state_list.setCurrentRow(prev_row)
-        self._load_clip()
+        sid = self._current_sid
+        prefix = f"state_{sid}_" if sid is not None else ""
+        dest = export_dir / f"{prefix}{src.name}"
+        stem, suffix = dest.stem, dest.suffix
+        counter = 1
+        while dest.exists():
+            dest = export_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        try:
+            shutil.copy2(src, dest)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Clip", f"Export failed:\n{exc}")
+            return
+        QMessageBox.information(self, "Clip Exported", f"Saved to:\n{dest}")
 
     def _add_custom_category(self) -> None:
         name = self._cat_input.text().strip()
@@ -1520,33 +1534,36 @@ class StateCharacterizationView(QWidget):
                     self._custom_cat_chips_layout.addItem(stretch)
                 self._cat_buttons[name] = btn
 
-    # ─────────────────────────────────────── Command runner ──
-
-    def _prev_state(self) -> None:
-        cur = self._state_list.currentRow()
-        for r in range(cur - 1, -1, -1):
-            if not self._state_list.item(r).isHidden():
-                self._state_list.setCurrentRow(r)
-                return
-
-    def _next_state(self) -> None:
-        cur = self._state_list.currentRow()
-        for r in range(cur + 1, self._state_list.count()):
-            if not self._state_list.item(r).isHidden():
-                self._state_list.setCurrentRow(r)
-                return
+    # ─────────────────────────────────────── Clip cycling ──
+    # (state-to-state navigation is via the state list only — see Part 1)
 
     def _prev_clip(self) -> None:
         row = self._exemplar_table.currentRow()
         if row > 0:
+            # selectRow triggers _on_exemplar_selected, which loads the clip.
             self._exemplar_table.selectRow(row - 1)
-            self._load_clip()
 
     def _next_clip(self) -> None:
         row = self._exemplar_table.currentRow()
         if row < self._exemplar_table.rowCount() - 1:
             self._exemplar_table.selectRow(row + 1)
-            self._load_clip()
+
+    def _on_video_finished(self) -> None:
+        """When a clip ends and Autoplay is on, advance to the next clip (wrapping)."""
+        if not self._autoplay_cb.isChecked():
+            return
+        n = self._exemplar_table.rowCount()
+        if n <= 0:
+            return
+        if n == 1:
+            # Single clip: replay it.
+            self._play_clip(self._selected_exemplar_path())
+            return
+        nxt = (self._exemplar_table.currentRow() + 1) % n
+        # selectRow triggers _on_exemplar_selected → load + play.
+        self._exemplar_table.selectRow(nxt)
+
+    # ─────────────────────────────────────── Command runner ──
 
     def _run_characterize_and_generate(self) -> None:
         self._pending_command = ["generate_clips.py"]
@@ -1558,6 +1575,7 @@ class StateCharacterizationView(QWidget):
         command = "python " + " ".join(str(a) for a in args)
         terminal.set_command(command)
         self._running_command = command
+        self._last_run_kind = str(args[0]) if args else ""
         self._worker = SubprocessWorker(args)
         self._worker.log.connect(terminal.append_output)
         self._worker.done.connect(self._on_run_done)
@@ -1577,4 +1595,6 @@ class StateCharacterizationView(QWidget):
             self._run_command(next_cmd, self._terminal)
             return
         self._pending_command = None
-        self._load()
+        # Non-destructive: merge fresh outputs into the existing list instead of
+        # rebuilding it (which dropped states/labels). See Part 5.
+        self._soft_refresh_after_generation(ok)

@@ -147,7 +147,7 @@ def load_pretrained_model(model_name: str, target_videos_dir: str) -> str:
 def analyze_with_pretrained(
     model_name: str,
     videos_dir: str,
-    output_dir: str,
+    output_dir: str | None = None,
 ) -> List[str]:
     """
     Run DLC pose estimation on all .mp4 videos in videos_dir using a pretrained
@@ -168,6 +168,7 @@ def analyze_with_pretrained(
         )
         sys.exit(1)
 
+    output_dir = output_dir or videos_dir
     dlc_config = vieb_config.require_dlc_project_path()
     config_yaml = os.path.join(dlc_config, "config.yaml")
 
@@ -180,11 +181,16 @@ def analyze_with_pretrained(
         )
         sys.exit(1)
 
-    print(f"Running pose estimation on {len(video_files)} video(s)...")
+    total = len(video_files)
+    print(f"Running pose estimation on {total} video(s)...", flush=True)
     try:
-        import torch
         hw = detect_hw()
         batchsize = hw["batch_size"]
+        if hw.get("device") == "cuda":
+            print("GPU detected — using CUDA for pose estimation.", flush=True)
+            print("Using CUDA device 0 for pose estimation.", flush=True)
+        else:
+            print("No GPU detected — using CPU, batch size 4. Training will be slow.", flush=True)
     except ImportError:
         batchsize = 4
 

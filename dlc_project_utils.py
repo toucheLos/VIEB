@@ -25,6 +25,26 @@ def is_valid_dlc_project(path: str | Path | None) -> bool:
     return bool(config and config.exists())
 
 
+def find_trained_dlc_snapshots(path: str | Path | None) -> list[Path]:
+    """Return trained DLC snapshot files for TensorFlow or PyTorch projects."""
+    project = normalize_dlc_project_path(path)
+    if not project or not project.exists():
+        return []
+    patterns = (
+        "dlc-models/**/train/snapshot-*.index",
+        "dlc-models-pytorch/**/train/snapshot-*.pt",
+    )
+    snapshots: list[Path] = []
+    for pattern in patterns:
+        snapshots.extend(project.glob(pattern))
+    return sorted(p for p in snapshots if p.is_file())
+
+
+def has_trained_dlc_model(path: str | Path | None) -> bool:
+    """Return True when a DLC project has at least one trained snapshot."""
+    return bool(find_trained_dlc_snapshots(path))
+
+
 def default_dlc_task_name(project_name: str | None, today: date | None = None) -> str:
     """Build VIEB's editable default DLC task name."""
     today = today or date.today()

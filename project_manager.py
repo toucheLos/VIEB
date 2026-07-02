@@ -34,6 +34,25 @@ LEGACY_MARKERS = (
 
 _startup_cache: dict = {}
 
+# Per-process memoization of the expensive validation work
+# (session_source_status / validate_metadata_csv / _count_files). Keyed on
+# (path, mtime) so a genuine filesystem change refreshes the entry, while
+# repeated calls within one onboarding/startup pass reuse the result. Cleared
+# by invalidate_project_cache() alongside _startup_cache.
+_source_status_cache: dict = {}
+_metadata_validation_cache: dict = {}
+_count_files_cache: dict = {}
+
+
+def _mtime(path: Path | str | None) -> float:
+    """Return the mtime of ``path`` (or -1.0 when it is missing/unreadable)."""
+    if not path:
+        return -1.0
+    try:
+        return Path(path).stat().st_mtime
+    except Exception:
+        return -1.0
+
 
 def _startup_cache_key(app_path: Path) -> str:
     try:
@@ -48,6 +67,27 @@ def _startup_cache_key(app_path: Path) -> str:
 
 def invalidate_project_cache() -> None:
     _startup_cache.clear()
+    _source_status_cache.clear()
+    _metadata_validation_cache.clear()
+    _count_files_cache.clear()
+
+
+def _validate_metadata_csv_cached(meta_path: Path | str) -> dict:
+    """Memoized wrapper around metadata_generator.validate_metadata_csv.
+
+    Keyed on (path, mtime) so the expensive pandas pass runs once per file
+    version instead of on every validation call.
+    """
+    meta_str = str(meta_path)
+    key = (meta_str, _mtime(meta_path))
+    cached = _metadata_validation_cache.get(key)
+    if cached is not None:
+        return cached
+    from metadata_generator import validate_metadata_csv
+
+    report = validate_metadata_csv(meta_str)
+    _metadata_validation_cache[key] = report
+    return report
 
 
 class ProjectSelectionError(RuntimeError):
@@ -77,6 +117,11 @@ class ProjectValidation:
     valid: bool
     checks: list[Check] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
+    # Populated by validate_project() so callers can reuse the resolved paths
+    # and session-source status it already computes instead of recomputing
+    # them. None when validation returned early (project missing).
+    source: dict[str, Any] | None = None
+    paths: dict[str, "ResolvedProjectPath"] | None = None
 
     @property
     def project_name(self) -> str:
@@ -430,7 +475,7 @@ def validate_project(path: Path | str, repo_root: Path | str | None = None) -> P
     checks.append(Check("reports", "previous report outputs detected", "green" if report.exists() else "yellow", str(report)))
     checks.append(Check("motifs", "motif outputs detected", "green" if motif else "yellow", "optional"))
     valid = bool(project_indicators(project))
-    return ProjectValidation(project, valid, checks, cfg)
+    return ProjectValidation(project, valid, checks, cfg, source=source, paths=paths)
 
 
 def _count_files(folder: Path | str | None, suffixes: set[str]) -> int:
@@ -439,7 +484,16 @@ def _count_files(folder: Path | str | None, suffixes: set[str]) -> int:
     path = Path(folder)
     if not path.exists() or not path.is_dir():
         return 0
-    return sum(1 for p in path.iterdir() if p.is_file() and p.suffix.lower() in suffixes)
+    # Cache the count per (directory, mtime, suffixes): the dir mtime changes
+    # when files are added/removed, so a stale count self-invalidates. Avoids a
+    # full iterdir() on every repeated call within one validation pass.
+    key = (str(path.resolve()), _mtime(path), tuple(sorted(suffixes)))
+    cached = _count_files_cache.get(key)
+    if cached is not None:
+        return cached
+    count = sum(1 for p in path.iterdir() if p.is_file() and p.suffix.lower() in suffixes)
+    _count_files_cache[key] = count
+    return count
 
 
 def _metadata_row_count(path: Path | str | None) -> int:
@@ -464,7 +518,24 @@ def session_source_status(
     project = Path(project_path).resolve()
     raw_cfg = config if config is not None else _read_project_config(project)
     cfg = normalize_project_config(raw_cfg, project)
-    paths = resolve_project_paths_for_project(project, raw_cfg, _repo_root_for_project(project, repo_root))
+    root = _repo_root_for_project(project, repo_root)
+
+    # Memoize the whole result: every dependency below is captured by an mtime
+    # in the key, so adding/removing files or editing config/metadata refreshes
+    # the entry while repeated calls in one pass reuse it.
+    cache_key = (
+        str(project), str(root),
+        _mtime(project / PROJECT_CONFIG_NAME),
+        _mtime(cfg.get("metadata_csv_path")),
+        _mtime(cfg.get("raw_videos_dir")),
+        _mtime(cfg.get("pose_files_dir")),
+        _mtime(cfg.get("h5_path")),
+    )
+    cached = _source_status_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    paths = resolve_project_paths_for_project(project, raw_cfg, root)
     raw_info = paths["raw_videos"]
     meta_info = paths["metadata"]
     raw_count = _count_files(raw_info.path if raw_info.valid else None, VIDEO_EXTENSIONS)
@@ -475,9 +546,7 @@ def session_source_status(
     metadata_valid = False
     if metadata_rows:
         try:
-            from metadata_generator import validate_metadata_csv
-
-            metadata_valid = bool(validate_metadata_csv(str(meta_info.path)).get("valid"))
+            metadata_valid = bool(_validate_metadata_csv_cached(meta_info.path).get("valid"))
         except Exception:
             metadata_valid = False
 
@@ -491,7 +560,7 @@ def session_source_status(
     if metadata_valid:
         parts.append(f"{metadata_rows} metadata row(s)")
 
-    return {
+    result = {
         "valid": bool(raw_count or pose_csv_count or h5_exists or metadata_valid),
         "raw_videos": raw_count,
         "pose_csvs": pose_csv_count,
@@ -500,6 +569,8 @@ def session_source_status(
         "metadata_valid": metadata_valid,
         "message": ", ".join(parts) if parts else "no session-defining source detected",
     }
+    _source_status_cache[cache_key] = result
+    return result
 
 
 def column_mapping_status(project_path: Path | str, config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -728,9 +799,7 @@ def ensure_project_metadata(project_path: Path | str, *, overwrite: bool = False
     if not source["valid"]:
         return {"created": False, "path": meta, "valid": False, "messages": ["Stage 0 requires raw videos, pose CSVs, an H5 pose file, or an existing metadata CSV."]}
     if meta.exists() and not overwrite:
-        from metadata_generator import validate_metadata_csv
-
-        report = validate_metadata_csv(str(meta))
+        report = _validate_metadata_csv_cached(meta)
         if report.get("valid") and source["valid"]:
             return {"created": False, "path": meta, "valid": True, "messages": report.get("messages", [])}
 
@@ -831,9 +900,7 @@ def onboarding_complete(project_path: Path | str, repo_root: Path | str | None =
     if not source["valid"] or not meta.exists():
         return False
     try:
-        from metadata_generator import validate_metadata_csv
-
-        return bool(validate_metadata_csv(str(meta)).get("valid"))
+        return bool(_validate_metadata_csv_cached(meta).get("valid"))
     except Exception:
         return False
 

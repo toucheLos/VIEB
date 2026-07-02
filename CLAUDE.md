@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Decision Log
+
+Before making any architecture, UX, or naming decision, read `docs/DECISIONS.md`. It contains numbered prior decisions and their rationale — do not re-litigate or silently contradict a numbered decision without flagging it to the user first. When you make a new meaningful decision (architecture choice, root-cause finding, deferred feature, naming convention), add a new numbered entry at the bottom of `docs/DECISIONS.md` following the existing format (Decision/finding, Why, Related). Keep entries short — link to commit hashes or `prompts/` files rather than re-explaining implementation details.
+
 ## Project Overview
 
 VIEB (Video Interpreter for Experimental Behavior) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.

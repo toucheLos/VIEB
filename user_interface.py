@@ -2560,14 +2560,16 @@ class Stage0ReadinessPanel(QFrame):
             if selected.action == "picker_required":
                 return ("picker_required", selected, None, {})
             return ("no_project", selected, None, {})
-        validation = _pm.validate_project(selected.active_project)
+        # One validation pass; reuse the resolved paths + session-source status
+        # it already computed instead of recomputing them below.
+        validation = _pm.validate_project(selected.active_project, ROOT)
         ctx = {}
         if selected.action == "auto_selected" and not _pm.onboarding_complete(
             selected.active_project
         ):
             return ("auto_detected", selected, validation, ctx)
 
-        paths = _pm.resolve_project_paths_for_project(
+        paths = validation.paths or _pm.resolve_project_paths_for_project(
             selected.active_project, validation.config, ROOT
         )
         ctx["paths"] = paths
@@ -2577,7 +2579,7 @@ class Stage0ReadinessPanel(QFrame):
         ):
             return ("legacy_paths", selected, validation, ctx)
 
-        source = _pm.session_source_status(
+        source = validation.source or _pm.session_source_status(
             selected.active_project, validation.config, ROOT
         )
         ctx["source"] = source
@@ -2655,7 +2657,7 @@ class Stage0ReadinessPanel(QFrame):
 
         if validation:
             self._project_name_label.setText(validation.project_name)
-            source = ctx.get("source") or _pm.session_source_status(
+            source = ctx.get("source") or validation.source or _pm.session_source_status(
                 validation.path, validation.config
             )
             self._data_summary.setText(source["message"])
@@ -5154,6 +5156,7 @@ class MainWindow(QMainWindow):
         self._initial_load_done = False
         self._cached_data = None
         self._cached_data_full = False
+        self._label_checkers = set()
         self._crv = None
         self._dlc = None
         self._adv = None
@@ -5494,16 +5497,30 @@ class MainWindow(QMainWindow):
         self._refresh_view_labels()
         self._reload_for_current_view()
 
-    def _on_project_changed(self):
+    def _reload_after_project_change(self, validation=None):
+        """Shared reload body for the two project-switch entry points.
+
+        Both _do_switch (sidebar menu / open / auto-detect / new project) and
+        _on_project_changed (Stage 0 onboarding 'project_changed' signal) rebuild
+        in-memory state after the active project changes; they differ only in the
+        steps that wrap this body (see each caller). Kept as one helper so the
+        reload — and its cache invalidation — stays identical for both.
+        """
         _pm.invalidate_project_cache()
         import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         _refresh_global_paths()
         self.cfg = _load_cfg()
         self._propagate_cfg()
-        self._refresh_project_label()
         self._cached_data = None
         self._cached_data_full = False
         self._load_lightweight_data()
+        self._refresh_project_label(validation)
+
+    def _on_project_changed(self):
+        # Triggered by the Stage 0 panel's project_changed signal after an
+        # onboarding action activates/updates a project (the handler already
+        # persisted the active project via set_active_project).
+        self._reload_after_project_change()
         if self._pv is not None and hasattr(self._pv, "_project_panel"):
             self._pv._project_panel.refresh()
 
@@ -5562,6 +5579,8 @@ class MainWindow(QMainWindow):
     def _stop_all(self):
         if hasattr(self._pv, '_stop_pipeline'):
             self._pv._stop_pipeline()
+        if hasattr(self._dlc, 'stop_worker'):
+            self._dlc.stop_worker()
         if hasattr(self._adv, 'stop_worker'):
             self._adv.stop_worker()
         if hasattr(self._av, 'stop_worker'):
@@ -5702,6 +5721,8 @@ class MainWindow(QMainWindow):
             self._dlc = DLCSetupView(self.cfg)
             self._dlc.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
             self._dlc.navigate_settings.connect(lambda: self._switch("Settings"))
+            self._dlc.worker_running.connect(lambda running: self._set_running_from_source(running, self._dlc))
+            self._dlc.worker_command.connect(self._set_running_command)
             self._replace_view(name, self._dlc)
         elif name == "Add Videos":
             from views.add_videos import AddVideosView
@@ -5826,6 +5847,8 @@ class MainWindow(QMainWindow):
         self.cfg = _load_cfg()
         self._watch_result_files()
         self._propagate_cfg()
+        if getattr(self, "_av", None) is not None:
+            self._av.notify_cluster_changed()
 
     # --- Cluster queue ---
 
@@ -6084,33 +6107,72 @@ class MainWindow(QMainWindow):
                 return
         self._project_onboarding_required = True
 
-    def _refresh_project_label(self):
-        """Update the sidebar project name label from the active project's config."""
+    def _refresh_project_label(self, validation=None):
+        """Update the sidebar project name label.
+
+        The project *name* is read directly from config.json (cheap, no scan).
+        The *status* needs the expensive validate_project() scan, so it is taken
+        from ``validation`` when a caller already has one, and otherwise computed
+        off the UI thread (a placeholder "checking…" tooltip is shown until the
+        background check completes). Keeps startup/switches from blocking on the
+        validation scan.
+        """
         app_cfg = _load_app_config()
         active = app_cfg.get("active_project", "")
-        name = "—"
-        status = "No valid project"
-        if active:
-            cfg_path = Path(active) / "config.json"
-            if cfg_path.exists():
-                try:
-                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    name = cfg.get("project_name", Path(active).name)
-                    status = _pm.validate_project(active).status
-                except Exception:
-                    name = Path(active).name
-            else:
-                # Find the name from the projects list
-                for p in app_cfg.get("projects", []):
-                    if p.get("path") == active:
-                        name = p.get("name", name)
-                        break
-                status = _pm.validate_project(active).status
-        # Truncate with ellipsis
+        name = self._project_label_name(app_cfg, active)
         if len(name) > 18:
             name = name[:15] + "..."
         self._proj_btn.setText(f"{name}  ▼")
-        self._proj_btn.setToolTip(f"{status}\n{active or 'No project selected'}")
+
+        if not active:
+            self._proj_btn.setToolTip("No valid project\nNo project selected")
+            return
+        if validation is not None:
+            self._proj_btn.setToolTip(f"{validation.status}\n{active}")
+        else:
+            self._proj_btn.setToolTip(f"checking…\n{active}")
+            self._start_label_status_check(active)
+
+    def _project_label_name(self, app_cfg: dict, active: str) -> str:
+        """Resolve the display name without triggering a validation scan."""
+        if not active:
+            return "—"
+        cfg_path = Path(active) / "config.json"
+        if cfg_path.exists():
+            try:
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                return cfg.get("project_name", Path(active).name)
+            except Exception:
+                return Path(active).name
+        for p in app_cfg.get("projects", []):
+            if p.get("path") == active:
+                return p.get("name", Path(active).name)
+        return Path(active).name
+
+    def _start_label_status_check(self, active: str) -> None:
+        """Compute the project-label status off the UI thread and apply it."""
+        def _compute():
+            try:
+                return (_pm.validate_project(active).status, active)
+            except Exception:
+                return ("No valid project", active)
+
+        checker = _ReadinessChecker(_compute)
+        # Hold a reference until finished so the QThread isn't GC'd mid-run.
+        self._label_checkers.add(checker)
+
+        def _done(result):
+            try:
+                status, checked_active = result
+            except (ValueError, TypeError):
+                return
+            # Ignore stale results if the active project changed meanwhile.
+            if checked_active == _load_app_config().get("active_project", ""):
+                self._proj_btn.setToolTip(f"{status}\n{checked_active}")
+
+        checker.done.connect(_done)
+        checker.finished.connect(lambda: self._label_checkers.discard(checker))
+        checker.start()
 
     def _open_project_menu(self):
         app_cfg = _load_app_config()
@@ -6187,14 +6249,9 @@ class MainWindow(QMainWindow):
                 p["last_opened"] = now
         _save_app_config(app_cfg)
 
-        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
-        _refresh_global_paths()
-        self.cfg = _load_cfg()
-        self._propagate_cfg()
-        self._cached_data = None
-        self._cached_data_full = False
-        self._load_lightweight_data()
-        self._refresh_project_label()
+        # Explicit sidebar-menu / open / auto-detect / new-project switch: persist
+        # the active project (above), reload shared state, then land on Overview.
+        self._reload_after_project_change()
         self._switch("Overview")
         name = self.cfg.get("project_name", Path(path).name)
         self.statusBar().showMessage(f"Switched to {name}", 5000)

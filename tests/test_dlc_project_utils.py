@@ -25,6 +25,43 @@ def test_normalize_dlc_project_path_accepts_config_yaml(tmp_path):
     assert dpu.is_valid_dlc_project(config)
 
 
+def test_has_trained_dlc_model_accepts_tensorflow_snapshots(tmp_path):
+    project = tmp_path / "DLC-Luna-2026-06-30"
+    train_dir = project / "dlc-models" / "iteration-0" / "DLC-trainset95shuffle2" / "train"
+    train_dir.mkdir(parents=True)
+    snapshot = train_dir / "snapshot-100.index"
+    snapshot.write_text("", encoding="utf-8")
+
+    assert dpu.has_trained_dlc_model(project)
+    assert dpu.find_trained_dlc_snapshots(project) == [snapshot]
+
+
+def test_has_trained_dlc_model_accepts_pytorch_snapshots(tmp_path):
+    project = tmp_path / "DLC-Luna-2026-06-30"
+    train_dir = (
+        project
+        / "dlc-models-pytorch"
+        / "iteration-0"
+        / "DLC-trainset95shuffle2"
+        / "train"
+    )
+    train_dir.mkdir(parents=True)
+    snapshot = train_dir / "snapshot-best-030.pt"
+    snapshot.write_text("", encoding="utf-8")
+
+    assert dpu.has_trained_dlc_model(project)
+    assert dpu.find_trained_dlc_snapshots(project) == [snapshot]
+
+
+def test_has_trained_dlc_model_false_without_snapshots(tmp_path):
+    project = tmp_path / "DLC-Luna-2026-06-30"
+    project.mkdir()
+    (project / "config.yaml").write_text("Task: DLC-Luna\n", encoding="utf-8")
+
+    assert not dpu.has_trained_dlc_model(project)
+    assert dpu.find_trained_dlc_snapshots(project) == []
+
+
 def test_discover_dlc_projects_supports_new_legacy_and_existing_dlc_names(tmp_path):
     new = tmp_path / "DLC-Luna-2026-06-30"
     legacy = tmp_path / "VIEB-Carlos-2026-02-11"

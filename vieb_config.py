@@ -24,6 +24,12 @@ from dlc_project_utils import discover_dlc_projects, normalize_dlc_project_path
 PROJECT_ROOT: str = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "config.json")
 _APP_CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "app_config.json")
+_path_cache: dict[str, str] = {}
+
+
+def invalidate_path_cache() -> None:
+    """Clear resolved project path values after config or active project changes."""
+    _path_cache.clear()
 
 # ---------------------------------------------------------------------------
 # config.json helpers (thin wrappers — gui.py is the authoritative writer)

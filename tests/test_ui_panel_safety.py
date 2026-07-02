@@ -9,6 +9,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import user_interface as ui  # noqa: E402
+from views import dlc_setup  # noqa: E402
 
 
 def test_safe_get_state_columns_sorted():
@@ -93,3 +94,28 @@ def test_running_status_text_elides_long_command():
     assert len(text) == 24
     assert text.startswith("running: python")
     assert text.endswith("\u2026")
+
+
+def test_dlc_gpu_state_from_log():
+    assert dlc_setup._gpu_state_from_log("GPU detected: NVIDIA RTX") == "active"
+    assert dlc_setup._gpu_state_from_log("Using CUDA device 0 for pose estimation.") == "active"
+    assert dlc_setup._gpu_state_from_log("No GPU detected — using CPU") == "inactive"
+    assert dlc_setup._gpu_state_from_log("unrelated line") is None
+
+
+def test_dlc_log_autoscroll_decision():
+    assert dlc_setup._should_stick_to_bottom(100, 100)
+    assert dlc_setup._should_stick_to_bottom(94, 100)
+    assert not dlc_setup._should_stick_to_bottom(50, 100)
+
+
+def test_dlc_setup_running_status_wiring():
+    dlc_src = open(os.path.join(os.path.dirname(__file__), "..", "views", "dlc_setup.py"), encoding="utf-8").read()
+    main_src = open(os.path.join(os.path.dirname(__file__), "..", "user_interface.py"), encoding="utf-8").read()
+
+    assert "worker_running = pyqtSignal(bool)" in dlc_src
+    assert "worker_command = pyqtSignal(str)" in dlc_src
+    assert "def stop_worker(self)" in dlc_src
+    assert "self._dlc.worker_running.connect" in main_src
+    assert "self._dlc.worker_command.connect" in main_src
+    assert "self._dlc.stop_worker()" in main_src

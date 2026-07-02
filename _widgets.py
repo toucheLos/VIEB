@@ -7,7 +7,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor, QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSlider, QToolButton,
+    QPushButton, QScrollArea, QSlider, QTableWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -83,6 +83,102 @@ else:
             self.ax = None
         def draw(self):
             pass
+
+
+def set_chart_expand_source(canvas, png_path=None):
+    """Wire a MplCanvas's click-to-expand to show a source PNG at full resolution.
+
+    Charts that are drawn by re-rendering a matplotlib figure (e.g. bar charts,
+    scatter plots built from a dataframe) look fine expanded at high DPI. But
+    charts that are themselves just an ``ax.imshow()`` of an already-rendered
+    PNG (heatmaps saved by compare.py/cohort_analysis.py etc.) look blurry when
+    the *screen-resolution* imshow is re-rendered and upscaled. For those,
+    point the canvas at the original file so expand shows it pixel-for-pixel.
+
+    Pass png_path=None (or omit) to fall back to the default figure re-render.
+    """
+    if canvas is not None:
+        canvas._expand_png_path = str(png_path) if png_path else None
+
+
+class CollapsibleTableWidget(QWidget):
+    """Drop-in QTableWidget replacement that can collapse to its first few rows.
+
+    Existing code populates tables via setRowCount()/setColumnCount()/setItem()
+    etc. — this wrapper intercepts only the row-count-changing calls to apply
+    a "top N rows + header" view with a toggle button, and proxies everything
+    else (setItem, signals, headers, sorting, ...) straight through to a real
+    QTableWidget so no call-site behavior changes. Rows beyond the preview are
+    hidden (setRowHidden), not removed, so rowCount()/item() still see all data.
+    """
+
+    def __init__(self, rows=0, columns=0, parent=None, preview_rows=3):
+        super().__init__(parent)
+        self._preview_rows = preview_rows
+        self._collapsed = True
+        self.table = QTableWidget(rows, columns)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+
+        self._toggle_btn = QPushButton()
+        self._toggle_btn.setFlat(True)
+        self._toggle_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._toggle_btn.setStyleSheet(
+            "QPushButton { text-align:left; color:#4a90d9; border:none; padding:2px; }"
+        )
+        self._toggle_btn.clicked.connect(self._toggle)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.addWidget(self._toggle_btn)
+        bar.addStretch()
+        self._bar = QWidget()
+        self._bar.setLayout(bar)
+        self._bar.setVisible(False)
+
+        lay.addWidget(self._bar)
+        lay.addWidget(self.table)
+        self._apply_collapse()
+
+    def _apply_collapse(self):
+        n = self.table.rowCount()
+        if n <= self._preview_rows:
+            self._bar.setVisible(False)
+            for r in range(n):
+                self.table.setRowHidden(r, False)
+            return
+        self._bar.setVisible(True)
+        if self._collapsed:
+            self._toggle_btn.setText(f"Show all {n} rows ▾")
+        else:
+            self._toggle_btn.setText(f"Show top {self._preview_rows} ▴")
+        for r in range(n):
+            self.table.setRowHidden(r, self._collapsed and r >= self._preview_rows)
+
+    def _toggle(self):
+        self._collapsed = not self._collapsed
+        self._apply_collapse()
+
+    def setRowCount(self, n):
+        self.table.setRowCount(n)
+        self._collapsed = True
+        self._apply_collapse()
+
+    def insertRow(self, row):
+        self.table.insertRow(row)
+        self._apply_collapse()
+
+    def removeRow(self, row):
+        self.table.removeRow(row)
+        self._apply_collapse()
+
+    def __getattr__(self, name):
+        # Fall through to the wrapped QTableWidget for anything not
+        # explicitly overridden above (setItem, signals, headers, ...).
+        if name == "table":
+            raise AttributeError(name)
+        return getattr(self.table, name)
 
 
 class VideoPlayer(QWidget):

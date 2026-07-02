@@ -1,13 +1,28 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import metadata_generator
 import project_manager as pm
+import vieb_config
+
+
+@pytest.fixture
+def isolate_ambient_config(monkeypatch):
+    """Stop metadata normalization from re-resolving the ambient active project.
+
+    validate_metadata_csv -> vieb_config.normalize_metadata_columns -> _load_config
+    otherwise loads whatever project the repo's real app_config.json points at,
+    which pollutes call counts/timing with unrelated (and re-entrant) work. Tests
+    of project_manager's own memoization must not depend on that global state.
+    """
+    monkeypatch.setattr(vieb_config, "_load_config", lambda: {})
 
 
 def _write_json(path: Path, data: dict):
@@ -357,3 +372,133 @@ def test_path_resolver_refuses_repo_root_paths_unless_root_is_active(tmp_path):
     (tmp_path / "results").mkdir(exist_ok=True)
     pm.register_legacy_project(tmp_path, app)
     assert pm.resolve_project_path("metadata", tmp_path, app) == (tmp_path / "metadata.csv").resolve()
+
+
+# --------------------------------------------------------------------------
+# Memoization of the expensive validation work (Part A / B)
+# --------------------------------------------------------------------------
+
+def _make_large_project(root: Path, name: str = "big", n: int = 3700):
+    """A project with n raw videos and an n-row metadata.csv (Spence-lab scale)."""
+    project = _make_project(root, name)
+    raw = project / "raw_videos"
+    for i in range(n):
+        (raw / f"session_{i:05d}.mp4").write_bytes(b"")
+    lines = ["session_id,stem"] + [f"session_{i:05d},session_{i:05d}" for i in range(n)]
+    (project / "metadata.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    app = root / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+    return project, app
+
+
+class _NoCache(dict):
+    """Dict that never retains entries — used to simulate the pre-memoization code."""
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def __setitem__(self, *args, **kwargs):
+        pass
+
+
+def _count_validate_calls(monkeypatch):
+    calls = {"n": 0}
+    real = metadata_generator.validate_metadata_csv
+
+    def counting(path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(metadata_generator, "validate_metadata_csv", counting)
+    return calls
+
+
+def test_repeated_validation_memoized(tmp_path, monkeypatch, isolate_ambient_config):
+    """The redundant validation passes onboard performs collapse to one real pass.
+
+    validate_project() -> session_source_status() is what onboard_project runs
+    2-3x per call; with memoization the expensive validate_metadata_csv pass runs
+    exactly once when nothing on disk changes between calls.
+    """
+    project, _ = _make_large_project(tmp_path, "memo", n=200)
+    pm.invalidate_project_cache()
+    calls = _count_validate_calls(monkeypatch)
+
+    results = [pm.validate_project(project) for _ in range(3)]
+
+    assert calls["n"] == 1
+    assert {r.status for r in results} == {results[0].status}  # identical each pass
+
+
+def test_source_status_cache_invalidates_on_metadata_change(tmp_path, isolate_ambient_config):
+    """A genuine metadata edit (mtime bump) refreshes the memoized result."""
+    project, _ = _make_large_project(tmp_path, "invalidate", n=50)
+    pm.invalidate_project_cache()
+
+    first = pm.session_source_status(project)
+    assert first["metadata_rows"] == 50
+
+    meta = project / "metadata.csv"
+    lines = ["session_id,stem"] + [f"session_{i:05d},session_{i:05d}" for i in range(70)]
+    meta.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Force a distinct mtime so the test does not depend on filesystem resolution.
+    bumped = os.stat(meta).st_mtime + 100
+    os.utime(meta, (bumped, bumped))
+
+    second = pm.session_source_status(project)
+    assert second["metadata_rows"] == 70
+
+
+def test_validate_project_attaches_source_and_paths(tmp_path, isolate_ambient_config):
+    """validate_project exposes the paths/source it already computed (Part B)."""
+    project = _make_project(tmp_path, "attach")
+    (project / "raw_videos" / "v1.mp4").write_bytes(b"")
+    (project / "metadata.csv").write_text(
+        "session_id,stem\nv1,v1\n", encoding="utf-8"
+    )
+    pm.invalidate_project_cache()
+
+    validation = pm.validate_project(project, tmp_path)
+
+    assert validation.source is not None
+    assert validation.paths is not None
+    assert validation.source == pm.session_source_status(project, validation.config, tmp_path)
+    direct_paths = pm.resolve_project_paths_for_project(project, validation.config, tmp_path)
+    assert set(validation.paths.keys()) == set(direct_paths.keys())
+    assert validation.paths["metadata"].path == direct_paths["metadata"].path
+
+
+def test_onboard_project_benchmark_large_project(tmp_path, monkeypatch, isolate_ambient_config):
+    """Onboarding a 3,700-file/-row project does less work and is faster with caching."""
+    project, app = _make_large_project(tmp_path, "bench", n=3700)
+    calls = _count_validate_calls(monkeypatch)
+
+    # BEFORE: disable the new memoization caches -> heavy work repeats every call.
+    monkeypatch.setattr(pm, "_source_status_cache", _NoCache())
+    monkeypatch.setattr(pm, "_metadata_validation_cache", _NoCache())
+    monkeypatch.setattr(pm, "_count_files_cache", _NoCache())
+    pm.invalidate_project_cache()
+    calls["n"] = 0
+    t0 = time.perf_counter()
+    sel_before = pm.onboard_project(tmp_path, app)
+    before = time.perf_counter() - t0
+    before_calls = calls["n"]
+
+    # AFTER: real caches -> heavy work runs once, the rest are cache hits.
+    monkeypatch.setattr(pm, "_source_status_cache", {})
+    monkeypatch.setattr(pm, "_metadata_validation_cache", {})
+    monkeypatch.setattr(pm, "_count_files_cache", {})
+    pm.invalidate_project_cache()
+    calls["n"] = 0
+    t0 = time.perf_counter()
+    sel_after = pm.onboard_project(tmp_path, app)
+    after = time.perf_counter() - t0
+    after_calls = calls["n"]
+
+    print(
+        f"\n[benchmark] onboard_project before={before*1000:.1f}ms/{before_calls} passes "
+        f"after={after*1000:.1f}ms/{after_calls} passes"
+    )
+    assert sel_before.active_project == sel_after.active_project == project.resolve()
+    assert after_calls < before_calls  # deterministic: fewer full validation passes
+    assert after < before              # and measurably faster

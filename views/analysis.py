@@ -2059,6 +2059,11 @@ class AnalysisView(QWidget):
         if self._data:
             self._scv_widget.update_data(self._data)
 
+    def notify_cluster_changed(self) -> None:
+        """Refresh the State Characterization view after the active run changes."""
+        if getattr(self, "_scv_widget", None) is not None:
+            self._scv_widget.on_cluster_changed()
+
     # ──────────────────────────────────── Diagnostics (stack 3) ──
 
     def _build_tab_diagnostics(self) -> QWidget:
