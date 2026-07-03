@@ -357,3 +357,67 @@ technical ("More") categories removed; clip playback auto-loads/auto-advances.
 at 3 curated clips hid most of them and duplicated the clips directory.
 **Related:** `views/state_characterization.py`, `generate_clips.py`,
 `artifact_scanner.py`, `characterize.load_clips`
+
+## 43 — H5 video_path resolution: manifest column + extension fallback, repair via CLI flag
+**Decision/finding:** `_cmd_extract_h5()` now resolves `video_path` per
+session from the H5 manifest's video-path column (first match among
+`video_path`/`source_path`/`video_file`/`source_video`, via
+`h5_manifest.load_video_paths()`) or, failing that, a `raw_videos_dir/<stem><ext>`
+match. `video_path` staying `None` when nothing resolves is expected, not an
+error. Existing projects extracted before this fix use the new
+`compare.py --backfill-video-paths` command to re-resolve without a full
+re-extraction, following `cmd_fix_features()`'s in-place-repair discipline
+(never drops unrelated `index.json` fields, per #23).
+**Why:** H5-extracted entries always wrote `video_path: None`, unconditionally
+— generate_clips.py had no way to locate the source video for H5-only labs.
+**Related:** `h5_manifest.py`, `compare.py _cmd_extract_h5()`,
+`compare.py cmd_backfill_video_paths()`
+
+## 44 — generate_clips.py treats a missing video as a skip, not a crash
+**Decision/finding:** `_resolve_video_path()` returns `None` (not the
+original unresolved path string) when a video can't be found anywhere.
+`cmd_clips()` filters bouts down to resolvable videos before attempting any
+export, and prints one availability summary ("N/M sessions have a usable
+local video, X missing video_path, Y unresolvable locally") regardless of
+whether bouts came from an existing `bouts.csv` or a fresh `_build_bouts_df()`
+pass. The "all videos missing" `RuntimeError` guard is preserved for the
+case where nothing at all is usable.
+**Why:** A `None`/unresolvable `video_path` (now possible after #43) crashed
+`os.path.exists()` with a `TypeError` instead of producing clips for whatever
+videos a lab with partial local data (e.g. Spence's ~1,638/3,735 local
+videos) actually has.
+**Related:** `generate_clips.py`
+
+## 45 — animal_id merges always coerce to str via one shared helper
+**Decision/finding:** `quantify.py` exposes a public `coerce_id_column(df,
+col="animal_id")` (returns a `.astype(str)` copy) and applies it at every
+merge/join on `animal_id`, including two previously-unguarded sites in
+`build_master_table()` (the cohort merge and the fear_index merge).
+Already-safe inline `df["animal_id"] = df["animal_id"].astype(str)` casts
+elsewhere in `quantify.py` and in `compare.py::cmd_quantify()` were refactored
+to call the same helper instead of repeating the cast inline.
+**Why:** `cohort_loader.load_cohort_excel()` casts `animal_id` to `int64`;
+`summary_table.csv`'s `animal_id` (via plain `pd.read_csv`) is whatever
+pandas infers from the column — a lab whose IDs are alphanumeric (forcing
+str) crashes the merge against a cohort file with purely-numeric IDs. This
+class of bug recurs wherever IDs get merged across sources with different
+origins, hence one reusable helper rather than fixing sites ad hoc.
+**Related:** `quantify.py coerce_id_column()`, `quantify.py build_master_table()`
+
+## 46 — Doubled-path detection warns loudly; repair requires an explicit flag
+**Decision/finding:** `project_manager.py`'s `detect_doubled_project_segment()`
+detects a resolved metadata/results/raw_videos path whose project-relative
+segment (`project_path.relative_to(repo_root)`, e.g. `("projects",
+"spence_lab")`) appears twice back-to-back — the symptom of a pre-refactor
+repo-root-relative `config.json` value being re-resolved under the current
+project-relative scheme. `compare.py`'s startup path-diagnostics
+(`_print_project_path_diagnostics()`) always prints a loud `[WARN]` with the
+exact broken path and, if a working repair candidate exists on disk, prints
+it too — but only rewrites `config.json` (via `repair_project_config_path()`)
+when the new `--repair-paths` CLI flag is passed.
+**Why:** The old resolver classified path *origin*, never *existence* — a
+doubled path silently produced an empty-looking dataset (0 animals, "no
+values") instead of an error, which is more dangerous than a crash. Repair
+is opt-in rather than automatic so a routine pipeline run never silently
+rewrites a user's `config.json`.
+**Related:** `project_manager.py`, `compare.py _print_project_path_diagnostics()`
