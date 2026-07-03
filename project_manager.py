@@ -60,7 +60,7 @@ def _startup_cache_key(app_path: Path) -> str:
             return ""
         mtime = app_path.stat().st_mtime
         active = json.loads(app_path.read_text(encoding="utf-8")).get("active_project", "")
-        return f"{active}|{mtime:.6f}"
+        return f"{app_path.resolve()}|{active}|{mtime:.6f}"
     except Exception:
         return ""
 
@@ -352,6 +352,63 @@ def _classify_project_path(
         False,
         f"{resolved} is outside the project; add '{key}' to external_paths if intentional.",
     )
+
+
+def detect_doubled_project_segment(
+    resolved: Path,
+    project_path: Path,
+    repo_root: Path | None = None,
+) -> Path | None:
+    """Detect a resolved path that contains the project's path (relative to
+    repo_root, e.g. ("projects", "spence_lab")) duplicated back-to-back:
+    .../projects/spence_lab/projects/spence_lab/x.csv — a symptom of a
+    pre-refactor repo-root-relative config.json value being re-resolved under
+    the current project-relative scheme (which resolves against project_path
+    itself, not repo_root). Returns a repair candidate Path with one
+    occurrence of the duplicated window removed, only if that candidate
+    exists on disk. Returns None otherwise (no duplication found, or the
+    repair candidate doesn't exist either — nothing safe to suggest).
+
+    `resolved` is expected to already be resolved by the caller; only
+    `project_path`/`repo_root` are re-resolved here for a consistent
+    comparison. When `project_path` isn't relative to `repo_root` (e.g. an
+    external/legacy project) or `repo_root` is omitted, falls back to
+    matching on the project directory's own name alone.
+    """
+    project_path = project_path.resolve()
+    unit_parts: tuple[str, ...]
+    if repo_root is not None:
+        try:
+            unit_parts = project_path.relative_to(Path(repo_root).resolve()).parts
+        except ValueError:
+            unit_parts = (project_path.name,)
+    else:
+        unit_parts = (project_path.name,)
+    n = len(unit_parts)
+    if n < 1:
+        return None
+    res_parts = resolved.parts
+    for i in range(len(res_parts) - 2 * n + 1):
+        window1 = res_parts[i:i + n]
+        window2 = res_parts[i + n:i + 2 * n]
+        if window1 == window2 == unit_parts:
+            repaired_parts = res_parts[:i + n] + res_parts[i + 2 * n:]
+            candidate = Path(*repaired_parts)
+            if candidate.exists():
+                return candidate
+            return None
+    return None
+
+
+def repair_project_config_path(project_path: Path, key: str, new_path: Path) -> None:
+    """Rewrite project_path/config.json's paths[key] to new_path (absolute),
+    via the existing config read/normalize/write machinery — never hand-rolls
+    JSON I/O."""
+    cfg = _read_project_config(project_path)
+    paths = dict(cfg.get("paths") or {})
+    paths[key] = str(new_path.resolve())
+    cfg["paths"] = paths
+    write_project_config(project_path, cfg)
 
 
 def resolve_project_paths_for_project(

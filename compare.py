@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,12 +36,13 @@ def _meta(): return _vc.get_metadata_path()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None):
+def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None, *, repair: bool = False):
     import project_manager as _pm
 
     root = repo_root or ROOT
     app_path = app_config_path or os.path.join(root, "app_config.json")
     project = _pm.get_active_project(root, app_path)
+    project_path = Path(project)
     paths = _pm.resolve_project_paths(root, app_path)
     print(f"Active project: {project}")
     print(f"Metadata path: {paths['metadata'].path} (origin: {paths['metadata'].origin})")
@@ -53,6 +55,19 @@ def _print_project_path_diagnostics(repo_root: str | None = None, app_config_pat
             raise _pm.ProjectSelectionError(
                 f"Refusing project path for {key}: {info.message} Complete Stage 0: Onboarding before running the pipeline."
             )
+        if not info.path.exists():
+            print(f"[WARN] Resolved {key} path does not exist:")
+            print(f"  {info.path}")
+            candidate = _pm.detect_doubled_project_segment(info.path, project_path, root)
+            if candidate is not None:
+                print(f"[WARN]   This looks like a doubled path from a pre-refactor config.json.")
+                print(f"[WARN]   A working path was found: {candidate}")
+                if repair:
+                    _pm.repair_project_config_path(project_path, key, candidate)
+                    print(f"[FIX]    config.json updated: paths.{key} -> {candidate}")
+                else:
+                    print(f"[FIX]    Re-run with --repair-paths to update config.json automatically,")
+                    print(f"         or edit config.json's paths.{key} to the path above.")
     return paths
 
 
@@ -313,6 +328,33 @@ def _load_extractor_config():
     return keypoint_roles, object_keypoints, bodypart_names
 
 
+_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
+
+
+def _resolve_h5_video_path(stem, candidates, video_path_map, raw_videos_dir):
+    """Resolve a video path for an H5-extracted session.
+
+    Tries each raw (non-normalized) candidate string against video_path_map
+    (keyed by h5_manifest._normalize()), then falls back to
+    raw_videos_dir/<stem><ext> for each known video extension. Returns None
+    if nothing resolves — that is an expected, valid outcome, not an error.
+    """
+    from h5_manifest import _normalize
+
+    for cand in candidates:
+        if not cand:
+            continue
+        norm = _normalize(cand)
+        if norm in video_path_map:
+            return video_path_map[norm]
+    if raw_videos_dir:
+        for ext in _VIDEO_EXTS:
+            candidate_path = os.path.join(raw_videos_dir, f"{stem}{ext}")
+            if os.path.exists(candidate_path):
+                return candidate_path
+    return None
+
+
 def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
@@ -322,7 +364,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """
     from ml import PoseFeatureExtractor
     from pose_io import inspect_h5, load_pose_h5
-    from h5_manifest import detect_concatenated_table, load_manifest, resolve_h5_key
+    from h5_manifest import detect_concatenated_table, load_manifest, load_video_paths, resolve_h5_key
 
     h5_path = _vc.get_h5_path()
     if not h5_path or not os.path.exists(h5_path):
@@ -347,6 +389,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     )
     manifest_value_col = session_source_col if concatenated_key is not None else "h5_key"
     manifest = load_manifest(_vc.get_h5_manifest_path(), value_col=manifest_value_col)
+    video_path_map = load_video_paths(_vc.get_h5_manifest_path(), value_col=manifest_value_col)
+    try:
+        raw_videos_dir = _vc.get_raw_videos_dir()
+    except Exception:
+        raw_videos_dir = ""
 
     os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
 
@@ -421,8 +468,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             features_flat = extractor._flatten_features(features_dict)
 
             np.save(out_path, features_flat.astype(np.float32))
+            video_path = _resolve_h5_video_path(
+                stem, [stem, source_value], video_path_map, raw_videos_dir
+            )
             index[stem] = {
-                "video_path": None,
+                "video_path": video_path,
                 "csv_path": None,
                 "h5_path": h5_path,
                 "h5_key": source_value,
@@ -473,8 +523,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             features_flat = extractor._flatten_features(features_dict)
 
             np.save(out_path, features_flat.astype(np.float32))
+            video_path = _resolve_h5_video_path(
+                stem, [stem, h5_key, row_dict.get("animal_id", "")], video_path_map, raw_videos_dir
+            )
             index[stem] = {
-                "video_path": None,
+                "video_path": video_path,
                 "csv_path": None,
                 "h5_path": h5_path,
                 "h5_key": h5_key,
@@ -778,6 +831,75 @@ def cmd_fix_features(fps: float = 30.0):
         print("WARNING: dimensions are still inconsistent. Some videos may be "
               "missing pose data — re-run after restoring it, or re-extract "
               "from scratch with --extract.")
+
+
+def cmd_backfill_video_paths():
+    """Backfill video_path for existing index.json entries created before H5
+    extraction started populating it (see _cmd_extract_h5()).
+
+    Only touches entries with h5_path set and video_path missing/None.
+    Every other field on every entry (including entries this doesn't touch)
+    is preserved exactly as loaded — mirrors cmd_fix_features()'s discipline
+    of never dropping unrelated index.json fields.
+    """
+    from h5_manifest import load_video_paths
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    if not os.path.exists(index_path):
+        sys.exit("No index found. Run --extract first.")
+    with open(index_path) as f:
+        index = json.load(f)
+
+    # Extraction may have used either "h5_key" or the configured H5 source
+    # column (e.g. "source_file") as the manifest's value_col, depending on
+    # whether the H5 was a concatenated table — an existing index.json gives
+    # no cheap way to tell which was used for a given entry, so try both
+    # candidate key spaces and merge (first match wins).
+    manifest_path = _vc.get_h5_manifest_path()
+    video_path_map = load_video_paths(manifest_path, value_col="h5_key")
+    source_col = _vc.get_h5_source_col() or None
+    if source_col:
+        for k, v in load_video_paths(manifest_path, value_col=source_col).items():
+            video_path_map.setdefault(k, v)
+
+    try:
+        raw_videos_dir = _vc.get_raw_videos_dir()
+    except Exception:
+        raw_videos_dir = ""
+
+    backfilled = 0
+    already_had = 0
+    skipped_no_h5 = 0
+    still_missing = 0
+
+    for stem, entry in index.items():
+        if stem == "_meta" or not isinstance(entry, dict):
+            continue
+        if not entry.get("h5_path"):
+            skipped_no_h5 += 1
+            continue
+        if entry.get("video_path"):
+            already_had += 1
+            continue
+        candidates = [stem, entry.get("h5_key", "")]
+        video_path = _resolve_h5_video_path(stem, candidates, video_path_map, raw_videos_dir)
+        if video_path:
+            entry["video_path"] = video_path
+            backfilled += 1
+            print(f"  {stem}: video_path -> {video_path}")
+        else:
+            still_missing += 1
+
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    print(f"\nDone. Backfilled {backfilled} entr{'y' if backfilled == 1 else 'ies'}.")
+    print(f"  Already had video_path : {already_had}")
+    print(f"  Skipped (no h5_path)   : {skipped_no_h5}")
+    print(f"  Still unresolved       : {still_missing}"
+          + ("" if not still_missing else
+             " (no manifest video-path column match and no matching file "
+             f"under raw_videos_dir with extensions {_VIDEO_EXTS})"))
 
 
 # ---------------------------------------------------------------------------
@@ -2791,7 +2913,8 @@ def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> N
                 valid = x.notna() & y.notna()
                 if valid.sum() < 3:
                     continue
-                r = float(np.corrcoef(x[valid], y[valid])[0, 1])
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    r = float(np.corrcoef(x[valid], y[valid])[0, 1])
                 rows.append({
                     "analysis": corr.get("name", "Configured correlations"),
                     "column": col,
@@ -2876,6 +2999,20 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     os.makedirs(os.path.join(_res(), "comparison"), exist_ok=True)
     try:
+        from analysis_design import write_analysis_design
+        analysis_design = write_analysis_design(df, _res(), _vc._load_config())
+    except Exception as e:
+        print(f"[warn] Could not write analysis design: {e}")
+        analysis_design = {
+            "subject_col": "animal_id" if "animal_id" in df.columns else None,
+            "time_col": "day" if "day" in df.columns else None,
+            "time_order": sorted(df["day"].dropna().unique().tolist()) if "day" in df.columns else None,
+            "condition_cols": ["context"] if "context" in df.columns else [],
+            "group_cols": [],
+            "continuous_cols": [],
+            "detected_mode": "time_and_condition" if {"day", "context"}.issubset(df.columns) else "minimal",
+        }
+    try:
         import metadata_schema as _ms
         schema_report = _ms.metadata_schema_report(meta, _vc._load_config())
         schema_report["summary_rows"] = int(len(df))
@@ -2901,7 +3038,16 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     char_dir = os.path.join(_res(), "characterization")
     os.makedirs(char_dir, exist_ok=True)
     all_bouts = []
-    meta_cols = [c for c in ["context", "animal_id", "day", "experiment"] if c in df.columns]
+    design_meta_cols = [
+        analysis_design.get("subject_col"),
+        analysis_design.get("time_col"),
+        *(analysis_design.get("condition_cols") or []),
+        *(analysis_design.get("group_cols") or []),
+    ]
+    meta_cols = []
+    for c in ["context", "animal_id", "day", "experiment", *design_meta_cols]:
+        if c and c in df.columns and c not in meta_cols:
+            meta_cols.append(c)
     for stem, row_df in df.groupby("stem"):
         labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(labels_path):
@@ -2931,6 +3077,18 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     )
     bouts_df.to_csv(os.path.join(char_dir, "bouts.csv"), index=False)
     print(f"Bouts saved: results/characterization/bouts.csv  ({len(bouts_df)} bouts)")
+
+    try:
+        from sequence_artifacts import build_sequence_artifacts
+        build_sequence_artifacts(
+            df,
+            analysis_design,
+            _res(),
+            fps=fps,
+            n_clusters=n_clusters,
+        )
+    except Exception as e:
+        print(f"[warn] Sequence artifact generation failed: {e}")
 
     # Per-state context fractions from summary_table
     ctx_fracs: dict[int, dict[str, float]] = {}
@@ -2977,9 +3135,10 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     )
 
     # ---- Transition matrix outputs ----
-    _trans_meta_cols = ["stem"] + [
-        c for c in ["context", "day", "animal_id", "experiment"] if c in meta.columns
-    ]
+    _trans_meta_cols = ["stem"]
+    for c in ["context", "day", "animal_id", "experiment", *design_meta_cols]:
+        if c and c in meta.columns and c not in _trans_meta_cols:
+            _trans_meta_cols.append(c)
     df_trans = pd.DataFrame(trans_rows).merge(
         meta[_trans_meta_cols].drop_duplicates("stem"),
         on="stem", how="left"
@@ -2991,6 +3150,18 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     ).merge(meta, on="stem", how="left")
     df_trans_full.to_csv(os.path.join(_res(), "comparison", "transition_table.csv"), index=False)
     print(f"Transition table saved: results/comparison/transition_table.csv")
+
+    try:
+        from report_plots import generate_mode_driven_plots
+        generate_mode_driven_plots(
+            df,
+            df_trans_full,
+            bouts_df,
+            analysis_design,
+            _res(),
+        )
+    except Exception as e:
+        print(f"[warn] Mode-driven plot generation failed: {e}")
 
     analysis_groups = _vc.get_enabled_analysis_groups(df)
 
@@ -3199,6 +3370,8 @@ def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> No
 
     mat = plot_df[["context_A_freq", "context_B_freq"]].to_numpy(dtype=float)
     labels = plot_df["motif"].astype(str).tolist()
+    group_a = str(plot_df["context_A"].iloc[0]) if "context_A" in plot_df.columns and not plot_df.empty else "Group A"
+    group_b = str(plot_df["context_B"].iloc[0]) if "context_B" in plot_df.columns and not plot_df.empty else "Group B"
 
     fig_h = max(4.0, 0.28 * len(plot_df) + 1.5)
     fig, ax = plt.subplots(figsize=(6.5, fig_h))
@@ -3206,9 +3379,9 @@ def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> No
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Context A", "Context B"])
-    ax.set_title("Top Context-Enriched Motifs")
-    ax.set_xlabel("Frequency within context")
+    ax.set_xticklabels([group_a, group_b])
+    ax.set_title("Top Group-Enriched Motifs")
+    ax.set_xlabel("Frequency within group")
     for r in range(mat.shape[0]):
         for c in range(mat.shape[1]):
             ax.text(c, r, f"{mat[r, c]:.3f}", ha="center", va="center",
@@ -3647,6 +3820,8 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     except ImportError:
         sys.exit("[ERROR] quantify.py not found in project directory.")
 
+    from quantify import coerce_id_column
+
     print("\nComputing behavioral contrast vectors...")
     try:
         contrast_df = compute_contrast_vector(
@@ -3662,8 +3837,8 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
         master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and "animal_id" in contrast_df.columns:
             master = pd.read_csv(master_path)
-            master["animal_id"] = master["animal_id"].astype(str)
-            contrast_df["animal_id"] = contrast_df["animal_id"].astype(str)
+            master = coerce_id_column(master)
+            contrast_df = coerce_id_column(contrast_df)
             master = master.merge(
                 contrast_df[["animal_id", "contrast_magnitude",
                              "dominant_fear_state", "dominant_safety_state"]],
@@ -3685,9 +3860,8 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
         master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and not lr_df.empty:
             master = pd.read_csv(master_path)
-            master["animal_id"] = master["animal_id"].astype(str)
-            lr_reset = lr_df.reset_index()
-            lr_reset["animal_id"] = lr_reset["animal_id"].astype(str)
+            master = coerce_id_column(master)
+            lr_reset = coerce_id_column(lr_df.reset_index())
             keep_cols = ["animal_id", "fear_learning_rate", "fear_learning_r2"]
             keep_cols = [c for c in keep_cols if c in lr_reset.columns]
             master = master.merge(lr_reset[keep_cols], on="animal_id", how="left")
@@ -3743,6 +3917,10 @@ def main():
                         help="Re-extract only videos whose feature dimension doesn't match "
                              "the current config.json settings (resolves --extract/--no-wavelets "
                              "mismatches without a full re-extraction)")
+    parser.add_argument("--backfill-video-paths", action="store_true",
+                        help="Re-resolve missing video_path fields in results/features/index.json "
+                             "for H5-extracted entries, using the H5 manifest's video-path column "
+                             "or a raw_videos_dir extension match (does not re-extract features)")
     parser.add_argument("--cluster", action="store_true",
                         help="Fit shared UMAP+HDBSCAN clusterer across all videos")
     parser.add_argument("--report", action="store_true",
@@ -3808,18 +3986,23 @@ def main():
                         help="Max clips per motif (default: 5)")
     parser.add_argument("--clip-padding-sec", type=float, default=1.0,
                         help="Padding in seconds around motif clip boundaries (default: 1.0)")
+    parser.add_argument("--repair-paths", action="store_true",
+                        help="Automatically rewrite config.json when a resolved metadata/results/"
+                             "raw_videos path looks like a doubled pre-refactor path. Without this "
+                             "flag, only a warning + suggested fix is printed.")
     args = parser.parse_args()
 
-    if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
+    if not any([args.extract, args.fix_features, args.backfill_video_paths, args.cluster,
+                args.collapse, args.diagnose,
                 args.report, args.summarize, args.quantify, args.motifs, args.save_run,
                 args.event_align, args.diagnostics, args.motif_clips,
-                args.set_active, args.list_runs]):
+                args.set_active, args.list_runs, args.repair_paths]):
         parser.print_help()
         sys.exit(1)
 
     _print_hardware_banner()
     try:
-        _print_project_path_diagnostics()
+        _print_project_path_diagnostics(repair=args.repair_paths)
     except Exception as exc:
         sys.exit(str(exc))
 
@@ -3857,6 +4040,8 @@ def main():
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
     if args.fix_features:
         cmd_fix_features(fps=args.fps)
+    if args.backfill_video_paths:
+        cmd_backfill_video_paths()
     if args.diagnose:
         mcs_list = None
         if args.diagnose_mcs:

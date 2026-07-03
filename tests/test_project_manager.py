@@ -502,3 +502,78 @@ def test_onboard_project_benchmark_large_project(tmp_path, monkeypatch, isolate_
     assert sel_before.active_project == sel_after.active_project == project.resolve()
     assert after_calls < before_calls  # deterministic: fewer full validation passes
     assert after < before              # and measurably faster
+
+
+# --------------------------------------------------------------------------
+# Doubled-path detection and repair (Part 4)
+# --------------------------------------------------------------------------
+
+def test_detect_doubled_project_segment_finds_and_repairs_path(tmp_path):
+    repo_root = tmp_path
+    project = repo_root / "projects" / "spence_lab"
+    project.mkdir(parents=True)
+    (project / "metadata.csv").write_text("session_id\n", encoding="utf-8")
+
+    # .../projects/spence_lab/projects/spence_lab/metadata.csv — the project's
+    # path relative to repo_root ("projects", "spence_lab") duplicated
+    # back-to-back, exactly the symptom a pre-refactor config.json produces.
+    unit = project.relative_to(repo_root).parts
+    doubled = Path(*(project.parts + unit + ("metadata.csv",)))
+
+    candidate = pm.detect_doubled_project_segment(doubled, project, repo_root)
+    assert candidate == project / "metadata.csv"
+    assert candidate.exists()
+
+
+def test_detect_doubled_project_segment_returns_none_when_no_doubling(tmp_path):
+    repo_root = tmp_path
+    project = repo_root / "projects" / "spence_lab"
+    project.mkdir(parents=True)
+    normal = project / "metadata.csv"
+
+    assert pm.detect_doubled_project_segment(normal, project, repo_root) is None
+
+
+def test_detect_doubled_project_segment_none_when_repair_candidate_missing(tmp_path):
+    repo_root = tmp_path
+    project = repo_root / "projects" / "spence_lab"
+    project.mkdir(parents=True)
+    # No metadata.csv actually exists at the repaired location.
+    unit = project.relative_to(repo_root).parts
+    doubled = Path(*(project.parts + unit + ("metadata.csv",)))
+
+    assert pm.detect_doubled_project_segment(doubled, project, repo_root) is None
+
+
+def test_detect_doubled_project_segment_no_false_positive_on_short_project_path(tmp_path):
+    # Project == repo_root (relative_to gives an empty unit) must not match.
+    project = tmp_path
+    resolved = tmp_path / "results" / "metadata.csv"
+    assert pm.detect_doubled_project_segment(resolved, project, tmp_path) is None
+
+
+def test_detect_doubled_project_segment_falls_back_to_name_without_repo_root(tmp_path):
+    project = tmp_path / "external" / "spence_lab"
+    project.mkdir(parents=True)
+    (project / "metadata.csv").write_text("session_id\n", encoding="utf-8")
+    # No repo_root given -> falls back to matching on the project dir's own
+    # name alone (a single duplicated "spence_lab" segment).
+    doubled = project / "spence_lab" / "metadata.csv"
+
+    candidate = pm.detect_doubled_project_segment(doubled, project)
+    assert candidate == project / "metadata.csv"
+
+
+def test_repair_project_config_path_rewrites_and_normalizes(tmp_path):
+    project = _make_project(tmp_path, "repair_target")
+    new_meta = tmp_path / "external" / "metadata.csv"
+    new_meta.parent.mkdir(parents=True)
+    new_meta.write_text("session_id\n", encoding="utf-8")
+
+    pm.repair_project_config_path(project, "metadata", new_meta)
+
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    assert cfg["paths"]["metadata"] == str(new_meta.resolve())
+    # normalize_project_config's flat alias must also reflect the update.
+    normalized = pm.normalize_project_config(cfg, project)
+    assert normalized["metadata_csv_path"] == str(new_meta.resolve())

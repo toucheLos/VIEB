@@ -80,6 +80,46 @@ def load_manifest(
     return mapping
 
 
+_VIDEO_PATH_COLUMNS = ("video_path", "source_path", "video_file", "source_video")
+
+
+def load_video_paths(
+    manifest_path: str,
+    value_col: str = "h5_key",
+) -> dict[str, str]:
+    """
+    Load a manifest CSV's video-path column (first match among
+    video_path/source_path/video_file/source_video), keyed the same way as
+    load_manifest(): normalized animal_id, normalized filename stem, and
+    normalized value_col value -> the raw video path string.
+
+    Returns {} if the manifest doesn't exist or has none of those columns.
+    Unlike load_manifest(), never raises when `value_col` is absent from the
+    manifest — video paths are best-effort, not a required mapping.
+    """
+    if not manifest_path or not os.path.exists(manifest_path):
+        return {}
+
+    df = pd.read_csv(manifest_path, dtype=str).fillna("")
+    path_col = next((c for c in _VIDEO_PATH_COLUMNS if c in df.columns), None)
+    if path_col is None:
+        return {}
+
+    mapping: dict[str, str] = {}
+    for _, row in df.iterrows():
+        path_value = row[path_col]
+        if not path_value:
+            continue
+        if "animal_id" in df.columns and row.get("animal_id"):
+            mapping[_normalize(row["animal_id"])] = path_value
+        if "filename" in df.columns and row.get("filename"):
+            stem = os.path.splitext(row["filename"])[0]
+            mapping[_normalize(stem)] = path_value
+        if value_col in df.columns and row.get(value_col):
+            mapping[_normalize(row[value_col])] = path_value
+    return mapping
+
+
 def resolve_h5_key(
     row: dict,
     h5_keys: list[str],

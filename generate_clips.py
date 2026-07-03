@@ -69,8 +69,12 @@ MIN_BOUT_FRAMES = 6  # 0.2 s
 # Shared helpers — verbatim copies from characterize.py
 # ---------------------------------------------------------------------------
 
-def _resolve_video_path(path: str) -> str:
-    """Resolve a video path that may be relative (from index.json built on another OS)."""
+def _resolve_video_path(path: str | None) -> str | None:
+    """Resolve a video path that may be relative (from index.json built on
+    another OS). Returns None if path is falsy or cannot be found anywhere
+    — e.g. an H5-extracted session whose video only exists on a remote host."""
+    if not path:
+        return None
     if os.path.exists(path):
         return path
     proj_root = os.path.dirname(os.path.abspath(__file__))
@@ -82,7 +86,31 @@ def _resolve_video_path(path: str) -> str:
         candidate = os.path.join(raw_dir, os.path.basename(path))
         if os.path.exists(candidate):
             return candidate
-    return path
+    return None
+
+
+def _summarize_video_availability(index: dict) -> None:
+    """Print a summary of how many index.json sessions have a usable local
+    video, distinguishing missing video_path from unresolvable-on-disk."""
+    stems = [s for s in index.keys() if s != "_meta"]
+    n_total = len(stems)
+    n_missing = 0
+    n_unresolvable = 0
+    n_ok = 0
+    for s in stems:
+        info = index[s]
+        raw_vp = info.get("video_path") if isinstance(info, dict) else None
+        if not raw_vp:
+            n_missing += 1
+            continue
+        if _resolve_video_path(raw_vp):
+            n_ok += 1
+        else:
+            n_unresolvable += 1
+    print(
+        f"\n{n_ok}/{n_total} sessions have a usable local video "
+        f"({n_missing} missing video_path, {n_unresolvable} unresolvable locally)."
+    )
 
 
 def _load_prereqs():
@@ -158,7 +186,7 @@ def _build_bouts_df(index, fps, meta):
                 "animal_id": animal_map.get(stem, ""),
                 "day": day_map.get(stem, ""),
                 "experiment": exp_map.get(stem, ""),
-                "video_path": _resolve_video_path(index[stem]["video_path"]),
+                "video_path": _resolve_video_path(index[stem].get("video_path")),
                 "features_path": index[stem]["features_path"],
             })
     return pd.DataFrame(rows)
@@ -250,21 +278,36 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     if os.path.exists(bouts_csv):
         bouts_df = pd.read_csv(bouts_csv)
-        vp_map = {s: _resolve_video_path(info["video_path"]) for s, info in index.items() if "video_path" in info}
+        vp_map = {}
+        for s, info in index.items():
+            if "video_path" not in info:
+                continue
+            raw_vp = info.get("video_path")
+            if not raw_vp:
+                continue
+            resolved = _resolve_video_path(raw_vp)
+            if not resolved:
+                continue
+            vp_map[s] = resolved
         fp_map = {s: info["features_path"] for s, info in index.items() if "features_path" in info}
         bouts_df["video_path"]    = bouts_df["stem"].map(vp_map)
         bouts_df["features_path"] = bouts_df["stem"].map(fp_map)
     else:
         bouts_df = _build_bouts_df(index, fps, meta)
 
-    # Preflight: check all unique video paths before starting any clip export
-    _unique_video_paths = bouts_df["video_path"].dropna().unique() if "video_path" in bouts_df.columns else []
-    _missing_videos = [p for p in _unique_video_paths if p and not os.path.exists(str(p))]
-    for _p in _missing_videos:
-        print(f"  WARN: video not found: {_p}")
-    if _missing_videos and len(_missing_videos) == len(_unique_video_paths):
+    _summarize_video_availability(index)
+
+    # Preflight: drop bouts whose video isn't locally resolvable before any
+    # export attempt, so a lab with partially-available data gets clips for
+    # what IS available instead of wasting attempts (or hard-failing) on what
+    # isn't. video_path resolution already happened above, so this is just a
+    # filter, not a re-check.
+    _n_before = len(bouts_df)
+    if "video_path" in bouts_df.columns:
+        bouts_df = bouts_df[bouts_df["video_path"].notna()].copy()
+    if _n_before > 0 and bouts_df.empty:
         raise RuntimeError(
-            f"All {len(_unique_video_paths)} video files are missing — no clips can be written.\n"
+            "No usable local video files — no clips can be written.\n"
             f"  raw_videos dir : {_vc.get_raw_videos_dir()}\n"
             "Check that the directory is mounted and readable, then re-run."
         )
@@ -783,12 +826,18 @@ def cmd_motif_clips(
             animal_id = str(_first_present(occ, ["animal_id"], _first_present(meta_row, ["animal_id"], "")))
             group = str(_first_present(occ, ["group"], _first_present(meta_row, ["group", "cohort"], "")))
             context = str(_first_present(occ, ["context"], _first_present(meta_row, ["context"], "")))
-            video_path = video_map.get(stem, "")
+            video_path = video_map.get(stem) or ""
             skipped_reason = ""
             if stem not in stem_bouts:
                 skipped_reason = "stem not found in bouts.csv"
             elif not video_path:
-                skipped_reason = "source video not listed in feature index"
+                # stem in video_map with a None value means video_path was
+                # set in index.json but couldn't be resolved to an existing
+                # file; absent from video_map means it was never listed.
+                skipped_reason = (
+                    "source video missing" if stem in video_map
+                    else "source video not listed in feature index"
+                )
             elif not os.path.exists(str(video_path)):
                 skipped_reason = "source video missing"
             bouts = stem_bouts.get(stem, [])
