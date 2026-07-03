@@ -899,6 +899,12 @@ class AnalysisView(QWidget):
         idx = self._current_tab
         if 0 <= idx < len(self._tab_builders):
             self._ensure_tab_built(idx)
+            # _ensure_tab_built()'s insert/remove churn can leave the stack's
+            # current index pointing at a sibling placeholder, so assert the
+            # current tab explicitly (mirrors _switch_tab). Without this the
+            # first programmatic load — e.g. update_data() on first visit —
+            # builds the page but never shows it, leaving a stale "Loading…".
+            self._stack.setCurrentIndex(idx)
             self._get_loaders()[idx]()
             self._tab_dirty[idx] = False
 
