@@ -109,9 +109,19 @@ def test_cmd_report_skips_missing_fear_column(tmp_path, monkeypatch, capsys):
     assert (results_dir / "characterization" / "bouts.csv").exists()
     assert (results_dir / "characterization" / "state_summary.csv").exists()
     assert (results_dir / "comparison" / "transition_table.csv").exists()
+    assert (results_dir / "sequences" / "video_story_bouts.csv").exists()
+    assert (results_dir / "sequences" / "video_stories.csv").exists()
+    assert (results_dir / "sequences" / "subject_journeys.csv").exists()
     assert (results_dir / "comparison" / "transition_by_context.png").exists()
     assert (results_dir / "comparison" / "state_by_context.png").exists()
     assert (results_dir / "comparison" / "state_by_animal.png").exists()
+    design = json.loads((results_dir / "analysis_design.json").read_text(encoding="utf-8"))
+    assert design["detected_mode"] == "time_and_condition"
+    assert (results_dir / "comparison" / "state_occupancy_by_time_and_condition.png").exists()
+    assert (results_dir / "comparison" / "condition_contrast_over_time.png").exists()
+    assert (results_dir / "comparison" / "context_enriched_states.png").exists()
+    assert (results_dir / "comparison" / "transition_by_condition.png").exists()
+    assert (results_dir / "comparison" / "condition_state_trajectories.png").exists()
     assert (results_dir / "comparison" / "motifs.csv").exists()
     assert not (results_dir / "comparison" / "state_by_fear.png").exists()
 
@@ -203,8 +213,19 @@ def test_cmd_report_without_context_skips_context_outputs(tmp_path, monkeypatch,
 
     out = capsys.readouterr().out
     assert "context" in out
+    assert "condition" in out
     assert (results_dir / "comparison" / "summary_table.csv").exists()
     assert (results_dir / "comparison" / "transition_table.csv").exists()
+    assert (results_dir / "sequences" / "video_story_bouts.csv").exists()
+    assert (results_dir / "sequences" / "video_stories.csv").exists()
+    assert (results_dir / "sequences" / "subject_journeys.csv").exists()
+    design = json.loads((results_dir / "analysis_design.json").read_text(encoding="utf-8"))
+    assert design["detected_mode"] == "time_only"
+    assert (results_dir / "comparison" / "state_occupancy_over_time.png").exists()
+    assert (results_dir / "comparison" / "state_duration_over_time.png").exists()
+    assert (results_dir / "comparison" / "transition_entropy_over_time.png").exists()
+    assert (results_dir / "comparison" / "per_subject_state_trajectories.png").exists()
+    assert (results_dir / "comparison" / "change_from_baseline.png").exists()
     assert not (results_dir / "comparison" / "transition_by_context.png").exists()
     assert not (results_dir / "comparison" / "motifs.csv").exists()
 

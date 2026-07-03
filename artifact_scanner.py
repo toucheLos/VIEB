@@ -53,6 +53,8 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("comparison/motifs.csv", "Motifs"),
     ("comparison/motif_", "Motifs"),
     ("motifs/", "Motifs"),
+    # Sequences
+    ("sequences/", "Sequences"),
     # Transitions
     ("comparison/transition_", "Transitions"),
     # Comparison
@@ -161,6 +163,9 @@ _PUBLICATION_FILES = [
     "motifs/motif_summary.csv",
     "motifs/motif_context_enrichment.csv",
     "motifs/motif_exemplars.csv",
+    "sequences/video_story_bouts.csv",
+    "sequences/video_stories.csv",
+    "sequences/subject_journeys.csv",
     "diagnostics/cluster_overview.png",
     "diagnostics/umap_embedding_by_state.png",
     "diagnostics/cluster_diagnostics.json",

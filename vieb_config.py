@@ -31,6 +31,30 @@ def invalidate_path_cache() -> None:
     """Clear resolved project path values after config or active project changes."""
     _path_cache.clear()
 
+
+def _path_cache_token() -> str:
+    try:
+        app_mtime = os.path.getmtime(_APP_CONFIG_PATH)
+    except Exception:
+        app_mtime = -1.0
+    try:
+        cfg = _pm.load_app_config(_APP_CONFIG_PATH)
+        active = cfg.get("active_project", "")
+    except Exception:
+        active = ""
+    return f"{_APP_CONFIG_PATH}|{active}|{app_mtime:.6f}"
+
+
+def _cached_project_path(cache_key: str, project_key: str) -> str:
+    token = _path_cache_token()
+    token_key = "_token"
+    if _path_cache.get(token_key) != token:
+        _path_cache.clear()
+        _path_cache[token_key] = token
+    if cache_key not in _path_cache:
+        _path_cache[cache_key] = str(_pm.resolve_project_path(project_key, PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _path_cache[cache_key]
+
 # ---------------------------------------------------------------------------
 # config.json helpers (thin wrappers — gui.py is the authoritative writer)
 # ---------------------------------------------------------------------------
@@ -237,23 +261,17 @@ def normalize_metadata_columns(df) -> "pd.DataFrame":
 
 def get_raw_videos_dir() -> str:
     """Return the active project's raw-videos directory."""
-    if "raw_videos_dir" not in _path_cache:
-        _path_cache["raw_videos_dir"] = str(_pm.resolve_project_path("raw_videos", PROJECT_ROOT, _APP_CONFIG_PATH))
-    return _path_cache["raw_videos_dir"]
+    return _cached_project_path("raw_videos_dir", "raw_videos")
 
 
 def get_results_dir() -> str:
     """Return the active project's results directory."""
-    if "results_dir" not in _path_cache:
-        _path_cache["results_dir"] = str(_pm.resolve_project_path("results", PROJECT_ROOT, _APP_CONFIG_PATH))
-    return _path_cache["results_dir"]
+    return _cached_project_path("results_dir", "results")
 
 
 def get_metadata_path() -> str:
     """Return the active project's metadata CSV path."""
-    if "metadata_path" not in _path_cache:
-        _path_cache["metadata_path"] = str(_pm.resolve_project_path("metadata", PROJECT_ROOT, _APP_CONFIG_PATH))
-    return _path_cache["metadata_path"]
+    return _cached_project_path("metadata_path", "metadata")
 
 
 def get_pose_source() -> str:

@@ -18,6 +18,7 @@ def test_categorize_csv_png_json_mp4():
     assert categorize_file("diagnostics/cluster_overview.png") == ("Diagnostics", "Image")
     assert categorize_file("diagnostics/umap_embedding_by_state.png") == ("Diagnostics", "Image")
     assert categorize_file("motifs/motif_sequences.csv") == ("Motifs", "CSV")
+    assert categorize_file("sequences/video_stories.csv") == ("Sequences", "CSV")
     assert categorize_file("comparison/transition_table.csv") == ("Transitions", "CSV")
     assert categorize_file("comparison/state_by_context.png") == ("Comparison", "Image")
     assert categorize_file("comparison/contrast_vector_comparison.png") == ("Comparison", "Image")
@@ -127,6 +128,10 @@ def test_publication_bundle(tmp_path):
     (results / "shared" / "cluster_info.json").write_text('{"n":5}')
     (results / "motifs").mkdir()
     (results / "motifs" / "motif_summary.csv").write_text("x,y\n1,2")
+    (results / "sequences").mkdir()
+    (results / "sequences" / "video_story_bouts.csv").write_text("video_id,state\nv1,0")
+    (results / "sequences" / "video_stories.csv").write_text("video_id,n_bouts\nv1,1")
+    (results / "sequences" / "subject_journeys.csv").write_text("subject_id,timepoint\ns1,0")
     (results / "characterization").mkdir()
     (results / "characterization" / "state_occupancy.png").write_bytes(b"PNG")
     (results / "diagnostics").mkdir()
@@ -147,6 +152,9 @@ def test_publication_bundle(tmp_path):
         assert "diagnostics/umap_embedding_by_state.png" in names
         assert "comparison/contrast_vector_comparison.png" in names
         assert "motifs/motif_summary.csv" in names
+        assert "sequences/video_story_bouts.csv" in names
+        assert "sequences/video_stories.csv" in names
+        assert "sequences/subject_journeys.csv" in names
 
 
 def test_publication_bundle_skips_missing(tmp_path):
