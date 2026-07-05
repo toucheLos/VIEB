@@ -23,6 +23,12 @@ def test_transitions_motifs_page_uses_scroll_area():
     assert "_scroll_content_widget()" in tab2
     assert "setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)" in tab2
     assert "setMaximumHeight(250)" not in tab2
+    assert 'QPushButton("Download Table")' not in tab2
+    assert "_add_t2_table_header" in tab2
+    assert "_export_bout_duration_csv" in tab2
+    assert "_export_motif_clips_csv" in tab2
+    assert "_table_tool_button(\"⤓\"" in source
+    assert "setText(\"Export CSV\")" not in source
 
 
 def test_binary_artifacts_are_not_text_previewed():

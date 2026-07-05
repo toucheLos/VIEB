@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shutil
 import tempfile
 from collections import deque
@@ -13,7 +14,7 @@ import pandas as pd
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout, QWidget,
@@ -153,6 +154,21 @@ def _set_table_height_for_rows(table: QTableWidget, max_height: int = 900) -> No
     table.setMinimumHeight(min(max_height, header_h + frame + (rows * row_h) + 8))
 
 
+def _table_tool_button(symbol: str, tooltip: str) -> QToolButton:
+    btn = QToolButton()
+    btn.setText(symbol)
+    btn.setToolTip(tooltip)
+    btn.setFixedSize(28, 28)
+    btn.setStyleSheet(
+        "QToolButton {"
+        "  background:#F6F7F9; border:1px solid #D8DDE6;"
+        "  border-radius:4px; color:#333; font-size:14px;"
+        "}"
+        "QToolButton:hover { background:#ECEFF4; }"
+    )
+    return btn
+
+
 # ---------------------------------------------------------------------------
 # AnalysisView
 # ---------------------------------------------------------------------------
@@ -169,6 +185,7 @@ class AnalysisView(QWidget):
         self._running_command = ""
         self._jess_df = None
         self._current_tab = 0
+        self._t2_current_clip_path: Path | None = None
         # Each entry is True when that tab needs a redraw (indexed by stack position).
         # Starts True so the first visit always renders.
         self._tab_dirty = [True] * 10
@@ -439,10 +456,6 @@ class AnalysisView(QWidget):
         t2_title.setFont(QFont("Arial", 14, QFont.Bold))
         top.addWidget(t2_title)
         top.addStretch()
-        self._t2_export_btn = QPushButton("Download Table")
-        self._t2_export_btn.setFixedHeight(30)
-        self._t2_export_btn.clicked.connect(self._export_motifs_csv)
-        top.addWidget(self._t2_export_btn)
         run2_btn = QPushButton("Run Motifs")
         run2_btn.setFixedHeight(30)
         run2_btn.clicked.connect(
@@ -456,6 +469,7 @@ class AnalysisView(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         content, cl = _scroll_content_widget()
+        self._t2_content_layout = cl
 
         self._t2_placeholder = _placeholder(
             "No motif data found.\n"
@@ -479,7 +493,13 @@ class AnalysisView(QWidget):
         cl.addWidget(self._t2_trans_placeholder)
 
         # ── Section B — Top Context-Enriched Multi-State Motifs ───────────
-        cl.addWidget(_section_title("B · Top Context-Enriched Multi-State Motifs"))
+        self._t2_table_toggle = self._add_t2_table_header(
+            cl,
+            "B · Top Context-Enriched Multi-State Motifs",
+            "Repeated local state phrases enriched in one context relative to the other.",
+            "_t2_table",
+            self._export_motifs_csv,
+        )
         if _MPL:
             self._t2_canvas = MplCanvas(figsize=(9, 3.2))
             self._t2_canvas.setMinimumHeight(280)
@@ -496,17 +516,18 @@ class AnalysisView(QWidget):
         self._t2_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._t2_table.setSortingEnabled(True)
         self._t2_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self._t2_table.hide()
         cl.addWidget(self._t2_table)
 
         # ── Section C — Bout Duration by Context ──────────────────────────
-        cl.addWidget(_section_title("C · Bout Duration by Context"))
-        dur_desc = QLabel(
+        self._t2_dur_toggle = self._add_t2_table_header(
+            cl,
+            "C · Bout Duration by Context",
             "How long each state persists per context (separate from sequence "
-            "motifs). Enrichment > 1 means longer-than-average bouts in that context."
+            "motifs). Enrichment > 1 means longer-than-average bouts in that context.",
+            "_t2_dur_table",
+            self._export_bout_duration_csv,
         )
-        dur_desc.setWordWrap(True)
-        dur_desc.setStyleSheet("color:#666; font-size:11px; padding-bottom:4px;")
-        cl.addWidget(dur_desc)
         self._t2_dur_table = QTableWidget(0, 6)
         self._t2_dur_table.setHorizontalHeaderLabels(
             ["State", "Context", "Bouts", "Mean (s)", "Median (s)", "Enrichment"]
@@ -515,6 +536,7 @@ class AnalysisView(QWidget):
         self._t2_dur_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._t2_dur_table.setSortingEnabled(True)
         self._t2_dur_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self._t2_dur_table.hide()
         cl.addWidget(self._t2_dur_table)
         self._t2_dur_placeholder = _placeholder(
             "No bout-duration data found.\n"
@@ -523,7 +545,13 @@ class AnalysisView(QWidget):
         cl.addWidget(self._t2_dur_placeholder)
 
         # ── Section D — Motif Example Clips ───────────────────────────────
-        cl.addWidget(_section_title("D · Motif Example Clips"))
+        self._t2_clips_toggle = self._add_t2_table_header(
+            cl,
+            "D · Motif Example Clips",
+            "Generated clip exemplars for motifs; select a row to play it in the viewer below.",
+            "_t2_clips_table",
+            self._export_motif_clips_csv,
+        )
         clip_row = QHBoxLayout()
         self._t2_gen_clips_btn = QPushButton("Generate Motif Clips")
         self._t2_gen_clips_btn.setFixedHeight(30)
@@ -550,15 +578,126 @@ class AnalysisView(QWidget):
         self._t2_clips_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._t2_clips_table.setSortingEnabled(True)
         self._t2_clips_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self._t2_clips_table.doubleClicked.connect(self._open_motif_clip)
+        self._t2_clips_table.itemSelectionChanged.connect(self._on_motif_clip_selected)
         self._t2_clips_table.hide()
         cl.addWidget(self._t2_clips_table)
+
+        try:
+            from _widgets import VideoPlayer
+            self._t2_player = VideoPlayer()
+            self._t2_player.video_finished.connect(self._on_t2_video_finished)
+            cl.addWidget(self._t2_player)
+        except Exception:
+            self._t2_player = None
+            cl.addWidget(_placeholder(
+                "Video player unavailable.\nInstall opencv-python to enable."
+            ))
+
+        t2_clip_nav_row = QHBoxLayout()
+        t2_clip_nav_row.setSpacing(6)
+        self._t2_autoplay_cb = QCheckBox("Autoplay")
+        self._t2_autoplay_cb.setToolTip("Automatically play the next clip when one ends")
+        t2_clip_nav_row.addWidget(self._t2_autoplay_cb)
+        self._t2_prev_clip_btn = QPushButton("◀ Previous Clip")
+        self._t2_prev_clip_btn.setToolTip("Play the previous motif clip")
+        self._t2_prev_clip_btn.setEnabled(False)
+        self._t2_prev_clip_btn.clicked.connect(self._t2_prev_clip)
+        t2_clip_nav_row.addWidget(self._t2_prev_clip_btn)
+        self._t2_next_clip_btn = QPushButton("Next Clip ▶")
+        self._t2_next_clip_btn.setToolTip("Play the next motif clip")
+        self._t2_next_clip_btn.setEnabled(False)
+        self._t2_next_clip_btn.clicked.connect(self._t2_next_clip)
+        t2_clip_nav_row.addWidget(self._t2_next_clip_btn)
+        t2_clip_nav_row.addStretch(1)
+        self._t2_clip_status = QLabel("")
+        self._t2_clip_status.setStyleSheet("color:#888; font-size:11px;")
+        t2_clip_nav_row.addWidget(self._t2_clip_status, stretch=1)
+        self._t2_export_clip_btn = QPushButton("Export Clip")
+        self._t2_export_clip_btn.setToolTip("Copy the current clip to results/exports/")
+        self._t2_export_clip_btn.setEnabled(False)
+        self._t2_export_clip_btn.clicked.connect(self._export_t2_clip)
+        t2_clip_nav_row.addWidget(self._t2_export_clip_btn)
+        cl.addLayout(t2_clip_nav_row)
 
         cl.addStretch()
 
         scroll.setWidget(content)
+        self._t2_scroll = scroll
         lay.addWidget(scroll, stretch=1)
         return page
+
+    def _add_t2_table_header(
+        self,
+        layout: QVBoxLayout,
+        title: str,
+        description: str,
+        table_attr: str,
+        export_slot,
+    ) -> QToolButton:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(_section_title(title))
+        row.addStretch()
+
+        toggle_btn = _table_tool_button("+", "Expand table")
+        toggle_btn.clicked.connect(
+            lambda _checked=False, attr=table_attr, btn=toggle_btn: self._toggle_t2_table(attr, btn)
+        )
+        row.addWidget(toggle_btn)
+
+        export_btn = _table_tool_button("⤓", "Export CSV")
+        export_btn.clicked.connect(export_slot)
+        row.addWidget(export_btn)
+        layout.addLayout(row)
+
+        desc = QLabel(description)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color:#666; font-size:11px; padding-bottom:4px;")
+        layout.addWidget(desc)
+        return toggle_btn
+
+    def _toggle_t2_table(self, table_attr: str, button: QToolButton | None = None) -> None:
+        table = getattr(self, table_attr, None)
+        if table is None:
+            return
+        show = not table.isVisible()
+        if show and table.rowCount() == 0:
+            return
+        table.setVisible(show)
+        layout = getattr(self, "_t2_content_layout", None)
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        scroll = getattr(self, "_t2_scroll", None)
+        if scroll is not None and scroll.widget() is not None:
+            scroll.widget().adjustSize()
+        btn = button or self._t2_toggle_button_for_table(table_attr)
+        if btn is not None:
+            btn.setText("−" if show else "+")
+            btn.setToolTip("Minimize table" if show else "Expand table")
+
+    def _set_t2_table_visible(self, table_attr: str, visible: bool) -> None:
+        table = getattr(self, table_attr, None)
+        if table is not None:
+            table.setVisible(visible)
+            layout = getattr(self, "_t2_content_layout", None)
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            scroll = getattr(self, "_t2_scroll", None)
+            if scroll is not None and scroll.widget() is not None:
+                scroll.widget().adjustSize()
+        btn = self._t2_toggle_button_for_table(table_attr)
+        if btn is not None:
+            btn.setText("−" if visible else "+")
+            btn.setToolTip("Minimize table" if visible else "Expand table")
+
+    def _t2_toggle_button_for_table(self, table_attr: str) -> QToolButton | None:
+        return {
+            "_t2_table": getattr(self, "_t2_table_toggle", None),
+            "_t2_dur_table": getattr(self, "_t2_dur_toggle", None),
+            "_t2_clips_table": getattr(self, "_t2_clips_toggle", None),
+        }.get(table_attr)
 
     # ──────────────────────────────────────── Tab 3: Cohort Analysis ──
 
@@ -1089,11 +1228,13 @@ class AnalysisView(QWidget):
 
         has_data = motifs is not None and not motifs.empty
         self._t2_placeholder.setVisible(not has_data)
-        self._t2_table.setVisible(has_data)
+        if not has_data:
+            self._set_t2_table_visible("_t2_table", False)
         if self._t2_canvas:
             self._t2_canvas.setVisible(has_data)
 
         if not has_data:
+            self._t2_table.setRowCount(0)
             if self._t2_canvas:
                 self._t2_canvas.ax.clear()
                 self._t2_canvas.ax.text(
@@ -1213,7 +1354,8 @@ class AnalysisView(QWidget):
                 df = None
         has_data = df is not None and not df.empty
         self._t2_dur_placeholder.setVisible(not has_data)
-        self._t2_dur_table.setVisible(has_data)
+        if not has_data:
+            self._set_t2_table_visible("_t2_dur_table", False)
         if not has_data:
             self._t2_dur_table.setRowCount(0)
             return
@@ -1242,30 +1384,37 @@ class AnalysisView(QWidget):
         idx_path = RESULTS / "motifs" / "motif_exemplars.csv"
         if not idx_path.exists():
             self._t2_clips_placeholder.show()
-            self._t2_clips_table.hide()
+            self._set_t2_table_visible("_t2_clips_table", False)
+            self._t2_clips_table.setRowCount(0)
+            self._t2_clear_current_clip("")
             return
 
         try:
             df = pd.read_csv(idx_path)
         except Exception:
             self._t2_clips_placeholder.show()
-            self._t2_clips_table.hide()
+            self._set_t2_table_visible("_t2_clips_table", False)
+            self._t2_clips_table.setRowCount(0)
+            self._t2_clear_current_clip("")
             return
 
         if df.empty:
             self._t2_clips_placeholder.show()
-            self._t2_clips_table.hide()
+            self._set_t2_table_visible("_t2_clips_table", False)
+            self._t2_clips_table.setRowCount(0)
+            self._t2_clear_current_clip("")
             return
 
         self._t2_clips_placeholder.hide()
-        self._t2_clips_table.show()
         self._t2_clips_table.setSortingEnabled(False)
         self._t2_clips_table.setRowCount(len(df))
         for ri, (_, row) in enumerate(df.iterrows()):
             self._t2_clips_table.setItem(ri, 0, QTableWidgetItem(str(row.get("motif", ""))))
             self._t2_clips_table.setItem(ri, 1, QTableWidgetItem(str(row.get("motif_type", row.get("type", "")))))
             clip_path = str(row.get("clip_path", ""))
-            self._t2_clips_table.setItem(ri, 2, QTableWidgetItem(os.path.basename(clip_path)))
+            clip_item = QTableWidgetItem(os.path.basename(clip_path))
+            clip_item.setData(Qt.UserRole, str(RESULTS / clip_path) if clip_path else "")
+            self._t2_clips_table.setItem(ri, 2, clip_item)
             self._t2_clips_table.setItem(ri, 3, QTableWidgetItem(str(row.get("animal_id", ""))))
             self._t2_clips_table.setItem(ri, 4, QTableWidgetItem(str(row.get("context", ""))))
             dur = row.get("duration_sec", "")
@@ -1274,6 +1423,10 @@ class AnalysisView(QWidget):
             ))
         self._t2_clips_table.setSortingEnabled(True)
         _set_table_height_for_rows(self._t2_clips_table, max_height=900)
+        # Auto-load the first clip when the table is (re)populated.
+        self._t2_clips_table.selectRow(0)
+        self._t2_load_clip()
+        self._t2_update_clip_nav_buttons()
 
     def _generate_motif_clips(self) -> None:
         self._run_command(
@@ -1292,56 +1445,197 @@ class AnalysisView(QWidget):
                 "No motif clips found. Generate them first."
             )
 
-    def _open_motif_clip(self, index) -> None:
-        row = index.row()
-        clip_rel = self._t2_clips_table.item(row, 2)
-        if not clip_rel:
-            return
-        idx_path = RESULTS / "motifs" / "motif_exemplars.csv"
-        if not idx_path.exists():
-            return
-        try:
-            df = pd.read_csv(idx_path)
-            if row < len(df):
-                clip_path = RESULTS / str(df.iloc[row]["clip_path"])
-                if clip_path.exists():
-                    from PyQt5.QtCore import QUrl
-                    from PyQt5.QtGui import QDesktopServices
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(clip_path)))
-        except Exception:
-            pass
+    # ─────────────────────────────────── Motif clip playback ──
 
-    def _export_motifs_csv(self) -> None:
-        table = self._t2_table
+    def _t2_clear_current_clip(self, status: str = "") -> None:
+        """Reset motif clip state (no clip loaded) and disable clip nav/export."""
+        self._t2_current_clip_path = None
+        self._t2_clip_status.setText(status)
+        self._t2_export_clip_btn.setEnabled(False)
+        self._t2_prev_clip_btn.setEnabled(False)
+        self._t2_next_clip_btn.setEnabled(False)
+
+    def _t2_update_clip_nav_buttons(self) -> None:
+        n = self._t2_clips_table.rowCount()
+        row = self._t2_clips_table.currentRow()
+        self._t2_prev_clip_btn.setEnabled(n > 1 and row > 0)
+        self._t2_next_clip_btn.setEnabled(n > 1 and 0 <= row < n - 1)
+
+    def _t2_play_clip(self, path: Path | None) -> None:
+        """Central clip loader: track the current clip, load it, honor Autoplay."""
+        if path is None or not str(path):
+            return
+        if not path.exists():
+            self._t2_current_clip_path = None
+            self._t2_export_clip_btn.setEnabled(False)
+            self._t2_clip_status.setText(f"Clip file not found: {path}")
+            return
+        self._t2_current_clip_path = path
+        self._t2_clip_status.setText(path.name)
+        self._t2_export_clip_btn.setEnabled(True)
+        if self._t2_player:
+            try:
+                self._t2_player.load(str(path))
+                if self._t2_autoplay_cb.isChecked():
+                    self._t2_player.play()
+            except Exception:
+                self._t2_clip_status.setText(f"Error loading {path.name}")
+
+    def _t2_selected_clip_path(self) -> Path | None:
+        row = self._t2_clips_table.currentRow()
+        if row < 0:
+            return None
+        item = self._t2_clips_table.item(row, 2)
+        if item is None:
+            return None
+        raw = str(item.data(Qt.UserRole) or "")
+        return Path(raw) if raw else None
+
+    def _on_motif_clip_selected(self) -> None:
+        # Selecting a clip row loads it immediately (single source of clip playback).
+        self._t2_update_clip_nav_buttons()
+        self._t2_load_clip()
+
+    def _t2_load_clip(self) -> None:
+        chosen = self._t2_selected_clip_path()
+        if chosen is None or not str(chosen):
+            return
+        self._t2_play_clip(chosen)
+
+    def _t2_prev_clip(self) -> None:
+        row = self._t2_clips_table.currentRow()
+        if row > 0:
+            # selectRow triggers _on_motif_clip_selected, which loads the clip.
+            self._t2_clips_table.selectRow(row - 1)
+
+    def _t2_next_clip(self) -> None:
+        row = self._t2_clips_table.currentRow()
+        if row < self._t2_clips_table.rowCount() - 1:
+            self._t2_clips_table.selectRow(row + 1)
+
+    def _on_t2_video_finished(self) -> None:
+        """When a clip ends and Autoplay is on, advance to the next clip (wrapping)."""
+        if not self._t2_autoplay_cb.isChecked():
+            return
+        n = self._t2_clips_table.rowCount()
+        if n <= 0:
+            return
+        if n == 1:
+            # Single clip: replay it.
+            self._t2_play_clip(self._t2_selected_clip_path())
+            return
+        nxt = (self._t2_clips_table.currentRow() + 1) % n
+        # selectRow triggers _on_motif_clip_selected → load + play.
+        self._t2_clips_table.selectRow(nxt)
+
+    @staticmethod
+    def _sanitize_for_filename(text: str) -> str:
+        cleaned = "".join(c if (c.isalnum() or c in "-_") else "_" for c in text)
+        return re.sub(r"_+", "_", cleaned).strip("_")
+
+    def _export_t2_clip(self) -> None:
+        """Copy the currently loaded motif clip to results/exports/."""
+        src = self._t2_current_clip_path
+        if src is None or not src.exists():
+            QMessageBox.information(self, "Export Clip", "No clip is currently loaded.")
+            return
+        export_dir = RESULTS / "exports"
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Clip", f"Could not create export folder:\n{exc}")
+            return
+        row = self._t2_clips_table.currentRow()
+        motif_item = self._t2_clips_table.item(row, 0) if row >= 0 else None
+        type_item = self._t2_clips_table.item(row, 1) if row >= 0 else None
+        motif_txt = self._sanitize_for_filename(motif_item.text()) if motif_item else ""
+        type_txt = self._sanitize_for_filename(type_item.text()) if type_item else ""
+        prefix = f"motif_{motif_txt}_{type_txt}_" if (motif_txt or type_txt) else "motif_"
+        dest = export_dir / f"{prefix}{src.name}"
+        stem, suffix = dest.stem, dest.suffix
+        counter = 1
+        while dest.exists():
+            dest = export_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        try:
+            shutil.copy2(src, dest)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Clip", f"Export failed:\n{exc}")
+            return
+        QMessageBox.information(self, "Clip Exported", f"Saved to:\n{dest}")
+
+    def _export_table_or_file_csv(
+        self,
+        table: QTableWidget,
+        source_path: Path,
+        dialog_title: str,
+        default_name: str,
+        no_data_message: str,
+    ) -> None:
         if table.rowCount() == 0:
-            p = RESULTS / "comparison" / "motifs.csv"
-            if not p.exists():
-                QMessageBox.warning(self, "No Data", "No motif enrichment data. Run Motifs first.")
+            if not source_path.exists():
+                QMessageBox.warning(self, "No Data", no_data_message)
                 return
             dest, _ = QFileDialog.getSaveFileName(
-                self, "Download Enrichment Table", "motif_enrichment.csv", "CSV (*.csv)"
+                self, dialog_title, default_name, "CSV (*.csv)",
+                options=QFileDialog.Options(QFileDialog.DontUseNativeDialog),
             )
             if dest:
-                shutil.copy2(str(p), dest)
+                shutil.copy2(str(source_path), dest)
                 QMessageBox.information(self, "Exported", f"Saved to {dest}")
             return
         dest, _ = QFileDialog.getSaveFileName(
-            self, "Download Enrichment Table", "motif_enrichment.csv", "CSV (*.csv)"
+            self, dialog_title, default_name, "CSV (*.csv)",
+            options=QFileDialog.Options(QFileDialog.DontUseNativeDialog),
         )
         if not dest:
             return
         import csv as _csv
-        headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
-        with open(dest, "w", newline="", encoding="utf-8") as fh:
-            writer = _csv.writer(fh)
-            writer.writerow(headers)
-            for r in range(table.rowCount()):
-                row = [
-                    table.item(r, c).text() if table.item(r, c) else ""
-                    for c in range(table.columnCount())
-                ]
-                writer.writerow(row)
+        headers = [
+            table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else ""
+            for c in range(table.columnCount())
+        ]
+        try:
+            with open(dest, "w", newline="", encoding="utf-8") as fh:
+                writer = _csv.writer(fh)
+                writer.writerow(headers)
+                for r in range(table.rowCount()):
+                    row = [
+                        table.item(r, c).text() if table.item(r, c) else ""
+                        for c in range(table.columnCount())
+                    ]
+                    writer.writerow(row)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", f"Could not write CSV:\n{exc}")
+            return
         QMessageBox.information(self, "Exported", f"Saved to {dest}")
+
+    def _export_motifs_csv(self) -> None:
+        self._export_table_or_file_csv(
+            self._t2_table,
+            RESULTS / "comparison" / "motifs.csv",
+            "Download Enrichment Table",
+            "motif_enrichment.csv",
+            "No motif enrichment data. Run Motifs first.",
+        )
+
+    def _export_bout_duration_csv(self) -> None:
+        self._export_table_or_file_csv(
+            self._t2_dur_table,
+            RESULTS / "comparison" / "bout_duration_by_context.csv",
+            "Download Bout Duration Table",
+            "bout_duration_by_context.csv",
+            "No bout-duration data. Run Motifs after Report first.",
+        )
+
+    def _export_motif_clips_csv(self) -> None:
+        self._export_table_or_file_csv(
+            self._t2_clips_table,
+            RESULTS / "motifs" / "motif_exemplars.csv",
+            "Download Motif Clips Table",
+            "motif_exemplars.csv",
+            "No motif clips data. Generate motif clips first.",
+        )
 
     def _export_cohort_csv(self) -> None:
         cohort_dir = RESULTS / "cohort"
