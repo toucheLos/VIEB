@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -83,6 +84,7 @@ class StateCharacterizationView(QWidget):
         self._saved_labels: dict[int, dict] = {}
         self._current_sid: int | None = None
         self._current_clip_path: Path | None = None
+        self._pending_force_play: bool = False
         self._last_run_kind: str = ""
         self._ref_width = 900
         self._build()
@@ -595,21 +597,20 @@ class StateCharacterizationView(QWidget):
         self._data = self._merge_incoming_data(data)
         self._load()
 
-    @staticmethod
-    def _n_rows(df) -> int:
-        return 0 if df is None or getattr(df, "empty", True) else len(df)
-
     def _merge_incoming_data(self, data: dict) -> dict:
         """Never let a partial/lightweight payload shrink the state list.
 
         The app's DataLoader only fills ``state_summary`` in its full (non-
         lightweight) pass; a lightweight refresh would otherwise wipe the list.
-        Retain the last good ``state_summary`` (and companion frames) when the
-        incoming payload lacks it or has fewer states than we already show.
+        Retain the last good ``state_summary`` (and companion frames) only when
+        the incoming payload actually lacks it — a smaller-but-present
+        state_summary is a legitimate re-cluster to fewer states, not a
+        lightweight payload, and must not be discarded (it previously caused
+        a stale, larger state count to stick around after re-clustering).
         """
         merged = dict(data or {})
         prev = self._data or {}
-        if self._n_rows(merged.get("state_summary")) < self._n_rows(prev.get("state_summary")):
+        if merged.get("state_summary") is None and prev.get("state_summary") is not None:
             merged["state_summary"] = prev.get("state_summary")
             for k in ("context_report", "feature_zscores", "duration_summary",
                       "group_enrichment", "cluster_info"):
@@ -990,7 +991,7 @@ class StateCharacterizationView(QWidget):
         # ── Restore saved label ──
         saved = self._load_saved_state_labels().get(sid, {})
         self._label_input.setText(saved.get("label", ""))
-        cat = saved.get("category", "")
+        cat = self._latest_category_for_state(sid)
         self._cat_group.setExclusive(False)
         for btn in self._cat_buttons.values():
             btn.setChecked(False)
@@ -1336,7 +1337,8 @@ class StateCharacterizationView(QWidget):
         label = self._label_input.text().strip()
         if not label and category:
             label = category
-        existing[sid] = {"label": label, "category": category}
+        # category is no longer persisted here — see the vote log below.
+        existing[sid] = {"label": label, "category": ""}
         p = RESULTS / "validation" / "state_labels.csv"
         p.parent.mkdir(parents=True, exist_ok=True)
         rows = [
@@ -1344,6 +1346,16 @@ class StateCharacterizationView(QWidget):
             for k, v in sorted(existing.items())
         ]
         pd.DataFrame(rows).to_csv(p, index=False)
+
+        # A category selection is logged as metadata for the video/clip being
+        # viewed rather than overwriting a single value for the whole state —
+        # this lets a state's overall "character" later be derived from the
+        # distribution of categories seen across all its clips (aggregation
+        # itself is deferred; see docs/DECISIONS.md).
+        if category:
+            clip_path = str(self._current_clip_path) if self._current_clip_path else ""
+            video = self._lookup_clip_video(self._current_clip_path)
+            self._save_video_category_vote(video, sid, clip_path, category)
 
         # Update the list row in place (no full reload / re-selection).
         self._saved_labels = existing
@@ -1354,6 +1366,85 @@ class StateCharacterizationView(QWidget):
             item.setToolTip(tooltip)
         if self._panel_collapsed:
             self._sync_collapsed_list()
+
+    # ── Per-video category metadata (results/characterization/) ──
+
+    def _clip_video_index_path(self) -> Path:
+        return RESULTS / "characterization" / "clip_video_index.csv"
+
+    def _lookup_clip_video(self, clip_path: Path | None) -> str:
+        """Resolve a clip's source video stem via clip_video_index.csv.
+
+        Falls back to "" when the clip has no known source (no manifest yet,
+        clip predates the manifest, or no clip is currently loaded).
+        """
+        if clip_path is None:
+            return ""
+        p = self._clip_video_index_path()
+        if not p.exists():
+            return ""
+        try:
+            df = pd.read_csv(p)
+            match = df[df["clip_path"].astype(str) == str(clip_path)]
+            if not match.empty:
+                return str(match.iloc[0].get("stem", "") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _video_categories_path(self) -> Path:
+        return RESULTS / "characterization" / "video_state_categories.csv"
+
+    _VIDEO_CATEGORY_COLS = ["video", "state_id", "clip_path", "category", "timestamp"]
+
+    def _load_video_categories(self) -> pd.DataFrame:
+        p = self._video_categories_path()
+        if not p.exists():
+            return pd.DataFrame(columns=self._VIDEO_CATEGORY_COLS)
+        try:
+            return pd.read_csv(p)
+        except Exception:
+            return pd.DataFrame(columns=self._VIDEO_CATEGORY_COLS)
+
+    def _save_video_category_vote(self, video: str, sid: int, clip_path: str, category: str) -> None:
+        """Append/update a category vote, never overwriting the file wholesale.
+
+        Keyed by (video, state_id, clip_path) — mirrors the update-by-key
+        pattern in characterize.save_annotations().
+        """
+        p = self._video_categories_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        df = self._load_video_categories()
+        now = datetime.now().isoformat(timespec="seconds")
+        if not df.empty:
+            key_mask = (
+                (df["video"].astype(str) == video)
+                & (df["state_id"].astype(int) == sid)
+                & (df["clip_path"].astype(str) == clip_path)
+            )
+        else:
+            key_mask = pd.Series([], dtype=bool)
+        if key_mask.any():
+            df.loc[key_mask, ["category", "timestamp"]] = [category, now]
+        else:
+            new_row = pd.DataFrame([{
+                "video": video, "state_id": sid, "clip_path": clip_path,
+                "category": category, "timestamp": now,
+            }])
+            df = pd.concat([df, new_row], ignore_index=True)
+        df.to_csv(p, index=False)
+
+    def _latest_category_for_state(self, sid: int) -> str:
+        """Most recent category vote for a state — a simple preview, not the
+        eventual weighted/majority aggregation across all its clips."""
+        df = self._load_video_categories()
+        if df.empty:
+            return ""
+        rows = df[df["state_id"].astype(int) == sid]
+        if rows.empty:
+            return ""
+        rows = rows.sort_values("timestamp")
+        return str(rows.iloc[-1].get("category", "") or "")
 
     # ─────────────────────────────────── State clips ──
 
@@ -1399,8 +1490,14 @@ class StateCharacterizationView(QWidget):
         self._prev_clip_btn.setEnabled(n > 1 and row > 0)
         self._next_clip_btn.setEnabled(n > 1 and 0 <= row < n - 1)
 
-    def _play_clip(self, path: Path | None) -> None:
-        """Central clip loader: track the current clip, load it, honor Autoplay."""
+    def _play_clip(self, path: Path | None, force_play: bool = False) -> None:
+        """Central clip loader: track the current clip, load it, honor Autoplay.
+
+        ``force_play`` starts playback regardless of the Autoplay checkbox —
+        used by manual Next/Previous Clip navigation, which should always
+        play the newly loaded clip even when Autoplay (auto-advance-on-finish)
+        is off.
+        """
         if path is None or not str(path):
             return
         if not path.exists():
@@ -1414,7 +1511,7 @@ class StateCharacterizationView(QWidget):
         if self._player:
             try:
                 self._player.load(str(path))
-                if self._autoplay_cb.isChecked():
+                if force_play or self._autoplay_cb.isChecked():
                     self._player.play()
             except Exception:
                 self._clip_status.setText(f"Error loading {path.name}")
@@ -1462,7 +1559,9 @@ class StateCharacterizationView(QWidget):
         chosen = self._selected_exemplar_path()
         if chosen is None or not str(chosen):
             return
-        self._play_clip(chosen)
+        force_play = self._pending_force_play
+        self._pending_force_play = False
+        self._play_clip(chosen, force_play=force_play)
 
     def _export_current_clip(self) -> None:
         """Copy the currently loaded clip to results/exports/ (single click)."""
@@ -1541,11 +1640,13 @@ class StateCharacterizationView(QWidget):
         row = self._exemplar_table.currentRow()
         if row > 0:
             # selectRow triggers _on_exemplar_selected, which loads the clip.
+            self._pending_force_play = True
             self._exemplar_table.selectRow(row - 1)
 
     def _next_clip(self) -> None:
         row = self._exemplar_table.currentRow()
         if row < self._exemplar_table.rowCount() - 1:
+            self._pending_force_play = True
             self._exemplar_table.selectRow(row + 1)
 
     def _on_video_finished(self) -> None:

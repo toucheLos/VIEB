@@ -421,3 +421,48 @@ values") instead of an error, which is more dangerous than a crash. Repair
 is opt-in rather than automatic so a routine pipeline run never silently
 rewrites a user's `config.json`.
 **Related:** `project_manager.py`, `compare.py _print_project_path_diagnostics()`
+
+## 47 — Settings must maintain `external_paths` (parity with import_data_source)
+**Decision/finding:** `views/settings.py:_save()` now keeps `external_paths` in
+sync with the results/raw_videos/metadata directory fields — a path resolving
+outside the project folder is added to the whitelist, an inside path is removed
+— and also writes the nested `paths["metadata"]` key. Previously Settings wrote
+only the flat/nested path keys, so pointing raw videos (or results/metadata) at
+a folder outside the project (e.g. an external drive) left the path
+un-whitelisted; `_classify_project_path()` then rejected it and the value
+appeared to "revert" on the next resolve/restart. Metadata additionally reverted
+because only the flat `metadata_csv_path` was written while the stale nested
+`paths.metadata` won on `normalize_project_config`.
+**Why:** The onboarding import flow (`project_manager.import_data_source`,
+lines ~901-904) already whitelists external sources; Settings was the only
+directory-editing path that didn't, making it the one that silently reverted.
+Keeping the logic in `_save()` mirrors the existing pattern with no new module.
+**Related:** `views/settings.py:_save()`, `project_manager.import_data_source`,
+`project_manager._classify_project_path`
+
+## 48 — State categories are per-video/clip metadata, not a per-state overwrite
+**Decision/finding:** In State Characterization, selecting a category chip
+and clicking Save no longer writes a single clobbering value into
+`results/validation/state_labels.csv` (keyed only by `state_id`). Instead it
+appends a vote to `results/characterization/video_state_categories.csv`
+(`video, state_id, clip_path, category, timestamp`, keyed by
+`(video, state_id, clip_path)`, never-overwrite update-by-key like
+`characterize.save_annotations`), resolved to a source video via a new
+`results/characterization/clip_video_index.csv` manifest written by
+`generate_clips.py:cmd_clips` (mirroring the existing `motif_exemplars.csv`
+pattern, Decision #28). The state list's chip pre-highlight now shows the
+most recent vote for that state as a lightweight preview.
+**Why:** The old mechanism always overwrote whichever single state row was
+selected in the left-hand list, regardless of which clip was actually being
+reviewed — repeated browse+save cycles just clobbered one value. Per-video
+metadata preserves the full history so a state's overall "character" can
+later be derived from the distribution of categories seen across its clips.
+**Deferred:** Computing that average/highest-weighted aggregate per state
+and using it to drive the state's displayed category is explicitly not
+built yet — only the metadata logging. Do not assume aggregation exists
+without checking `_latest_category_for_state()` in
+`views/state_characterization.py`, which today only returns the single
+most recent vote.
+**Related:** `views/state_characterization.py:_save_state_label`,
+`_save_video_category_vote`, `_latest_category_for_state`,
+`generate_clips.py:cmd_clips`

@@ -271,6 +271,7 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     centers    = np.array(cluster_info["cluster_centers"])
     clips_written = 0
     clips_attempted = 0
+    clip_index_rows = []
 
     base_clips_dir = output_dir if output_dir else _vc.get_clips_dir()
 
@@ -369,11 +370,17 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
             else:
                 left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
             clips_attempted += 1
+            clip_path = os.path.join(out_dir, f"longest_{i+1:02d}.mp4")
             ok = _export_clip(b["video_path"], left, right - 1,
-                              os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
+                              clip_path, fps=fps,
                               pad_to_secs=5.0, max_secs=max_clip_frames / fps)
             clips_written += int(ok)
             n_ok += int(ok)
+            if ok:
+                clip_index_rows.append({
+                    "clip_path": clip_path, "state_id": k, "kind": "longest",
+                    "stem": stem, "video_path": b["video_path"],
+                })
         print(f"  longest: {n_ok}/{len(kb)} clips written")
 
         # ── Typical bouts (nearest to cluster centroid in PCA space) ───────
@@ -421,11 +428,17 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
                     else:
                         left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
                     clips_attempted += 1
+                    clip_path = os.path.join(out_dir, f"typical_{i+1:02d}.mp4")
                     ok = _export_clip(b["video_path"], left, right - 1,
-                                      os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
+                                      clip_path, fps=fps,
                                       pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                     clips_written += int(ok)
                     n_ok += int(ok)
+                    if ok:
+                        clip_index_rows.append({
+                            "clip_path": clip_path, "state_id": k, "kind": "typical",
+                            "stem": stem, "video_path": b["video_path"],
+                        })
                 print(f"  typical: {n_ok}/{len(kb)} clips written")
 
         # ── Context-specific bouts ─────────────────────────────────────────
@@ -441,11 +454,18 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
                 else:
                     left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
                 clips_attempted += 1
+                clip_path = os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4")
                 ok = _export_clip(b["video_path"], left, right - 1,
-                                  os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
+                                  clip_path, fps=fps,
                                   pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                 clips_written += int(ok)
                 n_ok += int(ok)
+                if ok:
+                    clip_index_rows.append({
+                        "clip_path": clip_path, "state_id": k,
+                        "kind": f"context_{best_ctx}",
+                        "stem": stem, "video_path": b["video_path"],
+                    })
             print(f"  context-{best_ctx}: {n_ok}/{len(ctx_bouts)} clips written")
 
     if skipped_states:
@@ -470,6 +490,14 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     if failed:
         print(f"\nWARNING: {failed}/{clips_attempted} clips failed to export.")
     print(f"\nDone: {clips_written}/{clips_attempted} clips saved under {base_clips_dir}/state_<id>/")
+
+    clip_idx_path = os.path.join(_res(), "characterization", "clip_video_index.csv")
+    os.makedirs(os.path.dirname(clip_idx_path), exist_ok=True)
+    pd.DataFrame(
+        clip_index_rows,
+        columns=["clip_path", "state_id", "kind", "stem", "video_path"],
+    ).to_csv(clip_idx_path, index=False)
+    print(f"Clip video index: {clip_idx_path} ({len(clip_index_rows)} clips)")
 
 
 # ---------------------------------------------------------------------------
