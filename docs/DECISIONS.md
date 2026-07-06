@@ -536,3 +536,26 @@ diagnostic is being built now.
 **Related:** `views/video_stories.py`, `artifact_scanner.py`,
 `views/artifacts.py`, `views/analysis.py`, `user_interface.py`,
 `tests/test_video_stories.py`, `tests/test_artifact_scanner.py`, #49
+
+## 51 — Artifacts restyled to mirror Analysis's sidebar/card conventions; category is now primary navigation
+**Decision/finding:** `views/artifacts.py` was restructured to visually match
+`AnalysisView`: a left `QListWidget` category sub-nav (same stylesheet as
+Analysis's vertical tab bar) replaces the old `Category` combobox as the
+primary navigation mechanism; Search and Type remain as secondary in-category
+refinement. A summary card (`"{Category} — N files, size"`, styled with
+`state_characterization.py`'s `_CARD_STYLE`) sits above the table, and the
+preview pane is wrapped in a titled card (`_section_title("Preview")`,
+imported from `views.analysis`) instead of a bare empty-state label. Category
+clicks only call `_apply_filters()` over the already-scanned in-memory list —
+never `_scan()` — preserving #19 (no rescan triggered by routine navigation
+against the 31k+-file dataset). Also added a `("runs/", "Cluster Runs")` rule
+to `artifact_scanner.py`'s `_CATEGORY_RULES`, so the 213 files under
+`results/runs/<run_id>/` (cluster snapshots) get their own category instead
+of falling into the generic `"Raw Tables"` bucket.
+**Why:** Artifacts was a flat dense table with combobox filters and plain
+buttons, visually disconnected from Analysis's sidebar/card idiom, making the
+app feel like two products. Per #31, this was scoped as a layout/navigation
+pass only — no change to what data is shown, how scanning/filtering/export
+works, or the Artifacts-vs-Analysis conceptual split.
+**Related:** `views/artifacts.py`, `artifact_scanner.py`,
+`tests/test_artifact_scanner.py`, #19, #31

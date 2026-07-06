@@ -10,10 +10,10 @@ from pathlib import Path
 import pandas as pd
 
 from PyQt5.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QFont, QPixmap
+from PyQt5.QtGui import QColor, QDesktopServices, QFont, QPixmap
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton,
+    QAbstractItemView, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
     QTextEdit, QVBoxLayout, QWidget,
 )
@@ -22,6 +22,8 @@ from _utils import CLIPS, RESULTS, _open_folder
 from artifact_scanner import (
     scan_artifacts, build_publication_bundle, format_size, format_time,
 )
+from views.analysis import _section_title
+from views.state_characterization import _CARD_STYLE
 
 PREVIEW_CSV_ROWS = 100
 PREVIEW_TEXT_BYTES = 64_000
@@ -32,6 +34,30 @@ BINARY_SUFFIXES = {
     ".pkl", ".pt", ".pth", ".ckpt", ".npy", ".npy.gz", ".h5", ".hdf5",
     ".mp4", ".avi", ".mov",
 }
+
+ALL_CATEGORIES_LABEL = "All Files"
+
+_SIDEBAR_STYLE = """
+    QListWidget {
+        background: #F4F4F4;
+        border: none;
+        border-right: 1px solid #DCDCDC;
+        padding-top: 4px;
+        outline: none;
+    }
+    QListWidget::item {
+        padding: 9px 14px;
+        color: #333;
+        font-size: 12px;
+    }
+    QListWidget::item:selected {
+        background: #1a73e8;
+        color: white;
+    }
+    QListWidget::item:hover:!selected {
+        background: #E8E8E8;
+    }
+"""
 
 
 def binary_preview_disabled(file_type: str, filename: str) -> bool:
@@ -79,13 +105,28 @@ class ArtifactsView(QWidget):
         self._row_timer = QTimer(self)
         self._row_timer.timeout.connect(self._insert_next_rows)
         self._pending_category: str | None = None
+        # row -> category label ("All Files" or a real category name)
+        self._nav_row_category: dict[int, str] = {}
         self._build()
 
     # ------------------------------------------------------------------ build
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(8)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Category sub-nav sidebar ─────────────────────────────────────
+        self._cat_nav = QListWidget()
+        self._cat_nav.setFixedWidth(180)
+        self._cat_nav.setSpacing(0)
+        self._cat_nav.setStyleSheet(_SIDEBAR_STYLE)
+        self._cat_nav.currentRowChanged.connect(self._on_nav_row_changed)
+        root.addWidget(self._cat_nav)
+
+        # ── Right panel ───────────────────────────────────────────────────
+        right = QVBoxLayout()
+        right.setContentsMargins(16, 16, 16, 16)
+        right.setSpacing(8)
 
         # ── Header ───────────────────────────────────────────────────────
         hdr = QHBoxLayout()
@@ -93,12 +134,26 @@ class ArtifactsView(QWidget):
         title.setFont(QFont("Arial", 14, QFont.Bold))
         hdr.addWidget(title)
         hdr.addStretch()
-        self._summary_lbl = QLabel("")
-        self._summary_lbl.setStyleSheet("color:#666; font-size:11px;")
-        hdr.addWidget(self._summary_lbl)
-        root.addLayout(hdr)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setFixedHeight(28)
+        refresh_btn.clicked.connect(self._scan)
+        hdr.addWidget(refresh_btn)
+        right.addLayout(hdr)
 
-        # ── Filter bar ───────────────────────────────────────────────────
+        # ── Summary card ─────────────────────────────────────────────────
+        self._summary_card = QFrame()
+        self._summary_card.setStyleSheet(_CARD_STYLE)
+        card_lay = QVBoxLayout(self._summary_card)
+        card_lay.setContentsMargins(6, 4, 6, 4)
+        card_lay.setSpacing(1)
+        self._summary_lbl = QLabel("")
+        self._summary_lbl.setStyleSheet(
+            "font-size:13px; font-weight:bold; color:#1A1A1A; border:none; background:transparent;"
+        )
+        card_lay.addWidget(self._summary_lbl)
+        right.addWidget(self._summary_card)
+
+        # ── Filter bar (secondary refinement within a category) ───────────
         filt = QHBoxLayout()
         filt.addWidget(QLabel("Search:"))
         self._search = QLineEdit()
@@ -108,12 +163,6 @@ class ArtifactsView(QWidget):
         self._search.setFixedWidth(220)
         filt.addWidget(self._search)
 
-        filt.addWidget(QLabel("Category:"))
-        self._cat_filter = QComboBox()
-        self._cat_filter.addItem("All")
-        self._cat_filter.currentTextChanged.connect(self._apply_filters)
-        filt.addWidget(self._cat_filter)
-
         filt.addWidget(QLabel("Type:"))
         self._type_filter = QComboBox()
         self._type_filter.addItem("All")
@@ -122,13 +171,8 @@ class ArtifactsView(QWidget):
             self._type_filter.addItem(t)
         self._type_filter.currentTextChanged.connect(self._apply_filters)
         filt.addWidget(self._type_filter)
-
         filt.addStretch()
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setFixedHeight(28)
-        refresh_btn.clicked.connect(self._scan)
-        filt.addWidget(refresh_btn)
-        root.addLayout(filt)
+        right.addLayout(filt)
 
         # ── Splitter: file table + preview ───────────────────────────────
         splitter = QSplitter(Qt.Vertical)
@@ -150,13 +194,20 @@ class ArtifactsView(QWidget):
         self._table.doubleClicked.connect(lambda _: self._open_file())
         splitter.addWidget(self._table)
 
-        # Preview pane
+        # Preview pane — titled card, consistent with Analysis's plot/detail panes
+        preview_card = QFrame()
+        preview_card.setStyleSheet(_CARD_STYLE)
+        preview_card_lay = QVBoxLayout(preview_card)
+        preview_card_lay.setContentsMargins(6, 4, 6, 6)
+        preview_card_lay.setSpacing(4)
+        preview_card_lay.addWidget(_section_title("Preview"))
+
         self._preview_stack = QStackedWidget()
 
         self._preview_empty = QLabel("Select a file to preview")
         self._preview_empty.setAlignment(Qt.AlignCenter)
         self._preview_empty.setStyleSheet(
-            "color:#999; font-style:italic; padding:20px;"
+            "color:#999; font-style:italic; padding:20px; border:none; background:transparent;"
         )
         self._preview_stack.addWidget(self._preview_empty)
 
@@ -173,26 +224,34 @@ class ArtifactsView(QWidget):
 
         self._preview_image = QLabel()
         self._preview_image.setAlignment(Qt.AlignCenter)
-        self._preview_image.setStyleSheet("background:#f0f0f0; padding:8px;")
+        self._preview_image.setStyleSheet("background:#f0f0f0; padding:8px; border:none;")
         self._preview_stack.addWidget(self._preview_image)
 
         self._preview_info = QLabel()
         self._preview_info.setAlignment(Qt.AlignCenter)
         self._preview_info.setWordWrap(True)
-        self._preview_info.setStyleSheet("color:#555; padding:20px;")
+        self._preview_info.setStyleSheet("color:#555; padding:20px; border:none; background:transparent;")
         self._preview_stack.addWidget(self._preview_info)
 
         self._preview_stack.setCurrentWidget(self._preview_empty)
-        splitter.addWidget(self._preview_stack)
+        preview_card_lay.addWidget(self._preview_stack)
+        splitter.addWidget(preview_card)
         splitter.setSizes([400, 200])
-        root.addWidget(splitter, stretch=1)
+        right.addWidget(splitter, stretch=1)
 
-        # ── Bottom buttons ───────────────────────────────────────────────
+        # ── Bottom action bar ─────────────────────────────────────────────
         btn_row = QHBoxLayout()
         for label, slot in [
             ("Open File", self._open_file),
             ("Reveal in Folder", self._reveal_file),
             ("Save As…", self._save_as),
+        ]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(30)
+            btn.clicked.connect(slot)
+            btn_row.addWidget(btn)
+        btn_row.addStretch()
+        for label, slot in [
             ("Export Selected", self._export_selected),
             ("Export Category", self._export_category),
             ("Export All as ZIP", self._export_all),
@@ -202,7 +261,11 @@ class ArtifactsView(QWidget):
             btn.setFixedHeight(30)
             btn.clicked.connect(slot)
             btn_row.addWidget(btn)
-        root.addLayout(btn_row)
+        right.addLayout(btn_row)
+
+        right_widget = QWidget()
+        right_widget.setLayout(right)
+        root.addWidget(right_widget, stretch=1)
 
     # ----------------------------------------------------------- data hooks
     def update_data(self, data: dict) -> None:
@@ -219,8 +282,7 @@ class ArtifactsView(QWidget):
         in flight or hasn't happened yet, the category is applied once
         _on_scan_done sees it among the freshly scanned categories."""
         self._pending_category = category
-        if self._cat_filter.findText(category) >= 0:
-            self._cat_filter.setCurrentText(category)
+        if self._select_nav_row_for_category(category):
             self._pending_category = None
         self._apply_filters()
 
@@ -263,30 +325,80 @@ class ArtifactsView(QWidget):
         self._running_command = ""
         self._artifacts = artifacts
 
-        categories = sorted(set(a["category"] for a in self._artifacts))
-        current = self._cat_filter.currentText()
-        self._cat_filter.blockSignals(True)
-        self._cat_filter.clear()
-        self._cat_filter.addItem("All")
-        for c in categories:
-            self._cat_filter.addItem(c)
-        if self._pending_category and self._pending_category in categories:
-            self._cat_filter.setCurrentText(self._pending_category)
-            self._pending_category = None
-        elif current in categories or current == "All":
-            self._cat_filter.setCurrentText(current)
-        self._cat_filter.blockSignals(False)
+        counts: dict[str, int] = {}
+        for a in self._artifacts:
+            counts[a["category"]] = counts.get(a["category"], 0) + 1
+        categories = sorted(counts.keys())
 
+        current = self._current_category()
+
+        self._cat_nav.blockSignals(True)
+        self._rebuild_nav(categories, counts)
+
+        if self._pending_category and self._pending_category in categories:
+            self._select_nav_row_for_category(self._pending_category)
+            self._pending_category = None
+        elif not (current and self._select_nav_row_for_category(current)):
+            self._cat_nav.setCurrentRow(0)
+        self._cat_nav.blockSignals(False)
+
+        self._apply_filters()
+
+    # ------------------------------------------------------------ sidebar nav
+    def _rebuild_nav(self, categories: list[str], counts: dict[str, int]) -> None:
+        self._cat_nav.clear()
+        self._nav_row_category = {}
+
+        total = sum(counts.values())
+        all_item = QListWidgetItem(f"{ALL_CATEGORIES_LABEL} ({total})")
+        self._cat_nav.addItem(all_item)
+        self._nav_row_category[0] = ALL_CATEGORIES_LABEL
+
+        header = QListWidgetItem("CATEGORIES")
+        header.setFlags(Qt.ItemIsEnabled)
+        font = header.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        header.setFont(font)
+        header.setForeground(QColor("#999"))
+        header.setBackground(QColor("#EBEBEB"))
+        self._cat_nav.addItem(header)
+
+        for cat in categories:
+            row = self._cat_nav.count()
+            item = QListWidgetItem(f"{cat} ({counts[cat]})")
+            self._cat_nav.addItem(item)
+            self._nav_row_category[row] = cat
+
+    def _select_nav_row_for_category(self, category: str) -> bool:
+        for row, cat in self._nav_row_category.items():
+            if cat == category:
+                self._cat_nav.setCurrentRow(row)
+                return True
+        return False
+
+    def _current_category(self) -> str:
+        row = self._cat_nav.currentRow()
+        return self._nav_row_category.get(row, ALL_CATEGORIES_LABEL)
+
+    def _on_nav_row_changed(self, row: int) -> None:
+        if row not in self._nav_row_category:
+            # Section header row is not selectable content — bounce to the
+            # nearest real row instead of leaving the filter stuck.
+            fallback = 0 if row < 0 else min(row + 1, self._cat_nav.count() - 1)
+            if fallback in self._nav_row_category:
+                self._cat_nav.setCurrentRow(fallback)
+            return
         self._apply_filters()
 
     # ------------------------------------------------------------ filtering
     def _apply_filters(self) -> None:
         search = self._search.text().strip().lower()
-        cat = self._cat_filter.currentText()
+        cat = self._current_category()
         ftype = self._type_filter.currentText()
 
         filtered = self._artifacts
-        if cat != "All":
+        if cat != ALL_CATEGORIES_LABEL:
             filtered = [a for a in filtered if a["category"] == cat]
         if ftype != "All":
             filtered = [a for a in filtered if a["file_type"] == ftype]
@@ -301,7 +413,7 @@ class ArtifactsView(QWidget):
 
         total_size = sum(a["size_bytes"] for a in filtered)
         self._summary_lbl.setText(
-            f"{len(filtered)} files, {format_size(total_size)}"
+            f"{cat} — {len(filtered)} files, {format_size(total_size)}"
         )
 
     def _populate_table(self, artifacts: list[dict]) -> None:
@@ -311,8 +423,9 @@ class ArtifactsView(QWidget):
         self._table.setRowCount(0)
         self._insert_next_rows()
         if self._pending_rows:
+            cat = self._current_category()
             self._summary_lbl.setText(
-                f"Loading {min(len(artifacts), ROW_BATCH_SIZE)} of {len(artifacts)} files..."
+                f"{cat} — loading {min(len(artifacts), ROW_BATCH_SIZE)} of {len(artifacts)} files..."
             )
             self._row_timer.start(0)
         else:
@@ -340,17 +453,18 @@ class ArtifactsView(QWidget):
             self._table.setItem(ri, 4, QTableWidgetItem(format_time(a["modified_ts"])))
             self._table.setItem(ri, 5, QTableWidgetItem(a["rel_path"]))
 
+        cat = self._current_category()
         total_size = sum(a["size_bytes"] for a in self._filtered)
         if self._pending_rows:
             loaded = len(self._filtered) - len(self._pending_rows)
             self._summary_lbl.setText(
-                f"Loading {loaded} of {len(self._filtered)} files, {format_size(total_size)}"
+                f"{cat} — loading {loaded} of {len(self._filtered)} files, {format_size(total_size)}"
             )
         else:
             self._row_timer.stop()
             self._table.setSortingEnabled(True)
             self._summary_lbl.setText(
-                f"{len(self._filtered)} files, {format_size(total_size)}"
+                f"{cat} — {len(self._filtered)} files, {format_size(total_size)}"
             )
 
     # ----------------------------------------------------------- selection
@@ -548,11 +662,11 @@ class ArtifactsView(QWidget):
         )
 
     def _export_category(self) -> None:
-        cat = self._cat_filter.currentText()
-        if cat == "All":
+        cat = self._current_category()
+        if cat == ALL_CATEGORIES_LABEL:
             QMessageBox.information(
                 self, "Export Category",
-                "Select a category from the filter first.",
+                "Select a category from the sidebar first.",
             )
             return
         cat_files = [a for a in self._artifacts if a["category"] == cat]

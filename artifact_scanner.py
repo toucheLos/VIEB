@@ -65,6 +65,8 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("shared/cluster_info.json", "Diagnostics"),
     ("shared/run_manifest.json", "Diagnostics"),
     ("shared/validation_report.json", "Diagnostics"),
+    # Cluster Runs (saved run snapshots)
+    ("runs/", "Cluster Runs"),
     # Metadata / config
     ("shared/preprocessor.pkl", "Metadata"),
     ("shared/umap_reducer.pkl", "Metadata"),

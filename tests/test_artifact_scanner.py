@@ -33,6 +33,12 @@ def test_categorize_states():
     assert categorize_file("validation/state_labels.csv") == ("States", "CSV")
 
 
+def test_categorize_cluster_runs():
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/cluster_info.json") == ("Cluster Runs", "JSON")
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/clusterer.pkl") == ("Cluster Runs", "Model")
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/run_manifest.json") == ("Cluster Runs", "JSON")
+
+
 def test_categorize_metadata():
     assert categorize_file("shared/preprocessor.pkl") == ("Metadata", "Model")
     assert categorize_file("features/index.json") == ("Metadata", "JSON")
