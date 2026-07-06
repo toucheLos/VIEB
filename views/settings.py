@@ -701,6 +701,30 @@ class SettingsView(QWidget):
         paths["raw_videos"] = self._raw.text()
         self.cfg["dlc_python"] = self._dlc_python_le.text().strip()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        paths["metadata"] = self._meta_csv.text().strip()
+        # Keep external_paths in sync with the three directory fields. A path
+        # outside the project folder must be whitelisted or the resolver rejects
+        # it and the change silently reverts (mirrors import_data_source in
+        # project_manager). Also writing paths["metadata"] above stops the
+        # authoritative nested key from overwriting the flat one on normalize.
+        proj_str = self.cfg.get("project_path", "")
+        if proj_str:
+            proj = Path(proj_str).resolve()
+            ext = set(self.cfg.get("external_paths", []))
+            for _key, _value in (("results", paths["results"]),
+                                 ("raw_videos", paths["raw_videos"]),
+                                 ("metadata", paths["metadata"])):
+                inside = False
+                if _value:
+                    try:
+                        inside = Path(_value).resolve().is_relative_to(proj)
+                    except ValueError:
+                        inside = False
+                if _value and not inside:
+                    ext.add(_key)
+                else:
+                    ext.discard(_key)
+            self.cfg["external_paths"] = sorted(ext)
         self.cfg["cohort_csv_path"] = self._cohort_csv.text().strip()
         self.cfg["pose_source"] = self._pose_source.currentText()
         self.cfg["h5_path"] = self._h5_path.text().strip()
