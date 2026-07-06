@@ -332,3 +332,182 @@ def test_missing_source_video_shows_inline_message_no_crash(tmp_path, monkeypatc
     view = vs.VideoStoriesView(cfg={"fps": 30.0})
     bout = view._current_bouts.iloc[0].to_dict()
     view._open_segment_dialog(bout)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Part B: Journey / comparison layer
+# ---------------------------------------------------------------------------
+
+def _write_journey_dataset(results_dir, subject, timepoints, condition=""):
+    """timepoints: list of (timepoint, [(state, duration_sec), ...]) for one
+    subject, one video per timepoint. Rows are written in a shuffled order
+    to prove chronological rendering comes from sorting, not file order."""
+    import random
+
+    seq_dir = results_dir / "sequences"
+    seq_dir.mkdir(parents=True, exist_ok=True)
+
+    story_rows, bout_rows, journey_rows = [], [], []
+    for i, (tp, states) in enumerate(timepoints):
+        video_id = f"{subject}_{tp}"
+        t = 0.0
+        for state, dur in states:
+            bout_rows.append({
+                "video_id": video_id, "subject_id": subject, "timepoint": tp, "condition": condition,
+                "state": state, "start_frame": int(t * 30), "end_frame": int((t + dur) * 30) - 1,
+                "start_sec": t, "end_sec": t + dur, "duration_sec": dur, "confidence_mean": 0.9,
+            })
+            t += dur
+        story_rows.append({
+            "video_id": video_id, "subject_id": subject, "timepoint": tp, "condition": condition,
+            "duration_sec": t, "dominant_state": states[0][0], "state_entropy": 0.5 + i * 0.1,
+            "n_bouts": len(states), "n_transitions": len(states) - 1, "transition_rate": 0.1 + i * 0.05,
+            "mean_bout_duration": t / len(states), "short_bout_fraction": 0.0,
+            "state_sequence_rle": "", "top_motifs": "",
+        })
+        journey_rows.append({
+            "subject_id": subject, "timepoint": tp, "distance_from_baseline": round(i * 0.2, 3),
+            "dominant_state": states[0][0], "state_entropy": round(0.5 + i * 0.1, 3),
+            "transition_rate": round(0.1 + i * 0.05, 3),
+            "state_occupancy_vector": "[1,0]", "story_similarity_to_baseline": round(1.0 - i * 0.1, 3),
+        })
+
+    shuffled_stories = story_rows[:]
+    random.Random(0).shuffle(shuffled_stories)
+    shuffled_bouts = bout_rows[:]
+    random.Random(1).shuffle(shuffled_bouts)
+
+    pd.DataFrame(shuffled_stories).to_csv(seq_dir / "video_stories.csv", index=False)
+    pd.DataFrame(shuffled_bouts).to_csv(seq_dir / "video_story_bouts.csv", index=False)
+    pd.DataFrame(journey_rows).to_csv(seq_dir / "subject_journeys.csv", index=False)
+
+
+def test_select_representative_video_prefers_current_and_falls_back():
+    stories = pd.DataFrame({
+        "video_id": ["b", "a"], "subject_id": ["rat1", "rat1"],
+        "timepoint": ["week2", "week2"], "condition": ["", ""],
+    })
+    assert vs.select_representative_video(stories, "rat1", "week2") == "a"
+    assert vs.select_representative_video(stories, "rat1", "week2", prefer_video_id="b") == "b"
+    assert vs.select_representative_video(stories, "rat1", "week2", prefer_video_id="zzz") == "a"
+    assert vs.select_representative_video(stories, "rat1", "week9") is None
+
+
+def test_comparison_strips_render_in_order_spence(tmp_path, monkeypatch):
+    _app()
+    _write_journey_dataset(tmp_path, "rat519", [
+        ("week9", [(0, 2.0)]),
+        ("baseline", [(1, 2.0)]),
+        ("week2", [(0, 2.0)]),
+    ])
+    _write_analysis_design(
+        tmp_path, ["baseline", "week2", "week3", "week4", "week6", "week7", "week8", "week9"]
+    )
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+    view._compare_toggle.setChecked(True)
+    labels = [t.get_text() for t in view._compare_canvas.ax.get_yticklabels()]
+    assert labels == ["baseline", "week2", "week9"]
+
+
+def test_comparison_strips_render_in_order_luna_day_based(tmp_path, monkeypatch):
+    _app()
+    _write_journey_dataset(tmp_path, "mouse3", [
+        ("day10", [(2, 2.0)]),
+        ("day2", [(1, 2.0)]),
+        ("day1", [(0, 2.0)]),
+    ])
+    _write_analysis_design(tmp_path, ["day1", "day2", "day10"])
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+    labels = [t.get_text() for t in view._compare_canvas.ax.get_yticklabels()]
+    assert labels == ["day1", "day2", "day10"]
+
+
+def test_compare_shows_placeholder_when_insufficient_timepoints(tmp_path, monkeypatch):
+    _app()
+    _write_native_sequences(tmp_path, spence=False)  # single timepoint fixture
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+    assert len(view._compare_canvas.ax.collections) == 0
+
+
+def test_derived_metrics_read_journeys_columns_without_recompute(tmp_path, monkeypatch):
+    _app()
+    _write_journey_dataset(tmp_path, "rat519", [
+        ("baseline", [(0, 2.0)]),
+        ("week2", [(1, 2.0)]),
+    ])
+    _write_analysis_design(tmp_path, ["baseline", "week2"])
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+    journeys = pd.read_csv(tmp_path / "sequences" / "subject_journeys.csv").set_index("timepoint")
+
+    ax1 = view._metrics_canvas1.ax
+    trans_rate_line, entropy_line = ax1.lines[0], ax1.lines[1]
+    assert list(trans_rate_line.get_ydata()) == pytest.approx(
+        [journeys.loc["baseline", "transition_rate"], journeys.loc["week2", "transition_rate"]]
+    )
+    assert list(entropy_line.get_ydata()) == pytest.approx(
+        [journeys.loc["baseline", "state_entropy"], journeys.loc["week2", "state_entropy"]]
+    )
+
+    dist_line = view._metrics_canvas2.ax.lines[0]
+    assert list(dist_line.get_ydata()) == pytest.approx(
+        [journeys.loc["baseline", "distance_from_baseline"], journeys.loc["week2", "distance_from_baseline"]]
+    )
+
+
+def test_derived_metrics_placeholder_when_no_journey_rows(tmp_path, monkeypatch):
+    _app()
+    _write_native_sequences(tmp_path, spence=True)  # no subject_journeys.csv written
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+    assert len(view._metrics_canvas1.ax.lines) == 0
+    assert len(view._metrics_canvas2.ax.lines) == 0
+
+
+def test_possible_split_states_absent_returns_empty_set(tmp_path):
+    assert vs.load_possible_split_states(tmp_path) == set()
+
+
+def test_possible_split_states_malformed_json_returns_empty_set(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "cluster_info.json").write_text("{not valid json")
+    assert vs.load_possible_split_states(tmp_path) == set()
+
+
+def test_possible_split_states_present_renders_hatch_without_crashing(tmp_path, monkeypatch):
+    import json
+    _app()
+    _write_native_sequences(tmp_path, spence=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "cluster_info.json").write_text(json.dumps({"possible_split_states": [1]}))
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+
+    assert vs.load_possible_split_states(tmp_path) == {1}
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})  # first story's bouts contain states 0 and 1
+    # one collection for normal (state 0) bouts, one for the flagged (state 1) hatch overlay
+    assert len(view._timeline_canvas.ax.collections) == 2
+
+
+def test_artifact_links_emit_correct_categories(tmp_path, monkeypatch):
+    from PyQt5.QtWidgets import QPushButton
+    _app()
+    _write_native_sequences(tmp_path, spence=True)
+    monkeypatch.setattr(vs, "RESULTS", tmp_path)
+    view = vs.VideoStoriesView(cfg={"fps": 30.0})
+
+    emitted = []
+    view.navigate_artifacts_category.connect(lambda c: emitted.append(c))
+    buttons = {b.text(): b for b in view._compare_content.findChildren(QPushButton)}
+    buttons["Open Video Stories in Artifacts"].click()
+    buttons["Open Story Clips in Artifacts"].click()
+    buttons["Open Motif Clips in Artifacts"].click()
+    buttons["Open State Clips in Artifacts"].click()
+    assert emitted == ["Video Stories", "Video Stories", "Motifs", "Clips"]

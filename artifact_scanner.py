@@ -53,8 +53,8 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("comparison/motifs.csv", "Motifs"),
     ("comparison/motif_", "Motifs"),
     ("motifs/", "Motifs"),
-    # Sequences
-    ("sequences/", "Sequences"),
+    # Video Stories (sequence artifacts)
+    ("sequences/", "Video Stories"),
     # Transitions
     ("comparison/transition_", "Transitions"),
     # Comparison
@@ -124,9 +124,13 @@ def scan_artifacts(
                     continue
 
                 if scan_root != results_dir:
-                    category = "Clips"
                     ext = os.path.splitext(fname)[1].lower()
                     file_type = _EXT_TYPE.get(ext, "Other")
+                    category = (
+                        "Video Stories"
+                        if rel_path.replace("\\", "/").startswith("stories/")
+                        else "Clips"
+                    )
                     rel_path = os.path.join("clips", rel_path)
                 else:
                     category, file_type = categorize_file(rel_path)

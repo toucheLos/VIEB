@@ -78,6 +78,7 @@ class ArtifactsView(QWidget):
         self._pending_rows: list[dict] = []
         self._row_timer = QTimer(self)
         self._row_timer.timeout.connect(self._insert_next_rows)
+        self._pending_category: str | None = None
         self._build()
 
     # ------------------------------------------------------------------ build
@@ -212,6 +213,17 @@ class ArtifactsView(QWidget):
             self._data = data
         self._scan()
 
+    def select_category(self, category: str) -> None:
+        """Public hook for other views to navigate here with a category
+        preselected (e.g. Video Stories -> Artifacts). If a scan is already
+        in flight or hasn't happened yet, the category is applied once
+        _on_scan_done sees it among the freshly scanned categories."""
+        self._pending_category = category
+        if self._cat_filter.findText(category) >= 0:
+            self._cat_filter.setCurrentText(category)
+            self._pending_category = None
+        self._apply_filters()
+
     # -------------------------------------------------------------- scanning
     def _scan(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -258,7 +270,10 @@ class ArtifactsView(QWidget):
         self._cat_filter.addItem("All")
         for c in categories:
             self._cat_filter.addItem(c)
-        if current in categories or current == "All":
+        if self._pending_category and self._pending_category in categories:
+            self._cat_filter.setCurrentText(self._pending_category)
+            self._pending_category = None
+        elif current in categories or current == "All":
             self._cat_filter.setCurrentText(current)
         self._cat_filter.blockSignals(False)
 

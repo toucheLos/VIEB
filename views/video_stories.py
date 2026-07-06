@@ -374,6 +374,102 @@ def compute_state_occupancy(bouts_for_video: pd.DataFrame) -> dict[int, float]:
 
 
 # ---------------------------------------------------------------------------
+# Journey / comparison-layer helpers (Part B)
+# ---------------------------------------------------------------------------
+
+def subject_journey_rows(journeys_df: pd.DataFrame | None, subject) -> pd.DataFrame:
+    """Filter subject_journeys.csv rows to one subject. Caller sorts the
+    result via order_timepoints — this only selects the rows."""
+    if journeys_df is None or _is_blank(subject):
+        return pd.DataFrame()
+    return journeys_df[journeys_df["subject_id"].astype(str) == str(subject)].copy()
+
+
+def select_representative_video(
+    stories_df: pd.DataFrame | None,
+    subject,
+    timepoint,
+    condition=None,
+    prefer_video_id: str | None = None,
+) -> str | None:
+    """Pick one video_id for a (subject, timepoint[, condition]) cell —
+    prefer_video_id if it's a valid candidate (keeps a comparison strip
+    consistent with whatever the main view currently shows for that
+    timepoint), else the first video_id sorted."""
+    if stories_df is None or stories_df.empty:
+        return None
+    df = stories_df[stories_df["subject_id"].astype(str) == str(subject)]
+    df = df[df["timepoint"].astype(str) == str(timepoint)]
+    if not _is_blank(condition):
+        df = df[df["condition"].astype(str) == str(condition)]
+    if df.empty:
+        return None
+    candidates = sorted(df["video_id"].astype(str).tolist())
+    if prefer_video_id and str(prefer_video_id) in candidates:
+        return str(prefer_video_id)
+    return candidates[0]
+
+
+def load_possible_split_states(results_dir) -> set[int]:
+    """Defensive hook for a future transition-graph modularity check that
+    would flag a state as a possible cluster split. No such diagnostic
+    exists anywhere in this codebase today — this always returns an empty
+    set in practice; it exists so that if one is ever added (e.g. a
+    `possible_split_states` key in cluster_info.json), the timeline picks
+    it up with no further UI changes. Never raises."""
+    p = Path(results_dir) / "shared" / "cluster_info.json"
+    if not p.exists():
+        return set()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        raw = info.get("possible_split_states")
+        if raw is None:
+            return set()
+        if isinstance(raw, dict):
+            return {int(k) for k, v in raw.items() if v}
+        return {int(x) for x in raw}
+    except Exception:
+        return set()
+
+
+def draw_bout_strip(ax, bouts: pd.DataFrame, y0: float, y1: float, x_of, flagged_states: set[int] | None = None) -> None:
+    """Draw one broken_barh row of bouts onto ax spanning [y0, y1] in data
+    coordinates. x_of(row) -> (start, span) in whatever x-units the caller
+    wants (seconds for the main timeline, fraction-of-duration for the
+    compact comparison strips) — the same drawing routine backs both so
+    there is exactly one place that renders a "behavioral barcode."
+    Segments whose state is in flagged_states are drawn with a hatch
+    overlay and a heavier edge so a reviewer notices a suspect state
+    directly in its real occurrences (Part B item 9); with no flagged
+    states (the only case today) this is a no-op beyond the normal draw."""
+    if bouts is None or bouts.empty:
+        return
+    flagged_states = flagged_states or set()
+    n_states = int(bouts["state"].max()) + 1
+    colors = _state_colors(max(n_states, 10))
+    normal_spans, normal_colors = [], []
+    flagged_spans, flagged_colors = [], []
+    for _, row in bouts.iterrows():
+        span = x_of(row)
+        sid = int(row["state"])
+        color = colors[sid] if sid < len(colors) else "#607D8B"
+        if sid in flagged_states:
+            flagged_spans.append(span)
+            flagged_colors.append(color)
+        else:
+            normal_spans.append(span)
+            normal_colors.append(color)
+    if normal_spans:
+        ax.broken_barh(normal_spans, (y0, y1 - y0), facecolors=normal_colors, edgecolor="white", linewidth=0.5)
+    if flagged_spans:
+        ax.broken_barh(
+            flagged_spans, (y0, y1 - y0), facecolors=flagged_colors,
+            edgecolor="black", linewidth=1.2, hatch="///",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Small one-off clip generation worker
 # ---------------------------------------------------------------------------
 
@@ -411,6 +507,7 @@ class VideoStoriesView(QWidget):
     """Browse per-video behavioral state stories: timeline, summary, clips."""
 
     worker_running = pyqtSignal(bool)
+    navigate_artifacts_category = pyqtSignal(str)
 
     _CLIP_TARGET_SEC = 5.0
     _CLIP_MIN_SEC = 3.0
@@ -514,9 +611,78 @@ class VideoStoriesView(QWidget):
         self._legend_layout.setHorizontalSpacing(16)
         cl.addWidget(self._legend_widget)
 
+        self._build_compare_section(cl)
+
         cl.addStretch()
         scroll.setWidget(content)
         outer.addWidget(scroll, stretch=1)
+
+    def _build_compare_section(self, cl: QVBoxLayout) -> None:
+        """The Journey/comparison layer (Part B): collapsed by default so the
+        single-story view (Part A) stays the primary, uncluttered experience."""
+        self._compare_toggle = QPushButton("▶ Compare across time")
+        self._compare_toggle.setCheckable(True)
+        self._compare_toggle.setStyleSheet(
+            "QPushButton { text-align:left; border:none; background:transparent; "
+            "color:#1a73e8; font-weight:bold; padding:4px 0; }"
+        )
+        self._compare_toggle.toggled.connect(self._on_compare_toggled)
+        cl.addWidget(self._compare_toggle)
+
+        self._compare_content = QWidget()
+        compare_lay = QVBoxLayout(self._compare_content)
+        compare_lay.setContentsMargins(0, 4, 0, 0)
+        compare_lay.setSpacing(8)
+
+        compare_lay.addWidget(_section_title("Journey: state progression across timepoints"))
+        if _MPL:
+            self._compare_canvas = MplCanvas(figsize=(9, 2.2))
+            self._compare_canvas.setMinimumHeight(140)
+            compare_lay.addWidget(self._compare_canvas)
+            self._compare_placeholder = _placeholder(
+                "Not enough timepoints to compare for this subject."
+            )
+            compare_lay.addWidget(self._compare_placeholder)
+        else:
+            self._compare_canvas = None
+            self._compare_placeholder = None
+            compare_lay.addWidget(_placeholder("Install matplotlib to view comparison strips."))
+
+        compare_lay.addWidget(_section_title("Derived metrics over time"))
+        metrics_row = QHBoxLayout()
+        if _MPL:
+            self._metrics_canvas1 = MplCanvas(figsize=(4.3, 2.0))
+            self._metrics_canvas1.setMinimumHeight(150)
+            self._metrics_canvas2 = MplCanvas(figsize=(4.3, 2.0))
+            self._metrics_canvas2.setMinimumHeight(150)
+            metrics_row.addWidget(self._metrics_canvas1)
+            metrics_row.addWidget(self._metrics_canvas2)
+        else:
+            self._metrics_canvas1 = None
+            self._metrics_canvas2 = None
+            metrics_row.addWidget(_placeholder("Install matplotlib to view metric plots."))
+        compare_lay.addLayout(metrics_row)
+
+        compare_lay.addWidget(_section_title("Related artifacts"))
+        artifacts_row = QHBoxLayout()
+        for label, category in [
+            ("Open Video Stories in Artifacts", "Video Stories"),
+            ("Open Story Clips in Artifacts", "Video Stories"),
+            ("Open Motif Clips in Artifacts", "Motifs"),
+            ("Open State Clips in Artifacts", "Clips"),
+        ]:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _checked, c=category: self.navigate_artifacts_category.emit(c))
+            artifacts_row.addWidget(btn)
+        artifacts_row.addStretch()
+        compare_lay.addLayout(artifacts_row)
+
+        cl.addWidget(self._compare_content)
+        self._compare_content.setVisible(False)
+
+    def _on_compare_toggled(self, checked: bool) -> None:
+        self._compare_toggle.setText("▼ Compare across time" if checked else "▶ Compare across time")
+        self._compare_content.setVisible(checked)
 
     @staticmethod
     def _add_selector(layout: QHBoxLayout, label: str, combo: QComboBox) -> QWidget:
@@ -667,6 +833,7 @@ class VideoStoriesView(QWidget):
         self._render_summary()
         self._render_timeline()
         self._render_legend()
+        self._render_compare_section()
 
     # ─────────────────────────────────────────────────────────── render ──
 
@@ -738,17 +905,12 @@ class VideoStoriesView(QWidget):
             self._timeline_canvas.draw()
             return
 
-        n_states = int(bouts["state"].max()) + 1 if not bouts.empty else 1
-        colors = _state_colors(max(n_states, 10))
-        spans = []
-        facecolors = []
-        for _, row in bouts.iterrows():
-            start = float(row["start_sec"])
-            span = float(row["end_sec"]) - start
-            spans.append((start, span))
-            sid = int(row["state"])
-            facecolors.append(colors[sid] if sid < len(colors) else "#607D8B")
-        ax.broken_barh(spans, (0, 1), facecolors=facecolors, edgecolor="white", linewidth=0.5)
+        flagged = load_possible_split_states(RESULTS)
+        draw_bout_strip(
+            ax, bouts, 0, 1,
+            lambda row: (float(row["start_sec"]), float(row["end_sec"]) - float(row["start_sec"])),
+            flagged,
+        )
 
         label_threshold = duration * self._LABEL_WIDTH_FRACTION
         for _, row in bouts.iterrows():
@@ -783,6 +945,136 @@ class VideoStoriesView(QWidget):
             text = QLabel(f"{state_label_text(sid, self._state_labels)} — {occupancy[sid] * 100:.1f}%")
             self._legend_layout.addWidget(swatch, row_idx, 0)
             self._legend_layout.addWidget(text, row_idx, 1)
+
+    # ──────────────────────────────────────────── Compare across time ──
+
+    def _render_compare_section(self) -> None:
+        story = self._current_story or {}
+        subject = self._subject_combo.currentText() if self._subject_active else story.get("subject_id")
+        condition = self._condition_combo.currentText() if self._condition_active else None
+        self._render_journey_strips(subject, condition, story)
+        self._render_compare_metrics(subject)
+
+    def _render_journey_strips(self, subject, condition, story: dict) -> None:
+        if self._compare_canvas is None:
+            return
+        ax = self._compare_canvas.ax
+        ax.clear()
+
+        def _show_placeholder() -> None:
+            self._compare_placeholder.setVisible(True)
+            self._compare_canvas.setVisible(False)
+            self._compare_canvas.draw()
+
+        if _is_blank(subject) or self._stories is None:
+            _show_placeholder()
+            return
+
+        df = self._stories[self._stories["subject_id"].astype(str) == str(subject)]
+        if not _is_blank(condition):
+            df = df[df["condition"].astype(str) == str(condition)]
+        timepoints = order_timepoints(
+            sorted({str(v) for v in df["timepoint"].tolist() if not _is_blank(v)}), RESULTS
+        )
+        if len(timepoints) < 2:
+            _show_placeholder()
+            return
+
+        self._compare_placeholder.setVisible(False)
+        self._compare_canvas.setVisible(True)
+        flagged = load_possible_split_states(RESULTS)
+        current_video_id = str(story.get("video_id", ""))
+        current_timepoint = str(story.get("timepoint", ""))
+        for i, tp in enumerate(timepoints):
+            prefer = current_video_id if str(tp) == current_timepoint else None
+            video_id = select_representative_video(
+                self._stories, subject, tp, condition, prefer_video_id=prefer
+            )
+            if not video_id:
+                continue
+            row_bouts = self._bouts[self._bouts["video_id"].astype(str) == str(video_id)]
+            row_stories = self._stories[self._stories["video_id"].astype(str) == str(video_id)]
+            duration = float(row_stories.iloc[0].get("duration_sec") or 0.0) if not row_stories.empty else 0.0
+            if duration <= 0 or row_bouts.empty:
+                continue
+            draw_bout_strip(
+                ax, row_bouts, i, i + 1,
+                lambda row, d=duration: (
+                    float(row["start_sec"]) / d,
+                    (float(row["end_sec"]) - float(row["start_sec"])) / d,
+                ),
+                flagged,
+            )
+
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, len(timepoints))
+        ax.set_yticks([i + 0.5 for i in range(len(timepoints))])
+        ax.set_yticklabels([format_label_value(tp) for tp in timepoints])
+        ax.invert_yaxis()
+        ax.set_xlabel("Fraction of session duration")
+        self._compare_canvas.draw()
+
+    def _render_compare_metrics(self, subject) -> None:
+        if self._metrics_canvas1 is None or self._metrics_canvas2 is None:
+            return
+        ax1 = self._metrics_canvas1.ax
+        ax2 = self._metrics_canvas2.ax
+        ax1.clear()
+        ax2.clear()
+
+        rows = subject_journey_rows(self._journeys, subject)
+        if rows.empty:
+            for ax in (ax1, ax2):
+                ax.text(0.5, 0.5, "No journey data for this subject", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=8)
+            self._metrics_canvas1.draw()
+            self._metrics_canvas2.draw()
+            return
+
+        tp_values = order_timepoints(rows["timepoint"].tolist(), RESULTS)
+        rows_by_tp = rows.set_index(rows["timepoint"].astype(str))
+        ordered_tp = [tp for tp in tp_values if str(tp) in rows_by_tp.index]
+        ordered_rows = [rows_by_tp.loc[str(tp)] for tp in ordered_tp]
+        ordered_rows = [r.iloc[0] if isinstance(r, pd.DataFrame) else r for r in ordered_rows]
+
+        x = list(range(len(ordered_tp)))
+        xt = [format_label_value(tp) for tp in ordered_tp]
+        trans_rate = [float(pd.to_numeric(r.get("transition_rate"), errors="coerce")) for r in ordered_rows]
+        entropy = [float(pd.to_numeric(r.get("state_entropy"), errors="coerce")) for r in ordered_rows]
+        dist = [float(pd.to_numeric(r.get("distance_from_baseline"), errors="coerce")) for r in ordered_rows]
+        dom_states = [r.get("dominant_state") for r in ordered_rows]
+
+        ax1.plot(x, trans_rate, marker="o", color="#4a90d9", linewidth=1.5, label="transition rate")
+        ax1.plot(x, entropy, marker="o", color="#e67e22", linewidth=1.5, label="state entropy")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(xt, fontsize=7)
+        ax1.legend(fontsize=7, loc="best")
+        ax1.set_title("Transition rate & state entropy", fontsize=9)
+
+        n_states = 10
+        try:
+            n_states = max((int(ds) for ds in dom_states if not _is_blank(ds)), default=9) + 1
+        except (TypeError, ValueError):
+            pass
+        colors = _state_colors(max(n_states, 10))
+        for label, ds in zip(ax1.get_xticklabels(), dom_states):
+            if _is_blank(ds):
+                continue
+            try:
+                sid = int(ds)
+            except (TypeError, ValueError):
+                continue
+            c = colors[sid] if sid < len(colors) else (0.4, 0.4, 0.4, 1.0)
+            label.set_color(tuple(c))
+            label.set_fontweight("bold")
+
+        ax2.plot(x, dist, marker="o", color="#8e44ad", linewidth=1.5)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(xt, fontsize=7)
+        ax2.set_title("Distance from baseline", fontsize=9)
+
+        self._metrics_canvas1.draw()
+        self._metrics_canvas2.draw()
 
     # ────────────────────────────────────────────────────── click-to-play ──
 

@@ -18,7 +18,7 @@ def test_categorize_csv_png_json_mp4():
     assert categorize_file("diagnostics/cluster_overview.png") == ("Diagnostics", "Image")
     assert categorize_file("diagnostics/umap_embedding_by_state.png") == ("Diagnostics", "Image")
     assert categorize_file("motifs/motif_sequences.csv") == ("Motifs", "CSV")
-    assert categorize_file("sequences/video_stories.csv") == ("Sequences", "CSV")
+    assert categorize_file("sequences/video_stories.csv") == ("Video Stories", "CSV")
     assert categorize_file("comparison/transition_table.csv") == ("Transitions", "CSV")
     assert categorize_file("comparison/state_by_context.png") == ("Comparison", "Image")
     assert categorize_file("comparison/contrast_vector_comparison.png") == ("Comparison", "Image")
@@ -86,6 +86,21 @@ def test_scan_includes_bulk_when_requested(tmp_path):
     artifacts = scan_artifacts(str(tmp_path), include_bulk=True)
     names = [a["name"] for a in artifacts]
     assert "video1_labels.npy" in names
+
+
+def test_scan_categorizes_story_clips_separately_from_state_clips(tmp_path):
+    results_dir = tmp_path / "results"
+    clips_dir = tmp_path / "clips"
+    results_dir.mkdir()
+    (clips_dir / "stories" / "vid1").mkdir(parents=True)
+    (clips_dir / "state_0").mkdir(parents=True)
+    (clips_dir / "stories" / "vid1" / "f0-150.mp4").write_bytes(b"x")
+    (clips_dir / "state_0" / "longest_01.mp4").write_bytes(b"x")
+
+    artifacts = scan_artifacts(str(results_dir), clips_dir=str(clips_dir))
+    by_rel = {a["rel_path"].replace("\\", "/"): a["category"] for a in artifacts}
+    assert by_rel["clips/stories/vid1/f0-150.mp4"] == "Video Stories"
+    assert by_rel["clips/state_0/longest_01.mp4"] == "Clips"
 
 
 def test_scan_empty_dir(tmp_path):

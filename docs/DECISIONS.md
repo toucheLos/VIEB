@@ -491,3 +491,48 @@ produces these files via `sequence_artifacts.build_sequence_artifacts`),
 not a nonexistent `--stories` flag.
 **Related:** `views/video_stories.py`, `views/analysis.py`,
 `tests/test_video_stories.py`, #7, #8
+
+## 50 — Video Stories Part B: Journey comparison layer, "Video Stories" Artifacts category
+**Decision/finding:** Added a collapsed-by-default "Compare across time"
+section to the Video Stories panel: compact per-timepoint mini-timelines
+for the selected subject (x-axis normalized to fraction of session
+duration so sessions of different lengths compare proportionally; visual
+only, no click-to-play — confirmed with the user), plus two small plots
+of `transition_rate`/`state_entropy`/`distance_from_baseline` read
+directly from `results/sequences/subject_journeys.csv` columns (never
+recomputed from bouts), with dominant-state shown by coloring each
+timepoint's x-tick label rather than a third subplot. Both the main
+Part A timeline and the new comparison strips share one drawing routine
+(`draw_bout_strip`) so there's exactly one place that renders the
+behavioral-barcode look, and both route through a new
+`load_possible_split_states()` hook that hatches a state's segments if a
+`possible_split_states` key ever appears in `cluster_info.json` — that
+key does not exist anywhere in the codebase today (no transition-graph
+modularity check has been built), so this is a no-op today by design,
+per the task's "skip this item silently" instruction.
+
+Also renamed `artifact_scanner.py`'s `("sequences/", "Sequences")`
+category rule to `("sequences/", "Video Stories")`, and split the
+previously-uniform `clips/` → `"Clips"` categorization so
+`clips/stories/<video_id>/` also reports category "Video Stories" (state
+clips under `clips/state_<id>/` are unchanged, still "Clips"; motif clips
+are unchanged, still "Motifs") — giving stories a dedicated Artifacts
+home instead of a shared generic "Sequences" bucket, confirmed with the
+user. `views/artifacts.py` gained a public `select_category(name)` +
+pending-category mechanism (handles the case where Artifacts' async scan
+hasn't finished yet) so other views can navigate in with a category
+preselected, mirroring the existing `_navigate_to_help(section_id)`
+pattern. The Video Stories panel's new "Related artifacts" row links
+"Video Stories data"/"Story Clips" → category "Video Stories", "Motif
+Clips" → existing "Motifs", "State Clips" → existing "Clips".
+**Why:** Comparison strips exist to answer "does this subject's state
+progression look more baseline-like over time" at a glance — a dense,
+literally-scaled full timeline per row would defeat that at the sizes
+this section renders at. Reusing `subject_journeys.csv` rather than
+recomputing keeps the panel from duplicating the aggregation logic
+already in `sequence_artifacts.py`. The `possible_split` hook exists so a
+future diagnostic doesn't require new UI plumbing, not because that
+diagnostic is being built now.
+**Related:** `views/video_stories.py`, `artifact_scanner.py`,
+`views/artifacts.py`, `views/analysis.py`, `user_interface.py`,
+`tests/test_video_stories.py`, `tests/test_artifact_scanner.py`, #49

@@ -5700,6 +5700,7 @@ class MainWindow(QMainWindow):
             self._av = AnalysisView(self.cfg)
             self._av.worker_running.connect(lambda running: self._set_running_from_source(running, self._av))
             self._av.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
+            self._av.navigate_artifacts_category.connect(self._navigate_to_artifacts_category)
             self._replace_view(name, self._av)
         elif name == "Artifacts":
             from views.artifacts import ArtifactsView
@@ -5794,6 +5795,11 @@ class MainWindow(QMainWindow):
         self._switch("Help")
         if self._hv is not None:
             self._hv.scroll_to_section(section_id)
+
+    def _navigate_to_artifacts_category(self, category: str):
+        self._switch("Artifacts")
+        if self._artv is not None:
+            self._artv.select_category(category)
 
     # ── File watcher — auto-refresh when pipeline writes new results ──────────
 

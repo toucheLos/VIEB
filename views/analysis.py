@@ -176,6 +176,7 @@ def _table_tool_button(symbol: str, tooltip: str) -> QToolButton:
 class AnalysisView(QWidget):
     worker_running = pyqtSignal(bool)
     navigate_cluster_runs = pyqtSignal()
+    navigate_artifacts_category = pyqtSignal(str)
 
     def __init__(self, cfg: dict | None = None):
         super().__init__()
@@ -2369,6 +2370,7 @@ class AnalysisView(QWidget):
         from views.video_stories import VideoStoriesView
         self._vs_widget = VideoStoriesView(self.cfg)
         self._vs_widget.worker_running.connect(self._on_video_stories_running)
+        self._vs_widget.navigate_artifacts_category.connect(self.navigate_artifacts_category.emit)
         return self._vs_widget
 
     def _on_video_stories_running(self, running: bool) -> None:
