@@ -466,3 +466,28 @@ most recent vote.
 **Related:** `views/state_characterization.py:_save_state_label`,
 `_save_video_category_vote`, `_latest_category_for_state`,
 `generate_clips.py:cmd_clips`
+
+## 49 — Video Stories added as a single new Analysis tab, not the full Sequences reorg
+**Decision/finding:** Added a "Video Stories" tab to Analysis' CORE ANALYSIS
+section (`views/analysis.py`, new `views/video_stories.py`), reading
+`results/sequences/video_stories.csv` + `video_story_bouts.csv` (falling back
+to `results/characterization/bouts.csv` + `results/comparison/summary_table.csv`
+when the sequence artifacts haven't been generated yet). Per-video state
+timeline (matplotlib `broken_barh`), story summary card, state legend, and
+click-to-play (fixed-window clip generation reusing `generate_clips._export_clip`,
+deterministic path under `clips/stories/<video_id>/`, skips regeneration if
+that path already exists). Does not add the "Motifs" / "Transitions" /
+"Bout Duration" tabs or a nested "Sequences" section — the user explicitly
+scoped this pass to Video Stories only; those remain future work under #8.
+**Why:** #8 already decided on a `Sequences` panel as part of the broader
+Analysis reorg, but building all four sub-tabs in one pass risked touching
+the working "Transitions & Motifs" tab unnecessarily. State labels are read
+from `results/validation/state_labels.csv` (the real persistence layer used
+by State Characterization, per `_load_saved_state_labels`), not a
+`state_annotations.json` that doesn't exist anywhere in the codebase — the
+original task spec named a file that was never built. Similarly, the
+empty-state message points at `python compare.py --report` (which actually
+produces these files via `sequence_artifacts.build_sequence_artifacts`),
+not a nonexistent `--stories` flag.
+**Related:** `views/video_stories.py`, `views/analysis.py`,
+`tests/test_video_stories.py`, #7, #8

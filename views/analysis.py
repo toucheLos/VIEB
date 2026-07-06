@@ -188,7 +188,7 @@ class AnalysisView(QWidget):
         self._t2_current_clip_path: Path | None = None
         # Each entry is True when that tab needs a redraw (indexed by stack position).
         # Starts True so the first visit always renders.
-        self._tab_dirty = [True] * 10
+        self._tab_dirty = [True] * 11
         import vieb_config as _vc
         self._cond_a = _vc.get_condition_a_label()
         self._cond_b = _vc.get_condition_b_label()
@@ -235,20 +235,21 @@ class AnalysisView(QWidget):
         #   1  State Characterization                → stack 0
         #   2  State Comparison                      → stack 1
         #   3  Transitions & Motifs                  → stack 2
-        #   4  section header "OPTIONAL ANALYSIS"    (non-selectable)
-        #   5  Cohort Analysis                       → stack 3
-        #   6  Quantification                        → stack 4
-        #   7  [metric label]                        → stack 5
-        #   8  Jess Correlation                      → stack 6
-        #   9  Event Alignment                       → stack 7
-        #  10  Column Mapping                        → stack 8
+        #   4  Video Stories                          → stack 9
+        #   5  section header "OPTIONAL ANALYSIS"    (non-selectable)
+        #   6  Cohort Analysis                       → stack 3
+        #   7  Quantification                        → stack 4
+        #   8  [metric label]                        → stack 5
+        #   9  Jess Correlation                      → stack 6
+        #  10  Event Alignment                       → stack 7
+        #  11  Column Mapping                        → stack 8
 
-        self._separator_rows: set[int] = {0, 4}
+        self._separator_rows: set[int] = {0, 5}
         self._row_to_stack: dict[int, int] = {
-            1: 0, 2: 1, 3: 2,
-            5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 10: 8,
+            1: 0, 2: 1, 3: 2, 4: 9,
+            6: 3, 7: 4, 8: 5, 9: 6, 10: 7, 11: 8,
         }
-        self._metric_label_row: int = 7
+        self._metric_label_row: int = 8
 
         def _add_section(label: str) -> None:
             item = QListWidgetItem(label)
@@ -268,6 +269,7 @@ class AnalysisView(QWidget):
         _add_tab("State Characterization")
         _add_tab("State Comparison")
         _add_tab("Transitions & Motifs")
+        _add_tab("Video Stories")
         _add_section("OPTIONAL ANALYSIS")
         _add_tab("Cohort Analysis")
         _add_tab("Quantification")
@@ -294,6 +296,7 @@ class AnalysisView(QWidget):
             self._build_tab6,              # stack 6: Jess Correlation
             self._build_tab7,              # stack 7: Event Alignment
             self._build_tab0,              # stack 8: Column Mapping
+            self._build_tab_stories,       # stack 9: Video Stories
         ]
         self._tab_built = [False] * len(self._tab_builders)
         for _ in self._tab_builders:
@@ -1005,6 +1008,7 @@ class AnalysisView(QWidget):
             self._load_tab6,              # stack 6: Jess Correlation
             self._load_tab7,              # stack 7: Event Alignment
             self._load_tab0,              # stack 8: Column Mapping
+            self._load_tab_stories,        # stack 9: Video Stories
         ]
 
     def _ensure_tab_built(self, stack_idx: int) -> None:
@@ -1049,7 +1053,7 @@ class AnalysisView(QWidget):
 
     def _mark_all_dirty(self) -> None:
         """Flag every tab for redraw on next visit."""
-        self._tab_dirty = [True] * 10
+        self._tab_dirty = [True] * 11
 
     # ────────────────────────────────────────────────── Data loading ──
 
@@ -2358,6 +2362,21 @@ class AnalysisView(QWidget):
     def _load_tab8(self) -> None:
         if self._data:
             self._scv_widget.update_data(self._data)
+
+    # ──────────────────────────────────────── Tab 9: Video Stories ──
+
+    def _build_tab_stories(self) -> QWidget:
+        from views.video_stories import VideoStoriesView
+        self._vs_widget = VideoStoriesView(self.cfg)
+        self._vs_widget.worker_running.connect(self._on_video_stories_running)
+        return self._vs_widget
+
+    def _on_video_stories_running(self, running: bool) -> None:
+        self._running_command = getattr(self._vs_widget, "_running_command", "") if running else ""
+        self.worker_running.emit(running)
+
+    def _load_tab_stories(self) -> None:
+        self._vs_widget.refresh()
 
     def notify_cluster_changed(self) -> None:
         """Refresh the State Characterization view after the active run changes."""
