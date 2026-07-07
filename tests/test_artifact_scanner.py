@@ -23,7 +23,7 @@ def test_categorize_csv_png_json_mp4():
     assert categorize_file("comparison/state_by_context.png") == ("Comparison", "Image")
     assert categorize_file("comparison/contrast_vector_comparison.png") == ("Comparison", "Image")
     assert categorize_file("shared/cluster_info.json") == ("Diagnostics", "JSON")
-    assert categorize_file("characterization/bouts.csv") == ("Bouts", "CSV")
+    assert categorize_file("characterization/bouts.csv") == ("State Characterization", "CSV")
 
 
 def test_categorize_states():
@@ -41,7 +41,7 @@ def test_categorize_cluster_runs():
 
 def test_categorize_metadata():
     assert categorize_file("shared/preprocessor.pkl") == ("Metadata", "Model")
-    assert categorize_file("features/index.json") == ("Metadata", "JSON")
+    assert categorize_file("features/index.json") == ("Features", "JSON")
 
 
 def test_categorize_video_as_clips():
