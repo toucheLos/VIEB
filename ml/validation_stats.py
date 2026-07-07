@@ -89,11 +89,26 @@ def _repeatability_for_state(values: pd.Series, animals: pd.Series) -> dict:
     }
 
 
+def _mean_R_over_states(df: pd.DataFrame, state_cols: list[str], animal_col: str) -> Optional[float]:
+    """Mean adjusted R across all scorable states, or None if none are scorable."""
+    r_values = []
+    for col in state_cols:
+        if col not in df.columns:
+            continue
+        result = _repeatability_for_state(df[col], df[animal_col])
+        if not result.get("skipped"):
+            r_values.append(result["R"])
+    return float(np.mean(r_values)) if r_values else None
+
+
 def compute_repeatability_R(
     df: pd.DataFrame,
     state_cols: list[str],
     animal_col: str = "animal_id",
     session_col: Optional[str] = "day",
+    n_boot: int = 0,
+    ci: float = 0.95,
+    seed: int = 42,
 ) -> dict:
     """Compute per-state adjusted repeatability R across repeated sessions.
 
@@ -106,11 +121,19 @@ def compute_repeatability_R(
     session_col : column identifying the repeated session/timepoint; only
         used to validate that repeats actually exist (>=2 distinct values
         per animal) — the ANOVA itself just needs >=2 rows per animal.
+    n_boot : if > 0, also compute a bootstrap confidence interval for
+        ``mean_R`` by resampling animals (the repeated-measures unit) with
+        replacement ``n_boot`` times. 0 (default) preserves the original
+        behavior and return shape exactly — ``cmd_report`` relies on this.
+    ci : central confidence level for the bootstrap interval (default 0.95).
+    seed : RNG seed for the bootstrap resampling.
 
     Returns
     -------
     dict: {"per_state": {state_col: {...}}, "mean_R": float | None,
            "n_states_scored": int, "skipped": bool, "reason": str | None}
+        plus, when ``n_boot > 0`` and ``mean_R`` is not None:
+           {"R_ci_low": float, "R_ci_high": float, "n_boot": int}
     """
     if animal_col not in df.columns:
         return {"skipped": True, "reason": f"no '{animal_col}' column in metadata", "per_state": {}, "mean_R": None}
@@ -137,13 +160,41 @@ def compute_repeatability_R(
             r_values.append(result["R"])
 
     mean_r = float(np.mean(r_values)) if r_values else None
-    return {
+    out = {
         "skipped": mean_r is None,
         "reason": None if mean_r is not None else "no state had sufficient repeated-measures data",
         "per_state": per_state,
         "mean_R": mean_r,
         "n_states_scored": len(r_values),
     }
+
+    if n_boot > 0 and mean_r is not None:
+        # Resample whole animals (not rows) with replacement — the animal is
+        # the repeated-measures unit, so the CI must reflect uncertainty in
+        # which animals were sampled, not which of an animal's sessions.
+        rng = np.random.default_rng(seed)
+        animals = df[animal_col].dropna().unique()
+        boot_means = []
+        for _ in range(n_boot):
+            drawn = rng.choice(animals, size=len(animals), replace=True)
+            # Concatenate each drawn animal's rows; relabel so repeated draws
+            # of the same animal are treated as distinct individuals.
+            parts = []
+            for new_id, a in enumerate(drawn):
+                sub = df[df[animal_col] == a].copy()
+                sub[animal_col] = f"__boot_{new_id}"
+                parts.append(sub)
+            boot_df = pd.concat(parts, ignore_index=True)
+            bm = _mean_R_over_states(boot_df, state_cols, animal_col)
+            if bm is not None:
+                boot_means.append(bm)
+        if boot_means:
+            alpha = (1.0 - ci) / 2.0
+            out["R_ci_low"] = float(np.quantile(boot_means, alpha))
+            out["R_ci_high"] = float(np.quantile(boot_means, 1.0 - alpha))
+            out["n_boot"] = len(boot_means)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -244,4 +295,110 @@ def compute_transition_modularity(
         "communities": {int(k): int(v) for k, v in community_of.items()},
         "bridge_scores": {int(k): float(v) for k, v in bridge_scores.items()},
         "possible_split_states": possible_split,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature-ablation metrics — DBCV (internal density validity) and ARI
+# stability (across bootstrap re-clustering). See MATH.md §10 and
+# feature_ablation.py.
+# ---------------------------------------------------------------------------
+
+def compute_dbcv(embedding: np.ndarray, labels: np.ndarray) -> dict:
+    """Density-Based Clustering Validation score (Moulavi et al. 2014).
+
+    DBCV in [-1, 1] measures how well a clustering separates dense regions
+    with sparse boundaries between them — directly the quantity the
+    "too many features flatten density contrast" hypothesis is about. A
+    higher DBCV means denser, better-separated clusters. Computed on the
+    same space the clustering was performed in (the UMAP embedding), with
+    noise points (label -1) handled natively by the library.
+
+    Returns {"dbcv": float | None, "skipped": bool, "reason": str | None}.
+    """
+    labels = np.asarray(labels)
+    n_clusters = len(np.unique(labels[labels >= 0]))
+    if n_clusters < 2:
+        return {"dbcv": None, "skipped": True, "reason": "fewer than 2 non-noise clusters"}
+
+    embedding = np.asarray(embedding, dtype=np.float64)
+    try:
+        from hdbscan.validity import validity_index
+        score = float(validity_index(embedding, labels.astype(np.int64)))
+    except Exception as e:  # numerical degeneracy, all-noise slices, etc.
+        return {"dbcv": None, "skipped": True, "reason": f"validity_index failed: {e}"}
+
+    if not np.isfinite(score):
+        return {"dbcv": None, "skipped": True, "reason": "non-finite DBCV"}
+    return {"dbcv": score, "skipped": False, "reason": None}
+
+
+def compute_ari_stability(
+    recluster_fn,
+    n_samples: int,
+    n_runs: int = 10,
+    subsample: float = 0.8,
+    seed: int = 42,
+) -> dict:
+    """Cluster stability = mean pairwise Adjusted Rand Index across
+    bootstrap-subsample re-clusterings.
+
+    A feature set that produces a *stable* partition — one that barely
+    changes when the data is resampled — is more trustworthy than one whose
+    clusters reshuffle every run. This complements DBCV (an internal
+    density metric) with a robustness signal.
+
+    Parameters
+    ----------
+    recluster_fn : callable ``(row_indices: np.ndarray) -> labels`` that
+        re-runs the standardize→UMAP→HDBSCAN pipeline on the given subset of
+        rows and returns a label array aligned to ``row_indices``. Supplied
+        by the caller (feature_ablation.py's subset runner) so this function
+        stays pipeline-agnostic.
+    n_samples : total number of rows available to subsample from.
+    n_runs : number of resampled re-clusterings (default 10).
+    subsample : fraction of rows drawn (without replacement) per run.
+    seed : RNG seed.
+
+    Returns {"ari_stability": float | None, "ari_std": float | None,
+             "n_pairs": int, "skipped": bool, "reason": str | None}.
+    ARI is computed on the row indices shared between each pair of runs.
+    """
+    from sklearn.metrics import adjusted_rand_score
+
+    if n_samples < 4 or n_runs < 2:
+        return {"ari_stability": None, "ari_std": None, "n_pairs": 0,
+                "skipped": True, "reason": "too few samples or runs"}
+
+    rng = np.random.default_rng(seed)
+    size = max(2, int(round(subsample * n_samples)))
+
+    run_labels: list[dict[int, int]] = []
+    for _ in range(n_runs):
+        idx = np.sort(rng.choice(n_samples, size=size, replace=False))
+        labels = recluster_fn(idx)
+        if labels is None or len(labels) != len(idx):
+            continue
+        run_labels.append(dict(zip(idx.tolist(), np.asarray(labels).tolist())))
+
+    aris = []
+    for i in range(len(run_labels)):
+        for j in range(i + 1, len(run_labels)):
+            shared = sorted(set(run_labels[i]) & set(run_labels[j]))
+            if len(shared) < 2:
+                continue
+            a = [run_labels[i][k] for k in shared]
+            b = [run_labels[j][k] for k in shared]
+            aris.append(adjusted_rand_score(a, b))
+
+    if not aris:
+        return {"ari_stability": None, "ari_std": None, "n_pairs": 0,
+                "skipped": True, "reason": "no overlapping run pairs"}
+
+    return {
+        "ari_stability": float(np.mean(aris)),
+        "ari_std": float(np.std(aris)),
+        "n_pairs": len(aris),
+        "skipped": False,
+        "reason": None,
     }

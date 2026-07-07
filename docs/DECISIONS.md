@@ -619,3 +619,41 @@ cuML/DLC dependency separation from #32.
 **Related:** `ml/validation_stats.py`, `compare.py cmd_report()`,
 `views/video_stories.py load_possible_split_states()`, `pyproject.toml`,
 #32, #50, #51
+
+## 53 — Feature ablation harness + DBCV/ARI/R-CI metrics (evidence, not a default change)
+**Decision/finding:** Added `feature_ablation.py` — a per-project harness
+that re-runs the unchanged standardize→UMAP→HDBSCAN pipeline on
+column-masked subsets of the already-extracted feature matrix (never
+re-extracting, never pooling projects, never adding feature families) to
+test whether VIEB's 91-feature default is *too large* (curse of
+dimensionality flattening density contrast) rather than too small. It runs
+leave-one-family-out, a greedy cumulative minimal-set search, and Kendall
+shape-space as a replacement candidate, scoring each subset on DBCV,
+repeatability R (with a bootstrap CI), ARI stability, modularity Q, noise
+fraction, and n_states. Three new metrics were added to
+`ml/validation_stats.py`: `compute_dbcv` (wraps `hdbscan.validity.validity_index`),
+`compute_ari_stability` (mean pairwise Adjusted Rand Index across
+bootstrap re-clusterings), and an optional `n_boot` bootstrap-CI arm on
+`compute_repeatability_R` (default 0 preserves the existing return shape
+exactly, so `cmd_report` is untouched). Output is a flat per-project CSV
+`results/ablation/feature_ablation_<project>.csv`, **not** the run registry
+(a ~25-config-per-project study would flood `results/runs/`, and its typed
+`ClusterRunManifest` reader drops custom fields). The Part A standardization
+audit was run and **passes** — every feature column is genuinely z-scored
+before UMAP, nothing bypasses it (documented in `MATH.md` §9, enforced by a
+runtime assertion in the harness). **PROPOSED (not applied):** once
+`feature_ablation.py` is run on real Luna and Spence data and
+`docs/FEATURE_ABLATION_FINDINGS.md` is filled in, the recommended minimal
+feature set per project becomes the evidence for a *future* human decision
+about changing the production default. The default feature set was **not**
+changed by this work. If Spence's stride/periodicity structure yields no
+well-separated, repeatable states under any subset, that is flagged as a
+"clustering may be insufficient" finding for a future decision — no
+stride-specific machinery is built off it (confirm-before-building).
+**Why:** the hypothesis (too many features, not too few) is testable and
+falsifiable; building the harness + metrics makes it measurable, but which
+minimal set to adopt is a scientific judgment (biological interpretability),
+not an automatable one, so the code deliberately declares no winner.
+**Related:** `feature_ablation.py`, `ml/validation_stats.py`,
+`docs/FEATURE_ABLATION_FINDINGS.md`, `MATH.md` §9/§10,
+`tests/test_feature_ablation.py`, #2, #6, #51, #52

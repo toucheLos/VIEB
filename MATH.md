@@ -472,6 +472,111 @@ skips gracefully when there are no cross-state transitions at all.
 
 ---
 
+## 9. Standardization audit **(new)**
+
+**Where:** documented finding; enforced in code by
+`feature_ablation._standardize`'s runtime assertion, and by the design of
+`compare.py cmd_cluster` / `ml/preprocessing.py`.
+**Why this matters:** UMAP and HDBSCAN operate on Euclidean distances. If a
+single feature escaped standardization — e.g. a raw pixel distance (variance
+in the thousands) sitting next to a normalized entropy in [0,1] — that one
+feature would dominate every pairwise distance and silently swamp all the
+others, flattening the density contrast the clustering depends on. So before
+any dimensionality study, one must confirm every feature is genuinely
+standardized.
+
+**Audit result: PASS.** `cmd_cluster` builds the full pooled `(T, F)` matrix
+(every feature column, no drops), fits `BehaviorPreprocessor(use_pca=False)`
+→ `StandardScaler` on that exact matrix, and feeds the *entire* standardized
+matrix to UMAP — nothing is concatenated after standardization, no raw
+column reaches UMAP, and the train/test split is row-wise only (never drops
+columns). `StandardScaler` z-scores each column independently
+$$z_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j}$$
+with zero-variance columns mapped to 0 (sklearn sets $\sigma_j := 1$ when
+$\sigma_j = 0$). Outlier clipping (±5σ) and NaN/Inf handling apply uniformly
+at transform. **No feature bypasses standardization.**
+
+**Enforced, not just asserted in prose:** the ablation harness re-checks
+this after every standardization — each column must have $|\text{mean}| <
+0.5$ and $|\text{std} - 1| < 0.5$ (or be a handled zero-variance column),
+raising `AssertionError` otherwise. A bug that let a feature through raw
+would fail the study immediately rather than silently corrupting results.
+
+---
+
+## 10. Feature ablation & dimensionality study **(new)**
+
+**Where:** `feature_ablation.py` + three new metrics in
+`ml/validation_stats.py`.
+**Hypothesis:** clustering conflates distinct behaviors because there are
+*too many* features — at 91 features the curse of dimensionality flattens
+density contrast, so the few high-signal dimensions (per-keypoint speeds)
+are drowned out. The study measures whether cutting features *improves*
+cluster validity.
+
+### 10.1 Feature-family grouping
+Columns are partitioned into ablatable families read from
+`index.json._meta.feature_names` (authoritative, order == column order),
+using a **`_window`-suffix-first** rule to resolve naming collisions (the
+temporal-window names `speed_*_window`/`dist_*_window`/`angular_vel_*_window`
+would otherwise be swept into the per-keypoint-speed / pairwise-distance /
+angular-velocity families by a naive prefix match). See `MATH.md` §1 for the
+families themselves.
+
+### 10.2 DBCV — Density-Based Clustering Validation
+**Why this math:** DBCV (Moulavi et al. 2014) is the *internal* cluster
+validity index that directly quantifies density-based separation — exactly
+the quantity the hypothesis is about (density contrast). Unlike silhouette
+(which assumes convex, globular clusters), DBCV is built for the
+density/shape clusters HDBSCAN produces and handles noise points natively.
+**Math (brief):** for each cluster it computes a *density sparseness*
+(the maximum edge in the cluster's internal minimum spanning tree over
+mutual-reachability distances) and, between clusters, a *density
+separation* (the minimum mutual-reachability distance between them); the
+per-cluster validity is their normalized difference, and DBCV is the
+size-weighted average over clusters, in $[-1, 1]$ (higher = denser,
+better-separated). Computed on the UMAP embedding with the HDBSCAN labels
+via `hdbscan.validity.validity_index`; skips gracefully below 2 clusters.
+
+### 10.3 ARI stability
+**Why this math:** a trustworthy feature set produces a partition that
+barely changes when the data is resampled; one that reshuffles every run is
+capturing noise. This is a robustness signal complementing DBCV's
+density signal.
+**Math:** re-cluster $n$ bootstrap subsamples (default 5 runs, 80% of rows
+each), and for every pair of runs compute the **Adjusted Rand Index** on
+their shared rows,
+$$\text{ARI} = \frac{\text{RI} - \mathbb{E}[\text{RI}]}{\max(\text{RI}) - \mathbb{E}[\text{RI}]}$$
+where the Rand Index RI is the fraction of point-pairs that two partitions
+agree on (both-together or both-apart), and the adjustment subtracts the
+agreement expected by chance (so independent labelings score ≈0, identical
+ones score 1). The stability metric is the mean pairwise ARI
+(`sklearn.metrics.adjusted_rand_score`).
+
+### 10.4 Bootstrap CI for repeatability R
+**Why:** the R point estimate (§8.1) says nothing about how uncertain it is
+given a finite number of animals. A confidence interval makes "subset A's R
+is higher than subset B's" a defensible claim rather than noise.
+**Math:** resample **whole animals** (the repeated-measures unit) with
+replacement $B$ times; recompute mean-R on each resample (relabeling
+repeated draws as distinct individuals so the ANOVA structure is preserved);
+report the central $(1-\alpha)$ percentile interval of the $B$ bootstrap
+R values. Resampling animals — not rows — is essential: the uncertainty
+being quantified is "which animals happened to be in the study," not "which
+of an animal's sessions." Enabled by `compute_repeatability_R(..., n_boot=B)`;
+`n_boot=0` (default) preserves the original point-estimate behavior exactly.
+
+### 10.5 The studies
+Leave-one-family-out (remove each family; if metrics don't degrade, the
+family is dilutive), greedy cumulative build-up (start from the strongest
+single family, add families only while they improve an aggregate score, to
+find the minimal set), and Kendall shape-space (§7.1) evaluated as a
+**replacement** for the whole feature set. No winner is declared in code —
+the aggregate score only *orders* the greedy search; the final choice is a
+scientific judgment recorded in `docs/FEATURE_ABLATION_FINDINGS.md`.
+
+---
+
 ## Summary table
 
 | Method | File | Library | New? |
@@ -494,3 +599,7 @@ skips gracefully when there are no cross-state transitions at all.
 | **Persistent homology** | `ml/representations/topological.py` | ripser | **new** |
 | **Nakagawa-Schielzeth repeatability (R)** | `ml/validation_stats.py` | numpy/scipy (ANOVA) | **new** |
 | **Transition-graph modularity (Louvain)** | `ml/validation_stats.py` | networkx | **new** |
+| **DBCV (density-based cluster validity)** | `ml/validation_stats.py` | hdbscan.validity | **new** |
+| **ARI stability (bootstrap re-clustering)** | `ml/validation_stats.py` | scikit-learn | **new** |
+| **Bootstrap CI for repeatability R** | `ml/validation_stats.py` | numpy | **new** |
+| **Feature-family ablation harness** | `feature_ablation.py` | numpy/pandas | **new** |
