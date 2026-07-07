@@ -67,6 +67,18 @@ python generate_clips.py --clip-purity 0.95  # Min label purity for clip expansi
 python generate_clips.py --output clips/ # Override output directory
 ```
 
+### Alternative pose feature representations (statistics-methods work)
+```bash
+python compare.py --extract --feature-mode shape_space       # Procrustes shape space → results/features/shape_space/
+python compare.py --cluster --feature-mode shape_space       # → results/shared/shape_space/
+python compare.py --report --feature-mode shape_space        # → results/comparison/shape_space/ + validation_stats.json
+python compare.py --extract --feature-mode delay_embedding   # Takens delay embedding (auto tau/d selection)
+python compare.py --extract --feature-mode topological       # Persistent homology (requires: pip install -e ".[topology]")
+python benchmark_feature_modes.py                             # Compare all modes on the active project → results/benchmark/feature_mode_comparison.csv
+python benchmark_feature_modes.py --modes default,shape_space # Compare a subset
+```
+`--feature-mode` defaults to `"default"` (today's `PoseFeatureExtractor`, unchanged). See MATH.md for the mathematical background of every representation and validation metric, and docs/DECISIONS.md #51/#52 for the architecture rationale.
+
 ### Cohort-level analysis (run after compare.py)
 ```bash
 python cohort_analysis.py --cohort cohort_normalized.csv --output results/cohort/
@@ -94,6 +106,27 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 | `clustering.py` | `BehaviorClusterer` | K-Means/GMM; used only in per-video `main.py` now |
 | `anomaly_detection.py` | `AnomalyDetector` | PyTorch autoencoder; flags unusual frames |
 | `analysis.py` | `BehaviorAnalyzer` | Statistics, plots, JSON/CSV/text export |
+| `pose_utils.py` | (functions) | Standalone pose math (interpolation, smoothing, centroid, PCA orientation) shared by `ml/representations/`. Deliberately independent of `feature_extraction.py` — see #52. |
+| `validation_stats.py` | (functions) | `compute_repeatability_R`, `compute_transition_modularity` — the validation bar for comparing feature representations. See "Alternative pose feature representations" below and MATH.md. |
+| `representations/` | `ShapeSpaceExtractor`, `DelayEmbeddingExtractor`, `TopologicalExtractor` | Pluggable alternative feature representations selected via `--feature-mode`. Never used for the default path. |
+
+### Alternative pose feature representations (`ml/representations/`, `--feature-mode`)
+
+`compare.py --feature-mode {default,shape_space,delay_embedding,topological}` selects the per-frame feature representation. `"default"` (or omitting the flag) is `PoseFeatureExtractor`, completely unchanged. Any other mode writes to a fully isolated subtree — `results/features/<mode>/`, `results/shared/<mode>/`, `results/comparison/<mode>/`, `results/diagnostics/<mode>/` — so alternative representations never collide with the default extractor's outputs or with each other, and never require the default to have been validated first.
+
+All representations share one contract (`ml/representations/__init__.py`): `.fit(sample_poses)` (a no-op for modes that don't need calibration), `.transform(pose, confidence) -> (features, feature_names)`, `.get_meta()`, `.save()`/`.load()`.
+
+| Mode | Class | What it does |
+|------|-------|---------------|
+| `shape_space` | `ShapeSpaceExtractor` | Procrustes/Kendall shape space: removes translation, scale, and rotation per frame (Generalized Procrustes Analysis), leaving posture only — independent of body size/position/camera angle. |
+| `delay_embedding` | `DelayEmbeddingExtractor` | Takens delay embedding of centroid_speed + elongation, with automatic tau (mutual information) and embedding-dimension (false nearest neighbors) selection per project. |
+| `topological` | `TopologicalExtractor` | Persistent homology (via `ripser`, optional dependency: `pip install -e ".[topology]"`) on sliding-window keypoint point clouds; summarizes movement topology (loops, connected components) per window. |
+
+`compare.py --report --feature-mode <mode>` also computes the two validation metrics in `ml/validation_stats.py` and writes `results/diagnostics/<mode>/validation_stats.json`:
+- **Repeatability (R)** — Nakagawa & Schielzeth adjusted repeatability, per state, from animal_id/day-joined state occupancy. Patched into `cluster_info.json["repeatability_mean_R"]` and `run_manifest.json`.
+- **Transition modularity** — Louvain community detection on the state-transition graph; states whose transitions bridge two communities are flagged in `cluster_info.json["possible_split_states"]` (consumed by `views/video_stories.py`'s `load_possible_split_states()` hook).
+
+`benchmark_feature_modes.py` runs `--extract`/`--cluster`/`--report` for each requested mode against the currently active project and writes `results/benchmark/feature_mode_comparison.csv` (n_states, noise_frac, repeatability, modularity, runtime, peak memory per mode). It does not declare a winner — run it once per project (switching the active project between runs to compare across projects) and judge the representations yourself. See MATH.md for the mathematical background behind every representation and metric.
 
 ### Per-video vs. cross-video analysis
 
@@ -420,4 +453,8 @@ quantification/          # From quantify.py / compare.py --quantify
   contrast_heatmap.png          # per-animal contrast vector heatmap
   contrast_magnitude.png        # cohort bar chart + individual dots
   contrast_scatter.png          # contrast_magnitude vs Jess protein (if jess data available)
+benchmark/                # From benchmark_feature_modes.py
+  feature_mode_comparison.csv   # n_states, noise_frac, repeatability_mean_R, modularity_Q, runtime, peak_rss_mb per feature_mode
 ```
+
+Every path above is `feature_mode="default"` (today's behavior, unchanged). Passing `--feature-mode <mode>` to `--extract`/`--cluster`/`--report` redirects to an isolated subtree instead: `results/features/<mode>/`, `results/shared/<mode>/`, `results/comparison/<mode>/`, `results/diagnostics/<mode>/` (each with the same file names as above — `index.json`, `cluster_info.json`, `<stem>_labels.npy`, `summary_table.csv`, etc. — plus a `validation_stats.json` in the diagnostics dir and a `representation.pkl` in the features dir holding the fitted representation instance). See "Alternative pose feature representations" above.

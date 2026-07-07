@@ -35,6 +35,31 @@ def _meta(): return _vc.get_metadata_path()
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# --- feature_mode directory isolation ---------------------------------
+# mode == "default" reproduces every path below byte-for-byte (today's
+# behavior, unchanged). Any other --feature-mode gets a fully isolated
+# subtree so alternative representations (ml/representations/) never
+# collide with the default extractor's outputs or with each other.
+# See docs/DECISIONS.md (statistics-methods branch).
+def _features_dir(mode: str = "default") -> str:
+    base = os.path.join(_res(), "features")
+    return base if mode == "default" else os.path.join(base, mode)
+
+
+def _shared_dir(mode: str = "default") -> str:
+    base = os.path.join(_res(), "shared")
+    return base if mode == "default" else os.path.join(base, mode)
+
+
+def _diagnostics_dir(mode: str = "default") -> str:
+    base = os.path.join(_res(), "diagnostics")
+    return base if mode == "default" else os.path.join(base, mode)
+
+
+def _comparison_dir(mode: str = "default") -> str:
+    base = os.path.join(_res(), "comparison")
+    return base if mode == "default" else os.path.join(base, mode)
+
 
 def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None, *, repair: bool = False):
     import project_manager as _pm
@@ -328,6 +353,39 @@ def _load_extractor_config():
     return keypoint_roles, object_keypoints, bodypart_names
 
 
+_MAX_CALIBRATION_SAMPLES = 3
+
+
+def _fit_representation(feature_mode: str, fps: float, sample_poses: list):
+    """Construct and calibrate (``.fit()``) a new alternative representation.
+
+    Only called for ``feature_mode != "default"`` — the default
+    ``PoseFeatureExtractor`` path is untouched and never goes through this
+    function. ``sample_poses`` is a small (<= _MAX_CALIBRATION_SAMPLES) list
+    of raw (T, K, D) pose arrays used to calibrate modes that need it (only
+    delay_embedding actually uses the sample; shape_space/topological ignore
+    it — see ml/representations/__init__.py).
+    """
+    from ml.representations import get_representation
+    rep = get_representation(feature_mode, fps=fps)
+    rep.fit(sample_poses)
+    return rep
+
+
+def _save_representation_meta(features_dir: str, feature_mode: str, rep, feature_names: list, n_keypoints: int) -> dict:
+    """Persist the fitted representation + its metadata alongside the mode's features."""
+    import joblib
+    rep_path = os.path.join(features_dir, "representation.pkl")
+    joblib.dump(rep, rep_path)
+    meta = dict(rep.get_meta())
+    meta["feature_names"] = feature_names
+    meta["n_features"] = meta.get("n_features") or len(feature_names)
+    meta["n_keypoints"] = n_keypoints
+    meta["vieb_version"] = "1.0"
+    meta["feature_mode"] = feature_mode
+    return meta
+
+
 _VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
 
 
@@ -355,14 +413,13 @@ def _resolve_h5_video_path(stem, candidates, video_path_map, raw_videos_dir):
     return None
 
 
-def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
+def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True, feature_mode: str = "default"):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
     For standard multi-key H5 files, iterates metadata.csv rows and resolves
     each row to a key inside the H5 file. For concatenated-table H5 files,
     iterates the unique session/source values directly from the H5.
     """
-    from ml import PoseFeatureExtractor
     from pose_io import inspect_h5, load_pose_h5
     from h5_manifest import detect_concatenated_table, load_manifest, load_video_paths, resolve_h5_key
 
@@ -395,9 +452,10 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     except Exception:
         raw_videos_dir = ""
 
-    os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
+    features_dir = _features_dir(feature_mode)
+    os.makedirs(features_dir, exist_ok=True)
 
-    index_path = os.path.join(_res(), "features", "index.json")
+    index_path = os.path.join(features_dir, "index.json")
     index = {}
     if os.path.exists(index_path):
         with open(index_path) as f:
@@ -406,11 +464,45 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     keypoint_roles, object_keypoints, bodypart_names = _load_extractor_config()
 
     extractor = None
+    rep = None
+    feature_names_cache = None
     new_count = 0
     skip_count = 0
 
     if not use_wavelets:
         print("(wavelets disabled)")
+
+    if feature_mode != "default":
+        print(f"Feature mode: {feature_mode}")
+        sample_poses = []
+        if concatenated_key is not None:
+            with pd.HDFStore(h5_path, mode="r") as store:
+                raw_key = concatenated_key if concatenated_key.startswith("/") else f"/{concatenated_key}"
+                _df_sample = store[raw_key]
+            from pose_io import _pose_from_dlc_df, _pose_from_flat_df
+            for source_value in _df_sample[session_source_col].dropna().astype(str).unique().tolist():
+                if len(sample_poses) >= _MAX_CALIBRATION_SAMPLES:
+                    break
+                _sdf = _df_sample[_df_sample[session_source_col] == source_value]
+                if _sdf.empty:
+                    continue
+                if isinstance(_sdf.columns, pd.MultiIndex) and _sdf.columns.nlevels >= 3:
+                    _p, _, _ = _pose_from_dlc_df(_sdf)
+                else:
+                    _p, _, _ = _pose_from_flat_df(_sdf)
+                sample_poses.append(_p)
+        else:
+            for i, (_, row) in enumerate(meta.iterrows()):
+                if len(sample_poses) >= _MAX_CALIBRATION_SAMPLES:
+                    break
+                try:
+                    h5_key, _strategy = resolve_h5_key(row.to_dict(), h5_keys, manifest, i)
+                except ValueError:
+                    continue
+                _p, _, _ = load_pose_h5(h5_path, key=h5_key, source_col=configured_source_col)
+                sample_poses.append(_p)
+        rep = _fit_representation(feature_mode, fps, sample_poses)
+
     if concatenated_key is not None:
         with pd.HDFStore(h5_path, mode="r") as store:
             raw_key = (
@@ -436,7 +528,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
 
         for source_value in source_values:
             stem = os.path.splitext(os.path.basename(source_value))[0]
-            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+            out_path = os.path.join(features_dir, f"{stem}_features.npy")
 
             if os.path.exists(out_path):
                 skip_count += 1
@@ -455,17 +547,20 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             else:
                 pose, conf, h5_bodyparts = _pose_from_flat_df(session_df)
 
-            if extractor is None:
-                extractor = PoseFeatureExtractor(
-                    fps=fps,
-                    use_wavelets=use_wavelets,
-                    keypoint_roles=keypoint_roles,
-                    bodypart_names=bodypart_names or h5_bodyparts,
-                    object_keypoints=object_keypoints,
-                )
-
-            features_dict = extractor.extract_features(pose, confidence=conf)
-            features_flat = extractor._flatten_features(features_dict)
+            if feature_mode == "default":
+                if extractor is None:
+                    from ml import PoseFeatureExtractor
+                    extractor = PoseFeatureExtractor(
+                        fps=fps,
+                        use_wavelets=use_wavelets,
+                        keypoint_roles=keypoint_roles,
+                        bodypart_names=bodypart_names or h5_bodyparts,
+                        object_keypoints=object_keypoints,
+                    )
+                features_dict = extractor.extract_features(pose, confidence=conf)
+                features_flat = extractor._flatten_features(features_dict)
+            else:
+                features_flat, feature_names_cache = rep.transform(pose, confidence=conf)
 
             np.save(out_path, features_flat.astype(np.float32))
             video_path = _resolve_h5_video_path(
@@ -491,7 +586,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
                 os.path.splitext(filename)[0]
                 if filename else row_dict.get("animal_id", f"row{i}")
             )
-            out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+            out_path = os.path.join(features_dir, f"{stem}_features.npy")
 
             if os.path.exists(out_path):
                 skip_count += 1
@@ -510,17 +605,20 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
                 source_col=configured_source_col,
             )
 
-            if extractor is None:
-                extractor = PoseFeatureExtractor(
-                    fps=fps,
-                    use_wavelets=use_wavelets,
-                    keypoint_roles=keypoint_roles,
-                    bodypart_names=bodypart_names or h5_bodyparts,
-                    object_keypoints=object_keypoints,
-                )
-
-            features_dict = extractor.extract_features(pose, confidence=conf)
-            features_flat = extractor._flatten_features(features_dict)
+            if feature_mode == "default":
+                if extractor is None:
+                    from ml import PoseFeatureExtractor
+                    extractor = PoseFeatureExtractor(
+                        fps=fps,
+                        use_wavelets=use_wavelets,
+                        keypoint_roles=keypoint_roles,
+                        bodypart_names=bodypart_names or h5_bodyparts,
+                        object_keypoints=object_keypoints,
+                    )
+                features_dict = extractor.extract_features(pose, confidence=conf)
+                features_flat = extractor._flatten_features(features_dict)
+            else:
+                features_flat, feature_names_cache = rep.transform(pose, confidence=conf)
 
             np.save(out_path, features_flat.astype(np.float32))
             video_path = _resolve_h5_video_path(
@@ -539,34 +637,43 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
-    if extractor is not None:
-        feat_meta = extractor.get_feature_meta(
-            int(first_entry.get("n_keypoints", 8))
-        )
-    else:
-        feat_meta = {
-            "n_keypoints": int(first_entry.get("n_keypoints", 8)),
-            "n_features": int(first_entry.get("n_features", 91)),
-            "use_wavelets": use_wavelets,
-            "feature_names": [],
-            "semantic_features": [],
+    if feature_mode == "default":
+        if extractor is not None:
+            feat_meta = extractor.get_feature_meta(
+                int(first_entry.get("n_keypoints", 8))
+            )
+        else:
+            feat_meta = {
+                "n_keypoints": int(first_entry.get("n_keypoints", 8)),
+                "n_features": int(first_entry.get("n_features", 91)),
+                "use_wavelets": use_wavelets,
+                "feature_names": [],
+                "semantic_features": [],
+            }
+        index["_meta"] = {
+            "n_keypoints": feat_meta["n_keypoints"],
+            "n_features": feat_meta["n_features"],
+            "use_wavelets": feat_meta["use_wavelets"],
+            "feature_names": feat_meta["feature_names"],
+            "semantic_features": feat_meta["semantic_features"],
+            "vieb_version": "1.0",
+            "pose_source": "h5",
         }
-    index["_meta"] = {
-        "n_keypoints": feat_meta["n_keypoints"],
-        "n_features": feat_meta["n_features"],
-        "use_wavelets": feat_meta["use_wavelets"],
-        "feature_names": feat_meta["feature_names"],
-        "semantic_features": feat_meta["semantic_features"],
-        "vieb_version": "1.0",
-        "pose_source": "h5",
-    }
+    else:
+        meta_dict = _save_representation_meta(
+            features_dir, feature_mode, rep,
+            feature_names_cache or [], int(first_entry.get("n_keypoints", 0)),
+        )
+        meta_dict["pose_source"] = "h5"
+        index["_meta"] = meta_dict
 
     with open(index_path, "w") as f:
         json.dump(index, f, indent=2)
 
     print(f"\nDone. Extracted {new_count} new, skipped {skip_count} already done.")
     print(f"Total in index: {len(index)} videos")
-    print(f"Feature files saved to results/features/")
+    print(f"Feature files saved to results/features/"
+          + ("" if feature_mode == "default" else f"{feature_mode}/"))
 
 
 def _check_metadata_before_extract():
@@ -589,8 +696,7 @@ def _check_metadata_before_extract():
         print("  Fill in these rows before running 'compare.py --report' or '--quantify'.")
 
 
-def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
-    from ml import PoseFeatureExtractor
+def cmd_extract(fps: float = 30.0, use_wavelets: bool = True, feature_mode: str = "default"):
     from pose_io import load_pose, _find_dlc_csv
 
     _check_metadata_before_extract()
@@ -598,52 +704,70 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
     pose_source = _vc.get_pose_source()
 
     if pose_source == "h5":
-        return _cmd_extract_h5(fps=fps, use_wavelets=use_wavelets)
+        return _cmd_extract_h5(fps=fps, use_wavelets=use_wavelets, feature_mode=feature_mode)
 
     videos = sorted(glob.glob(os.path.join(_raw(), "*.mp4")))
     if not videos:
         sys.exit("No .mp4 files found in raw_videos/")
 
-    os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
+    features_dir = _features_dir(feature_mode)
+    os.makedirs(features_dir, exist_ok=True)
 
-    index_path = os.path.join(_res(), "features", "index.json")
+    index_path = os.path.join(features_dir, "index.json")
     index = {}
     if os.path.exists(index_path):
         with open(index_path) as f:
             index = json.load(f)
 
     keypoint_roles, object_keypoints, bodypart_names = _load_extractor_config()
-
-    extractor = PoseFeatureExtractor(
-        fps=fps,
-        use_wavelets=use_wavelets,
-        keypoint_roles=keypoint_roles,
-        bodypart_names=bodypart_names,
-        object_keypoints=object_keypoints,
-    )
     new_count = 0
     skip_count = 0
 
-    if not use_wavelets:
-        print("(wavelets disabled)")
+    if feature_mode == "default":
+        from ml import PoseFeatureExtractor
+        extractor = PoseFeatureExtractor(
+            fps=fps,
+            use_wavelets=use_wavelets,
+            keypoint_roles=keypoint_roles,
+            bodypart_names=bodypart_names,
+            object_keypoints=object_keypoints,
+        )
 
-    # Print feature availability report
-    report = extractor.get_feature_availability_report()
-    if report.get("groups"):
-        resolved = [g for g, info in report["groups"].items() if info["resolved"]]
-        skipped_groups = [g for g, info in report["groups"].items() if not info["resolved"]]
-        if resolved:
-            print(f"Keypoint groups resolved: {', '.join(resolved)}")
-        if skipped_groups:
-            print(f"Keypoint groups missing: {', '.join(skipped_groups)}")
-        if report.get("skipped_features"):
-            for feat, reason in report["skipped_features"].items():
-                print(f"  Skipping {feat}: {reason}")
+        if not use_wavelets:
+            print("(wavelets disabled)")
+
+        # Print feature availability report
+        report = extractor.get_feature_availability_report()
+        if report.get("groups"):
+            resolved = [g for g, info in report["groups"].items() if info["resolved"]]
+            skipped_groups = [g for g, info in report["groups"].items() if not info["resolved"]]
+            if resolved:
+                print(f"Keypoint groups resolved: {', '.join(resolved)}")
+            if skipped_groups:
+                print(f"Keypoint groups missing: {', '.join(skipped_groups)}")
+            if report.get("skipped_features"):
+                for feat, reason in report["skipped_features"].items():
+                    print(f"  Skipping {feat}: {reason}")
+    else:
+        print(f"Feature mode: {feature_mode}")
+        # Calibration pass: sample a few videos' poses to fit modes that need it
+        # (e.g. delay_embedding's tau/d selection). No-op for modes that don't.
+        sample_poses = []
+        for video_path in videos:
+            if len(sample_poses) >= _MAX_CALIBRATION_SAMPLES:
+                break
+            csv_path = _find_dlc_csv(video_path)
+            if csv_path is None:
+                continue
+            pose, _conf, _ = load_pose(csv_path)
+            sample_poses.append(pose)
+        rep = _fit_representation(feature_mode, fps, sample_poses)
+        feature_names_cache = None
 
     print(f"Extracting features from {len(videos)} videos...")
     for video_path in videos:
         stem = os.path.splitext(os.path.basename(video_path))[0]
-        out_path = os.path.join(_res(), "features", f"{stem}_features.npy")
+        out_path = os.path.join(features_dir, f"{stem}_features.npy")
 
         if os.path.exists(out_path):
             skip_count += 1
@@ -656,8 +780,12 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
 
         print(f"  {stem}")
         pose, conf, _ = load_pose(csv_path)
-        features_dict = extractor.extract_features(pose, confidence=conf)
-        features_flat = extractor._flatten_features(features_dict)
+
+        if feature_mode == "default":
+            features_dict = extractor.extract_features(pose, confidence=conf)
+            features_flat = extractor._flatten_features(features_dict)
+        else:
+            features_flat, feature_names_cache = rep.transform(pose, confidence=conf)
 
         np.save(out_path, features_flat.astype(np.float32))
         index[stem] = {
@@ -671,24 +799,31 @@ def cmd_extract(fps: float = 30.0, use_wavelets: bool = True):
         new_count += 1
 
     first_entry = next((v for k, v in index.items() if k != '_meta'), {})
-    feat_meta = extractor.get_feature_meta(
-        int(first_entry.get("n_keypoints", 8))
-    )
-    index["_meta"] = {
-        "n_keypoints": feat_meta["n_keypoints"],
-        "n_features": feat_meta["n_features"],
-        "use_wavelets": feat_meta["use_wavelets"],
-        "feature_names": feat_meta["feature_names"],
-        "semantic_features": feat_meta["semantic_features"],
-        "vieb_version": "1.0",
-    }
+    if feature_mode == "default":
+        feat_meta = extractor.get_feature_meta(
+            int(first_entry.get("n_keypoints", 8))
+        )
+        index["_meta"] = {
+            "n_keypoints": feat_meta["n_keypoints"],
+            "n_features": feat_meta["n_features"],
+            "use_wavelets": feat_meta["use_wavelets"],
+            "feature_names": feat_meta["feature_names"],
+            "semantic_features": feat_meta["semantic_features"],
+            "vieb_version": "1.0",
+        }
+    else:
+        index["_meta"] = _save_representation_meta(
+            features_dir, feature_mode, rep,
+            feature_names_cache or [], int(first_entry.get("n_keypoints", 0)),
+        )
 
     with open(index_path, "w") as f:
         json.dump(index, f, indent=2)
 
     print(f"\nDone. Extracted {new_count} new, skipped {skip_count} already done.")
     print(f"Total in index: {len(index)} videos")
-    print(f"Feature files saved to results/features/")
+    print(f"Feature files saved to results/features/"
+          + ("" if feature_mode == "default" else f"{feature_mode}/"))
 
 
 def _load_pose_for_index_entry(stem: str, entry: dict):
@@ -712,18 +847,31 @@ def _load_pose_for_index_entry(stem: str, entry: dict):
     return load_pose(pose_path)
 
 
-def cmd_fix_features(fps: float = 30.0):
+def cmd_fix_features(fps: float = 30.0, feature_mode: str = "default"):
     """Re-extract feature files for videos whose feature dimension does not
     match the current config.json extraction settings (use_wavelets).
 
     Only the mismatched videos are re-extracted — videos that already match
     the target dimension are left untouched. Updates index["_meta"]
     afterwards so it reflects the now-consistent settings.
+
+    Only supported for feature_mode="default" — alternate representations
+    have no equivalent "use_wavelets"-style config-drift scenario yet. For
+    other modes, delete results/features/<mode>/ and re-run
+    ``--extract --feature-mode <mode>`` instead.
     """
     from collections import Counter
+
+    if feature_mode != "default":
+        sys.exit(
+            f"--fix-features is not supported for feature_mode={feature_mode!r}. "
+            f"Delete results/features/{feature_mode}/ and re-run "
+            f"'compare.py --extract --feature-mode {feature_mode}' instead."
+        )
+
     from ml import PoseFeatureExtractor
 
-    index_path = os.path.join(_res(), "features", "index.json")
+    index_path = os.path.join(_features_dir(feature_mode), "index.json")
     if not os.path.exists(index_path):
         sys.exit("No index found. Run --extract first.")
     with open(index_path) as f:
@@ -1084,11 +1232,16 @@ def _next_run_n(runs_dir: str) -> int:
     return mgr._next_run_n()
 
 
-def _auto_save_previous_run() -> str | None:
-    """Copy results/shared/ to results/runs/{run_id}/ before a new run overwrites it."""
+def _auto_save_previous_run(feature_mode: str = "default") -> str | None:
+    """Copy this mode's shared/ dir to results/runs/{run_id}/ before a new run overwrites it.
+
+    Runs from every feature_mode share one results/runs/ numbering sequence
+    (disambiguated by the "feature_mode" field each manifest now carries) —
+    only the *source* of the copy is mode-specific.
+    """
     from cluster_run_manager import ClusterRunManager
 
-    shared_dir = os.path.join(_res(), "shared")
+    shared_dir = _shared_dir(feature_mode)
     cluster_info_path = os.path.join(shared_dir, "cluster_info.json")
     if not os.path.exists(cluster_info_path):
         return None
@@ -1106,7 +1259,7 @@ def _auto_save_previous_run() -> str | None:
 
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     mgr = ClusterRunManager(_res(), config_path=cfg_path)
-    mgr.save_run(run_id)
+    mgr.save_run(run_id, source_dir=Path(shared_dir))
     print(f"Auto-saved previous run to results/runs/{run_id}/")
     return run_id
 
@@ -1140,8 +1293,9 @@ def _write_current_run_manifest(
     min_samples_requested: int = 0,
     runtime_seconds: float = 0.0,
     assignment_method: str = "",
+    feature_mode: str = "default",
 ) -> str:
-    """Write results/shared/run_manifest.json and update config.json."""
+    """Write <shared_dir>/run_manifest.json (mode-namespaced) and update config.json."""
     from cluster_run_manager import ClusterRunConfig, ClusterRunManager
 
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -1175,11 +1329,12 @@ def _write_current_run_manifest(
         "low_confidence_frac": round(low_conf_frac, 4),
         "noise_frac": round(noise_frac, 4),
         "assignment_method": assignment_method,
+        "feature_mode": feature_mode,
         "saved": False,
     }
 
     # Attach feature metadata so the manifest is self-contained.
-    _index_path = os.path.join(_res(), "features", "index.json")
+    _index_path = os.path.join(_features_dir(feature_mode), "index.json")
     if os.path.exists(_index_path):
         try:
             with open(_index_path) as _f:
@@ -1193,20 +1348,25 @@ def _write_current_run_manifest(
         except Exception:
             pass
 
-    with open(os.path.join(_res(), "shared", "run_manifest.json"), "w") as f:
+    with open(os.path.join(_shared_dir(feature_mode), "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    cfg_data: dict = {}
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path, encoding="utf-8") as f:
-                cfg_data = json.load(f)
-        except Exception:
-            pass
-    cfg_data["current_run_saved"] = False
-    cfg_data["current_run_id"] = run_id
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(cfg_data, f, indent=2)
+    # Only the default mode's run becomes the GUI's "current run" — alt-mode
+    # runs are tracked via their own manifest/results/runs/ entry only, so
+    # they never make the GUI (views/cluster_runs.py) look for files under
+    # results/shared/ that actually live under results/shared/<mode>/.
+    if feature_mode == "default":
+        cfg_data: dict = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+            except Exception:
+                pass
+        cfg_data["current_run_saved"] = False
+        cfg_data["current_run_id"] = run_id
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg_data, f, indent=2)
 
     return run_id
 
@@ -1498,6 +1658,7 @@ def cmd_cluster(
     umap_dims: int = 10,
     validate: bool = False,
     hdbscan_sample: int = 300000,
+    feature_mode: str = "default",
 ):
     import time as _time
     import joblib
@@ -1525,7 +1686,7 @@ def cmd_cluster(
         UMAPClass = umap_lib.UMAP
         HDBSCANClass = hdbscan_lib.HDBSCAN
 
-    index_path = os.path.join(_res(), "features", "index.json")
+    index_path = os.path.join(_features_dir(feature_mode), "index.json")
     if not os.path.exists(index_path):
         sys.exit("No index found. Run --extract first.")
     with open(index_path) as f:
@@ -1563,21 +1724,25 @@ def cmd_cluster(
         nk_str = f"{expected_n_keypoints} keypoints" if expected_n_keypoints is not None else "unknown keypoints"
         print(f"[OK] Feature dimensions consistent: {expected_n_features} features, {nk_str}")
 
-    os.makedirs(os.path.join(_res(), "shared"), exist_ok=True)
+    os.makedirs(os.path.join(_shared_dir(feature_mode)), exist_ok=True)
 
     # ---- Run versioning: auto-save previous run if it exists and wasn't saved ----
-    _prev_cluster_info = os.path.join(_res(), "shared", "cluster_info.json")
+    # Gated on this mode's own manifest "saved" field (kept in sync with
+    # config.json's current_run_saved by _mark_run_saved() for the default
+    # mode) rather than the global config flag, so alt-mode runs are
+    # archived independently of whatever the default mode's flag says.
+    _prev_cluster_info = os.path.join(_shared_dir(feature_mode), "cluster_info.json")
     if os.path.exists(_prev_cluster_info):
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-        _cfg_data: dict = {}
-        if os.path.exists(_cfg_path):
+        _prev_manifest_path = os.path.join(_shared_dir(feature_mode), "run_manifest.json")
+        _prev_saved = False
+        if os.path.exists(_prev_manifest_path):
             try:
-                with open(_cfg_path, encoding="utf-8") as _f:
-                    _cfg_data = json.load(_f)
+                with open(_prev_manifest_path, encoding="utf-8") as _f:
+                    _prev_saved = bool(json.load(_f).get("saved", False))
             except Exception:
                 pass
-        if not _cfg_data.get("current_run_saved", False):
-            _auto_save_previous_run()
+        if not _prev_saved:
+            _auto_save_previous_run(feature_mode)
 
     # ---- Load all feature matrices ----
     stems = sorted(k for k in index.keys() if k != '_meta')
@@ -1635,12 +1800,12 @@ def cmd_cluster(
     else:
         pooled_scaled = preprocessor.fit_transform(pooled)
 
-    preprocessor.save(os.path.join(_res(), "shared", "preprocessor.pkl"))
+    preprocessor.save(os.path.join(_shared_dir(feature_mode), "preprocessor.pkl"))
     print(f"  Standardized to {pooled_scaled.shape[1]} features")
 
     # ---- UMAP reduction ----
     print(f"\nFitting UMAP (n_components={umap_dims}, n_neighbors=30)...")
-    umap_save_path = os.path.join(_res(), "shared", "umap_reducer.pkl")
+    umap_save_path = os.path.join(_shared_dir(feature_mode), "umap_reducer.pkl")
     if os.path.exists(umap_save_path):
         try:
             _saved = joblib.load(umap_save_path)
@@ -1723,7 +1888,7 @@ def cmd_cluster(
     elif hasattr(pooled_umap, "get"):
         pooled_umap = pooled_umap.get()
     pooled_umap = np.asarray(pooled_umap, dtype=np.float32)
-    joblib.dump(reducer, os.path.join(_res(), "shared", "umap_reducer.pkl"))
+    joblib.dump(reducer, os.path.join(_shared_dir(feature_mode), "umap_reducer.pkl"))
     print(f"  UMAP embedding: {pooled_umap.shape}")
 
     # ---- HDBSCAN clustering ----
@@ -1875,7 +2040,7 @@ def cmd_cluster(
         else:
             cluster_centers.append([0.0] * pooled_scaled.shape[1])
 
-    joblib.dump(clusterer_model, os.path.join(_res(), "shared", "clusterer.pkl"))
+    joblib.dump(clusterer_model, os.path.join(_shared_dir(feature_mode), "clusterer.pkl"))
     cluster_info = {
         "n_clusters": n_found,
         "cluster_centers": cluster_centers,
@@ -1885,7 +2050,7 @@ def cmd_cluster(
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
     }
-    with open(os.path.join(_res(), "shared", "cluster_info.json"), "w") as f:
+    with open(os.path.join(_shared_dir(feature_mode), "cluster_info.json"), "w") as f:
         json.dump(cluster_info, f, indent=2)
 
     meta_info = dict(index.get("_meta", {}))
@@ -1917,8 +2082,8 @@ def cmd_cluster(
 
     # ---- Save smoothed labels and probabilities ----
     for stem, smoothed, probs in zip(stems, smoothed_labels_all, raw_probs_all):
-        np.save(os.path.join(_res(), "shared", f"{stem}_labels.npy"), smoothed.astype(np.int32))
-        np.save(os.path.join(_res(), "shared", f"{stem}_probs.npy"), probs.astype(np.float32))
+        np.save(os.path.join(_shared_dir(feature_mode), f"{stem}_labels.npy"), smoothed.astype(np.int32))
+        np.save(os.path.join(_shared_dir(feature_mode), f"{stem}_probs.npy"), probs.astype(np.float32))
 
     all_labels = np.concatenate(smoothed_labels_all)
     n_valid_total = int((all_labels >= 0).sum())
@@ -1929,9 +2094,10 @@ def cmd_cluster(
         n_frames = int((all_labels == k).sum())
         print(f"  State {k}: {pct:5.1f}%  ({n_frames:,} frames)")
 
-    print(f"\nShared models → results/shared/")
-    print(f"Per-video labels → results/shared/<stem>_labels.npy")
-    print(f"Per-video probabilities → results/shared/<stem>_probs.npy")
+    _shared_rel = "results/shared/" if feature_mode == "default" else f"results/shared/{feature_mode}/"
+    print(f"\nShared models → {_shared_rel}")
+    print(f"Per-video labels → {_shared_rel}<stem>_labels.npy")
+    print(f"Per-video probabilities → {_shared_rel}<stem>_probs.npy")
 
     # ---- Write run manifest for this run ----
     _runtime = _time.perf_counter() - _t0
@@ -1949,8 +2115,9 @@ def cmd_cluster(
         min_samples_requested=_min_samples_requested,
         runtime_seconds=_runtime,
         assignment_method=_assignment_method,
+        feature_mode=feature_mode,
     )
-    print(f"Run manifest → results/shared/run_manifest.json  (run_id: {_current_run_id})")
+    print(f"Run manifest → {_shared_rel}run_manifest.json  (run_id: {_current_run_id})")
 
     # ---- Clustering diagnostics ----
     try:
@@ -1958,8 +2125,10 @@ def cmd_cluster(
             all_labels=np.concatenate(smoothed_labels_all),
             all_probs=np.concatenate(raw_probs_all),
             pooled_umap=pooled_umap,
+            feature_mode=feature_mode,
         )
-        print("Diagnostics → results/diagnostics/")
+        _diag_rel = "results/diagnostics/" if feature_mode == "default" else f"results/diagnostics/{feature_mode}/"
+        print(f"Diagnostics → {_diag_rel}")
     except Exception as _diag_err:
         print(f"[warn] Diagnostics generation failed: {_diag_err}")
 
@@ -1968,7 +2137,7 @@ def cmd_cluster(
         from cluster_run_manager import ClusterRunManager
         _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
-        _mgr.save_run(_current_run_id)
+        _mgr.save_run(_current_run_id, source_dir=Path(_shared_dir(feature_mode)))
         print(f"Run auto-saved → results/runs/{_current_run_id}/")
     except Exception as _save_err:
         print(f"[warn] Could not auto-save run: {_save_err}")
@@ -2017,16 +2186,17 @@ def _generate_diagnostics(
     all_labels: np.ndarray | None = None,
     all_probs: np.ndarray | None = None,
     pooled_umap: np.ndarray | None = None,
+    feature_mode: str = "default",
 ) -> dict:
     """Generate clustering quality diagnostics to results/diagnostics/.
 
     When called from cmd_cluster(), receives live arrays.
     When called standalone (--diagnostics), loads from disk.
     """
-    diag_dir = os.path.join(_res(), "diagnostics")
+    diag_dir = _diagnostics_dir(feature_mode)
     os.makedirs(diag_dir, exist_ok=True)
 
-    shared_dir = os.path.join(_res(), "shared")
+    shared_dir = _shared_dir(feature_mode)
     ci_path = os.path.join(shared_dir, "cluster_info.json")
     if not os.path.exists(ci_path):
         print("[diagnostics] No cluster_info.json found. Run --cluster first.")
@@ -2170,7 +2340,7 @@ def _generate_diagnostics(
     imbalance_score = round(_gini(pos_fracs), 4)
 
     # ---- Load index metadata for feature info ----
-    index_path = os.path.join(_res(), "features", "index.json")
+    index_path = os.path.join(_features_dir(feature_mode), "index.json")
     n_features = 0
     use_wavelets = None  # None = unknown; never infer True/False when key is absent
     semantic_features: list[str] = []
@@ -2931,18 +3101,21 @@ def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> N
     print(f"Correlations saved: results/comparison/correlations.csv ({len(out)} rows)")
 
 
-def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
+def cmd_report(fps: float = 30.0, min_confidence: float = 0.0, feature_mode: str = "default"):
     import matplotlib.pyplot as plt
     from scipy import stats
 
-    for path in [os.path.join(_res(), "features", "index.json"),
-                  os.path.join(_res(), "shared", "cluster_info.json")]:
-        if not os.path.exists(path):
-            sys.exit(f"Missing {path}. Run --extract and --cluster first.")
+    features_dir = _features_dir(feature_mode)
+    shared_dir = _shared_dir(feature_mode)
 
-    with open(os.path.join(_res(), "features", "index.json")) as f:
+    for path in [os.path.join(features_dir, "index.json"),
+                  os.path.join(shared_dir, "cluster_info.json")]:
+        if not os.path.exists(path):
+            sys.exit(f"Missing {path}. Run --extract and --cluster first (with --feature-mode {feature_mode} if non-default).")
+
+    with open(os.path.join(features_dir, "index.json")) as f:
         index = json.load(f)
-    with open(os.path.join(_res(), "shared", "cluster_info.json")) as f:
+    with open(os.path.join(shared_dir, "cluster_info.json")) as f:
         cluster_info = json.load(f)
     n_clusters = cluster_info["n_clusters"]
     state_cols = [f"state_{k}_frac" for k in range(n_clusters)]
@@ -2954,14 +3127,15 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     # Build per-video summary + transition matrices
     rows = []
     trans_rows = []  # flattened transition probabilities per video
+    global_transition_counts = np.zeros((n_clusters, n_clusters), dtype=np.float64)
     for stem in sorted(index.keys()):
-        labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
+        labels_path = os.path.join(shared_dir, f"{stem}_labels.npy")
         if not os.path.exists(labels_path):
             continue
         labels = np.load(labels_path)
 
         if min_confidence > 0.0:
-            probs_path = os.path.join(_res(), "shared", f"{stem}_probs.npy")
+            probs_path = os.path.join(shared_dir, f"{stem}_probs.npy")
             if os.path.exists(probs_path):
                 probs = np.load(probs_path)
                 valid = (labels >= 0) & (probs >= min_confidence)
@@ -2985,6 +3159,16 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
                 trans_row[f"trans_{i}_{j}"] = float(tmat[i, j])
         trans_rows.append(trans_row)
 
+        # Raw (unnormalized) global transition counts, accumulated across all
+        # videos — used for the modularity/bridge-state check (Part A). Kept
+        # separate from tmat (which is per-video row-normalized) since summing
+        # normalized matrices would weight short and long videos equally.
+        a = labels[:-1]
+        b = labels[1:]
+        valid_pairs = (a >= 0) & (b >= 0)
+        for ai, bi in zip(a[valid_pairs], b[valid_pairs]):
+            global_transition_counts[ai, bi] += 1
+
     df_states = pd.DataFrame(rows)
 
     if not os.path.exists(_meta()):
@@ -2997,7 +3181,77 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     df = df_states.merge(meta, on="stem", how="left")
 
-    os.makedirs(os.path.join(_res(), "comparison"), exist_ok=True)
+    comparison_dir = _comparison_dir(feature_mode)
+    os.makedirs(comparison_dir, exist_ok=True)
+
+    # ---- Validation statistics (Part A): repeatability + transition modularity ----
+    # Computed here because this is the only point in the pipeline where
+    # per-video state occupancy is already joined with animal_id/day
+    # metadata, and where per-video transition matrices are already built.
+    # See ml/validation_stats.py.
+    try:
+        from ml.validation_stats import compute_repeatability_R, compute_transition_modularity
+        repeatability = compute_repeatability_R(df, state_cols, animal_col="animal_id", session_col="day")
+        modularity = compute_transition_modularity(global_transition_counts, state_ids=list(range(n_clusters)))
+
+        validation_stats = {
+            "feature_mode": feature_mode,
+            "repeatability": repeatability,
+            "modularity": modularity,
+        }
+        diag_dir = _diagnostics_dir(feature_mode)
+        os.makedirs(diag_dir, exist_ok=True)
+        with open(os.path.join(diag_dir, "validation_stats.json"), "w", encoding="utf-8") as f:
+            json.dump(validation_stats, f, indent=2, default=str)
+        print(f"Validation stats saved: results/diagnostics/"
+              f"{'' if feature_mode == 'default' else feature_mode + '/'}validation_stats.json")
+        if repeatability.get("skipped"):
+            print(f"  [repeatability] skipped: {repeatability.get('reason')}")
+        else:
+            print(f"  [repeatability] mean R = {repeatability['mean_R']:.3f} "
+                  f"({repeatability['n_states_scored']} states scored)")
+        if modularity.get("skipped"):
+            print(f"  [modularity] skipped: {modularity.get('reason')}")
+        else:
+            print(f"  [modularity] Q = {modularity['modularity_Q']:.3f}, "
+                  f"possible_split_states = {modularity['possible_split_states']}")
+
+        # Patch compact scalar fields into cluster_info.json and run_manifest.json
+        # (read-modify-write, never clobbering existing fields) so the run
+        # registry / Cluster Runs UI and views/video_stories.py's
+        # load_possible_split_states() hook (docs/DECISIONS.md #50) can use them.
+        ci_path = os.path.join(shared_dir, "cluster_info.json")
+        with open(ci_path) as f:
+            _ci = json.load(f)
+        _ci["possible_split_states"] = modularity.get("possible_split_states", [])
+        _ci["repeatability_mean_R"] = repeatability.get("mean_R")
+        with open(ci_path, "w") as f:
+            json.dump(_ci, f, indent=2)
+
+        manifest_path = os.path.join(shared_dir, "run_manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                _manifest = json.load(f)
+            _manifest["repeatability_mean_R"] = repeatability.get("mean_R")
+            _manifest["modularity_Q"] = modularity.get("modularity_Q")
+            _manifest["n_possible_split_states"] = len(modularity.get("possible_split_states", []))
+            with open(manifest_path, "w") as f:
+                json.dump(_manifest, f, indent=2)
+    except Exception as e:
+        print(f"[warn] Validation statistics computation failed: {e}")
+
+    if feature_mode != "default":
+        # Alt feature modes get the core comparison data (summary_table.csv,
+        # transition_table.csv) and the validation stats above — full report
+        # parity (characterization/, sequences/, plots) is default-mode-only
+        # for now; see docs/DECISIONS.md (statistics-methods branch).
+        df.to_csv(os.path.join(comparison_dir, "summary_table.csv"), index=False)
+        trans_df = pd.DataFrame(trans_rows).merge(meta, on="stem", how="left")
+        trans_df.to_csv(os.path.join(comparison_dir, "transition_table.csv"), index=False)
+        print(f"Summary table saved: results/comparison/{feature_mode}/summary_table.csv  ({len(df)} videos)")
+        print(f"Transition table saved: results/comparison/{feature_mode}/transition_table.csv")
+        return
+
     try:
         from analysis_design import write_analysis_design
         analysis_design = write_analysis_design(df, _res(), _vc._load_config())
@@ -3959,6 +4213,13 @@ def main():
                         help="UMAP n_components (default: 10). Try 3 for better HDBSCAN performance.")
     parser.add_argument("--no-wavelets", action="store_true",
                         help="Skip Morlet wavelet features during --extract (faster)")
+    parser.add_argument("--feature-mode", type=str, default="default",
+                        choices=["default", "shape_space", "delay_embedding", "topological"],
+                        help="Pose feature representation to use with --extract/--fix-features/"
+                             "--cluster/--report (default: 'default', today's hand-crafted "
+                             "extractor, unchanged). Alternate modes write to fully isolated "
+                             "results/features/<mode>/, results/shared/<mode>/, "
+                             "results/diagnostics/<mode>/ subtrees — see ml/representations/.")
     parser.add_argument("--validate", action="store_true",
                         help="With --cluster: run 80/20 train/test split validation (seed=42)")
     parser.add_argument("--apply-existing", action="store_true",
@@ -4037,9 +4298,9 @@ def main():
             sys.exit(f"Run not found: {args.set_active}")
 
     if args.extract:
-        cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
+        cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets, feature_mode=args.feature_mode)
     if args.fix_features:
-        cmd_fix_features(fps=args.fps)
+        cmd_fix_features(fps=args.fps, feature_mode=args.feature_mode)
     if args.backfill_video_paths:
         cmd_backfill_video_paths()
     if args.diagnose:
@@ -4062,7 +4323,8 @@ def main():
         else:
             cmd_cluster(fps=args.fps, min_cluster_size=args.min_cluster_size,
                         min_samples=args.hdbscan_min_samples, umap_dims=args.umap_dims,
-                        validate=args.validate, hdbscan_sample=args.hdbscan_sample)
+                        validate=args.validate, hdbscan_sample=args.hdbscan_sample,
+                        feature_mode=args.feature_mode)
         if args.save_run:
             _mark_run_saved()
     if args.save_run and not args.cluster:
@@ -4070,7 +4332,7 @@ def main():
     if args.collapse:
         cmd_collapse(threshold=args.collapse_threshold)
     if args.report:
-        cmd_report(fps=args.fps, min_confidence=args.min_confidence)
+        cmd_report(fps=args.fps, min_confidence=args.min_confidence, feature_mode=args.feature_mode)
     if args.summarize:
         cmd_summarize()
     if args.motifs:

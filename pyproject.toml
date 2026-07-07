@@ -28,7 +28,8 @@ dependencies = [
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",
     "pytest>=7.0",
-    "openpyxl"
+    "openpyxl",
+    "networkx>=3.0"
 ]
 
 [project.optional-dependencies]
@@ -80,6 +81,14 @@ deeplabcut = [
     "ruamel.yaml>=0.18",
     "timm>=1.0",
     "huggingface_hub>=0.20",
+]
+
+# Topological data analysis — only needed for feature_mode="topological"
+# (ml/representations/topological.py). Kept optional: TDA is computationally
+# expensive and exploratory (docs/DECISIONS.md — statistics-methods branch).
+# pip install -e ".[topology]"
+topology = [
+    "ripser>=0.6",
 ]
 
 # Development

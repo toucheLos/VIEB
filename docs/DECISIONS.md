@@ -559,3 +559,63 @@ pass only — no change to what data is shown, how scanning/filtering/export
 works, or the Artifacts-vs-Analysis conceptual split.
 **Related:** `views/artifacts.py`, `artifact_scanner.py`,
 `tests/test_artifact_scanner.py`, #19, #31
+
+## 51 — Alternative feature representations are isolated by directory, not a replacement
+**Decision:** Added `--feature-mode {default,shape_space,delay_embedding,topological}`
+to `compare.py`. `"default"` reproduces every existing path
+(`results/features/`, `results/shared/`, `results/comparison/`,
+`results/diagnostics/`) byte-for-byte — `ml/feature_extraction.py`
+(`PoseFeatureExtractor`) is untouched. Any other mode gets a fully isolated
+subtree (`results/features/<mode>/`, `results/shared/<mode>/`, etc.) so
+alternate representations never collide with the default extractor's
+outputs or with each other. New representations live in
+`ml/representations/` behind a small `fit()`/`transform()`/`get_meta()`
+contract (see `ml/representations/__init__.py`); `ml/pose_utils.py` holds
+independent low-level pose math (interpolation, smoothing, centroid, PCA
+orientation) duplicated rather than imported from `feature_extraction.py`,
+to keep that file frozen. `results/runs/` keeps one shared numbering
+sequence across all modes — each `run_manifest.json` now carries a
+`feature_mode` field (defaulting to `"default"` for old manifests) rather
+than each mode getting its own run-numbering subtree.
+**Why:** Decision #2 committed to a two-layer, keypoint-layout-agnostic,
+rule-based feature architecture; Decision #6 ruled out learned embeddings
+in favor of interpretable, principled representations. Procrustes shape
+space, Takens delay embedding, and persistent-homology summaries are all
+consistent with that direction, but must be validatable side-by-side
+against the current default rather than replacing it outright — directory
+isolation makes that comparison (and rollback) trivial.
+**Related:** `compare.py` (`_features_dir`/`_shared_dir`/`_diagnostics_dir`/
+`_comparison_dir`), `ml/representations/`, `ml/pose_utils.py`,
+`benchmark_feature_modes.py`, #2, #6
+
+## 52 — Repeatability + transition modularity computed once, in --report
+**Decision:** `ml/validation_stats.py` implements two validation metrics:
+`compute_repeatability_R` (Nakagawa & Schielzeth adjusted repeatability,
+ANOVA-based, per state, from `summary_table.csv`'s animal_id/day-joined
+occupancy fractions) and `compute_transition_modularity` (Louvain
+community detection on the aggregate transition-count graph, flagging
+"bridge" states whose transitions split across communities). Both run
+once, inside `cmd_report()` — the only point in the pipeline where
+per-video state occupancy is already joined with metadata and per-video
+transition matrices are already built — rather than in `cmd_cluster()`.
+Results are written to a new `results/diagnostics/<mode>/validation_stats.json`
+and patched (read-modify-write) into both `cluster_info.json`
+(`possible_split_states`, `repeatability_mean_R`) and `run_manifest.json`
+(`+modularity_Q`, `+n_possible_split_states`). Both metrics skip gracefully
+(never raise) when the data doesn't support them — e.g. fewer than 2
+animals with repeated sessions, or fewer than 3 states.
+**Why:** This is the primary quantitative bar for comparing alternative
+feature representations against the default (see #52) — a representation
+is "better" if it produces more repeatable, less-conflated states, not if
+it looks cleaner in a 2D embedding. Populating `possible_split_states`
+also activates the dormant hook `views/video_stories.py`'s
+`load_possible_split_states()` has carried since #50 with zero further UI
+changes needed. `networkx>=3.0` was added as a new **base** dependency
+(not an extras group) since this validation is always-on, not optional;
+`ripser` was added as a new optional `[project.optional-dependencies.topology]`
+extra (used only by `ml/representations/topological.py`) since persistent
+homology is comparatively expensive and exploratory, mirroring the
+cuML/DLC dependency separation from #32.
+**Related:** `ml/validation_stats.py`, `compare.py cmd_report()`,
+`views/video_stories.py load_possible_split_states()`, `pyproject.toml`,
+#32, #50, #51
