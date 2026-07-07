@@ -29,7 +29,7 @@ _SECTIONS = [
 _CONTENT: dict[str, str] = {
 
 "what_is_vieb": """
-<p>VIEB (Video Interpreter for Experimental Behavior) is an unsupervised machine learning pipeline
+<p>VIEB (Video Interpreter Excluding Bias) is an unsupervised machine learning pipeline
 for discovering behavioral states in animal behavior videos. Unlike traditional behavioral analysis
 tools that require you to define behaviors before measuring them — drawing zones, setting thresholds,
 or labeling example clips — VIEB finds behavioral structure in your data automatically, without any

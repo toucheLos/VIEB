@@ -12,7 +12,7 @@ After finishing each user-requested task in this repository, stage and commit th
 
 ## Project Overview
 
-VIEB (Video Interpreter for Experimental Behavior) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.
+VIEB (Video Interpreter Excluding Bias) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.
 
 ## Installation
 
