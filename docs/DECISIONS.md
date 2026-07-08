@@ -559,3 +559,26 @@ pass only — no change to what data is shown, how scanning/filtering/export
 works, or the Artifacts-vs-Analysis conceptual split.
 **Related:** `views/artifacts.py`, `artifact_scanner.py`,
 `tests/test_artifact_scanner.py`, #19, #31
+
+## 52 — `onboard.py`: headless CLI port of Stage 0 for HPC use
+**Decision/finding:** Added a standalone, Qt-free `onboard.py` at the repo root
+so VIEB can be onboarded on a headless HPC cluster with one command. It is a
+thin wrapper over the already-Qt-free `project_manager` functions the GUI's
+`Stage0ReadinessPanel` uses (`create_project` / `register_legacy_project` /
+`set_active_project` / `ensure_project_metadata` / `validate_project`); the
+panel's `_determine_state` state machine and its status/action wording are
+ported verbatim, split into a target-centric `determine_state` + `_classify`.
+Two deliberate deviations from the GUI: (1) the CLI is **target-centric** — it
+classifies and (non-`--check`) creates/activates the project at `--path` (or
+CWD), rather than only the app-config active project, so `--check --path X`
+reports X; (2) it adds a blank-cell scan of all `metadata.csv` columns (not
+just validation-required ones) and exits `1` when any are blank — per the user,
+"treat as done, note the blanks, exit 1, and print a fill-in command." Exit
+codes: `0` ready, `1` needs manual attention (blanks / incomplete), `2` hard
+failure (no data source / invalid project). Stage 0 only — runs nothing from
+Stage 1+.
+**Why:** Onboarding was GUI-only (`user_interface.py`), unreachable on a
+cluster; the underlying logic was already headless, so a wrapper avoided
+re-implementing it.
+**Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
+`user_interface.py` (`Stage0ReadinessPanel`)
