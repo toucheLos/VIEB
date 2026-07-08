@@ -256,6 +256,29 @@ def _blank_field_report(meta_path: Path) -> list[str]:
     return lines
 
 
+def _data_count_warning(source: dict) -> str:
+    """Warn when the raw-videos count and metadata row count disagree.
+
+    Per-video feature extraction (``compare.py --extract``) globs *every*
+    ``*.mp4`` in ``raw_videos_dir`` that has a pose sidecar — it is not limited
+    to metadata rows. A directory holding more (or fewer) videos than the study
+    describes silently changes what gets clustered, so surface it here.
+    """
+    raw_n = int(source.get("raw_videos", 0) or 0)
+    meta_n = int(source.get("metadata_rows", 0) or 0)
+    if raw_n and meta_n and raw_n != meta_n:
+        return (
+            f"{raw_n} video file(s) in the raw-videos directory vs {meta_n} "
+            f"metadata row(s). compare.py --extract processes every video in "
+            f"that directory that has a pose file, not just the metadata rows — "
+            f"extra videos (DLC labeled/derived clips, other experiments) would "
+            f"pollute the shared clustering. Point the raw-videos directory at a "
+            f"folder holding only your {meta_n} experiment videos + their pose "
+            f"files (see --raw-videos)."
+        )
+    return ""
+
+
 def _print_report(state, selected, validation, ctx, meta_path, target, as_json: bool) -> int:
     """Print the readiness report and return the process exit code."""
     blanks = _blank_field_report(meta_path) if meta_path else []
@@ -269,11 +292,13 @@ def _print_report(state, selected, validation, ctx, meta_path, target, as_json: 
 
     project_name = validation.project_name if validation else "No project selected"
     source_msg = ""
+    data_warning = ""
     if validation is not None:
         source = ctx.get("source") or validation.source or _pm.session_source_status(
             validation.path, validation.config, ROOT
         )
         source_msg = source.get("message", "")
+        data_warning = _data_count_warning(source)
 
     if as_json:
         print(json.dumps({
@@ -283,6 +308,7 @@ def _print_report(state, selected, validation, ctx, meta_path, target, as_json: 
             "project_path": str(validation.path) if validation else None,
             "metadata_path": str(meta_path) if meta_path else None,
             "data_summary": source_msg,
+            "data_warning": data_warning,
             "next_action": ACTION_TEXT.get(state, ""),
             "checks": [c.__dict__ for c in (validation.checks if validation else [])],
             "blank_fields": blanks,
@@ -306,6 +332,10 @@ def _print_report(state, selected, validation, ctx, meta_path, target, as_json: 
             marker = _CHECK_MARKER.get(chk.status, "[?]")
             detail = f" — {chk.message}" if chk.message else ""
             print(f"  {marker} {chk.label}{detail}")
+        print()
+
+    if data_warning:
+        print("Warning: " + data_warning)
         print()
 
     action = ACTION_TEXT.get(state, "")
