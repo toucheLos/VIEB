@@ -185,11 +185,42 @@ def _ensure_project(target: Path, name: str, raw_videos: str | None) -> Path:
         print(f"No active project — registering existing repo-root layout as "
               f"project '{name}'.")
         return _pm.register_legacy_project(ROOT, APP_CONFIG_PATH, name=name)
-    paths = {"raw_videos": str(Path(raw_videos).resolve())} if raw_videos else None
     print(f"No project at {target} — creating new project '{name}'.")
     return _pm.create_project(
-        target, name, paths=paths, repo_root=ROOT, app_config_path=APP_CONFIG_PATH
+        target, name, repo_root=ROOT, app_config_path=APP_CONFIG_PATH
     )
+
+
+def _set_raw_videos(project: Path, raw_videos: str) -> None:
+    """Point the project's raw-videos directory at ``raw_videos`` in config.json.
+
+    Works on new *and* existing projects, marks the path external when it lives
+    outside the project (required for the pipeline to accept it), and never
+    rewrites ``metadata.csv`` (so manually filled columns survive).
+    """
+    project = Path(project).resolve()
+    src = Path(raw_videos).expanduser().resolve()
+    if not src.is_dir():
+        raise _pm.ProjectSelectionError(f"--raw-videos is not a directory: {src}")
+    cfg = _pm._read_project_config(project)
+    paths = dict(cfg.get("paths") or {})
+    paths["raw_videos"] = str(src)
+    cfg["paths"] = paths
+    try:
+        src.relative_to(project)
+        inside = True
+    except ValueError:
+        inside = False
+    if not inside:
+        external = list(cfg.get("external_paths") or [])
+        if "raw_videos" not in external:
+            external.append("raw_videos")
+        cfg["external_paths"] = external
+        print(f"Pointing raw_videos at external directory {src} "
+              f"(added to external_paths).")
+    else:
+        print(f"Pointing raw_videos at {src}.")
+    _pm.write_project_config(project, cfg)
 
 
 # Columns whose blanks are expected (filled in by the researcher later, not by
@@ -316,7 +347,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--raw-videos", dest="raw_videos", default=None,
-        help="Raw videos source directory when creating a new project.",
+        help="Set the project's raw-videos directory (new or existing project); "
+             "marked external automatically when outside the project. Per-video "
+             "DLC pose files (.csv/.h5) alongside the videos are found by the "
+             "pipeline. Does not overwrite metadata.csv.",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -352,6 +386,8 @@ def main() -> int:
     if not args.check:
         try:
             project = _ensure_project(target, name, args.raw_videos)
+            if args.raw_videos:
+                _set_raw_videos(project, args.raw_videos)
             _pm.set_active_project(project, ROOT, APP_CONFIG_PATH)
             _pm.ensure_project_metadata(project, overwrite=args.force)
         except _pm.ProjectSelectionError as exc:
