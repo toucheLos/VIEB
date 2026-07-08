@@ -129,13 +129,17 @@ def _classify(project: Path, root: Path, validation=None):
     return ("ready_for_stage2", validation, ctx)
 
 
-def determine_state(root: Path, app_config_path: Path, target: Path):
+def determine_state(root: Path, app_config_path: Path, target: Path,
+                    allow_discovery: bool = True):
     """Target-centric headless port of ``Stage0ReadinessPanel._determine_state``.
 
     Classifies the project at ``target`` directly (so ``--check --path X``
     reports X, not whatever happens to be the active project). When ``target``
-    is not yet a project, defers to project discovery for guidance
-    (``auto_detected`` / ``picker_required`` / ``no_project``).
+    is not yet a project and ``allow_discovery`` is set (i.e. no explicit
+    ``--path`` was given), defers to project discovery for guidance
+    (``auto_detected`` / ``picker_required`` / ``no_project``). With an explicit
+    ``--path`` that isn't a project, reports ``no_project`` for that path rather
+    than silently reporting some other detected project.
 
     Returns ``(state, selected, validation, ctx)``.
     """
@@ -143,6 +147,9 @@ def determine_state(root: Path, app_config_path: Path, target: Path):
     if (target / _pm.PROJECT_CONFIG_NAME).exists() or _pm.is_valid_project(target):
         state, validation, ctx = _classify(target, root)
         return (state, None, validation, ctx)
+
+    if not allow_discovery:
+        return ("no_project", None, None, {})
 
     selected = _pm.select_startup_project(root, app_config_path)
     if not selected.active_project:
@@ -175,8 +182,11 @@ def _ensure_project(target: Path, name: str, raw_videos: str | None) -> Path:
     if (target / _pm.PROJECT_CONFIG_NAME).exists():
         return target
     if _looks_like_legacy_root(target):
+        print(f"No active project — registering existing repo-root layout as "
+              f"project '{name}'.")
         return _pm.register_legacy_project(ROOT, APP_CONFIG_PATH, name=name)
     paths = {"raw_videos": str(Path(raw_videos).resolve())} if raw_videos else None
+    print(f"No project at {target} — creating new project '{name}'.")
     return _pm.create_project(
         target, name, paths=paths, repo_root=ROOT, app_config_path=APP_CONFIG_PATH
     )
@@ -215,7 +225,7 @@ def _blank_field_report(meta_path: Path) -> list[str]:
     return lines
 
 
-def _print_report(state, selected, validation, ctx, meta_path, as_json: bool) -> int:
+def _print_report(state, selected, validation, ctx, meta_path, target, as_json: bool) -> int:
     """Print the readiness report and return the process exit code."""
     blanks = _blank_field_report(meta_path) if meta_path else []
 
@@ -271,6 +281,10 @@ def _print_report(state, selected, validation, ctx, meta_path, as_json: bool) ->
     if action:
         print(f"Next: {action}")
 
+    if state in ("no_project", "picker_required"):
+        print("To create/onboard a project here, run:")
+        print(f"  python onboard.py --path {target} --name <project-name>")
+
     if blanks:
         print()
         print("Note: metadata generated, but some fields are blank and must be")
@@ -318,7 +332,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    target = Path(args.path).expanduser().resolve() if args.path else Path.cwd().resolve()
+    if args.path:
+        # Explicit --path: operate strictly on this directory.
+        target = Path(args.path).expanduser().resolve()
+        allow_discovery = False
+    else:
+        # No --path: prefer the active/detected project (like the GUI); fall
+        # back to the current directory so a fresh setup with no active
+        # project can be created in place.
+        active = None
+        try:
+            active = _pm.select_startup_project(ROOT, APP_CONFIG_PATH).active_project
+        except Exception:
+            active = None
+        target = Path(active).resolve() if active else Path.cwd().resolve()
+        allow_discovery = True
     name = args.name or target.name
 
     if not args.check:
@@ -333,14 +361,16 @@ def main() -> int:
             print(f"Onboarding failed: {exc}", file=sys.stderr)
             return 2
 
-    state, selected, validation, ctx = determine_state(ROOT, APP_CONFIG_PATH, target)
+    state, selected, validation, ctx = determine_state(
+        ROOT, APP_CONFIG_PATH, target, allow_discovery=allow_discovery
+    )
     meta_path = None
     if validation is not None:
         paths = ctx.get("paths") or validation.paths
         if paths and "metadata" in paths:
             meta_path = paths["metadata"].path
 
-    return _print_report(state, selected, validation, ctx, meta_path, args.json)
+    return _print_report(state, selected, validation, ctx, meta_path, target, args.json)
 
 
 if __name__ == "__main__":

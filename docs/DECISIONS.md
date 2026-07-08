@@ -568,10 +568,12 @@ thin wrapper over the already-Qt-free `project_manager` functions the GUI's
 `set_active_project` / `ensure_project_metadata` / `validate_project`); the
 panel's `_determine_state` state machine and its status/action wording are
 ported verbatim, split into a target-centric `determine_state` + `_classify`.
-Two deliberate deviations from the GUI: (1) the CLI is **target-centric** — it
-classifies and (non-`--check`) creates/activates the project at `--path` (or
-CWD), rather than only the app-config active project, so `--check --path X`
-reports X; (2) it adds a blank-cell scan of all `metadata.csv` columns (not
+Two deliberate deviations from the GUI: (1) target selection — an explicit
+`--path X` operates strictly on X (creates it when there is no active project;
+`--check --path X` reports only X, never a discovered project), while a bare
+invocation prefers the active/detected project like the GUI and falls back to
+the current directory only when none exists, so a fresh no-active-project setup
+can be created in place; (2) it adds a blank-cell scan of all `metadata.csv` columns (not
 just validation-required ones) and exits `1` when any are blank — per the user,
 "treat as done, note the blanks, exit 1, and print a fill-in command." Exit
 codes: `0` ready, `1` needs manual attention (blanks / incomplete), `2` hard
