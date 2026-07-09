@@ -584,3 +584,34 @@ cluster; the underlying logic was already headless, so a wrapper avoided
 re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
+
+## 53 — Video playback speeds, resizable annotation player, Video Stories full-video + progression
+**Decision/finding:** Three coupled video-UX changes. (1) All players now offer
+`0.25x…2x` (added `1.25x/1.5x/2x`) — the speed list lives in the two duplicate
+`VideoPlayer` classes (`_widgets.py`, `user_interface.py`); the lone `2x` that
+`_ValidationPlayer` used to append was removed as now-redundant. (2) The shared
+`VideoPlayer._display` is now `Expanding` and re-renders the current frame on
+`resizeEvent` when paused, so dragging the existing Clip-Reviewer splitter /
+resizing the window enlarges the video without any layout rework and annotation
+(keys 1–9) stays active — chosen over a dedicated "Enlarge" button. (3) Video
+Stories gained an inline **full-session** `VideoPlayer` (not the old 5s clip):
+`VideoPlayer` now emits `frame_changed(idx)`; the view drives a red timeline
+playhead + a colored active-state badge from it. **Single-click on the timeline
+now seeks the inline player** (was: open a clip dialog); the pop-out (`⛶ Pop out`
+button / `_open_segment_dialog`, user chose *Both*) opens a resizable window
+playing the full video with its own synced mini-timeline playhead + badge. The
+old `_ClipWorker`/`compute_clip_window` clip-generation path is left defined but
+unused by the dialog (kept only to preserve `compute_clip_window`'s unit tests).
+A **Progression summary** (distance-from-baseline trajectory + state-occupancy
+stacked-area ribbon, both read straight from `subject_journeys.csv`
+`distance_from_baseline`/`story_similarity_to_baseline`/`state_occupancy_vector`
+— no recomputation) sits atop the "Compare across time" section, answering the
+cross-session "did this animal get better" question distinct from the
+within-session playhead. Optional `journey_milestones` config (`{timepoint:
+label}`) draws vertical reference lines on both charts, no-op when absent (same
+graceful-skip pattern as `load_possible_split_states`).
+**Why:** Users wanted faster review, a bigger annotatable video, and to watch a
+whole session synced to the state timeline plus a summary of change across the
+study. Extends #49/#50.
+**Related:** `_widgets.py`, `user_interface.py`, `views/validation.py`,
+`views/video_stories.py`, `tests/test_video_stories.py`, #49, #50

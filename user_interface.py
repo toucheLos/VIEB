@@ -73,6 +73,7 @@ try:
         QProgressBar,
         QRadioButton,
         QScrollArea,
+        QSizePolicy,
         QSlider,
         QSpinBox,
         QStackedWidget,
@@ -1373,8 +1374,9 @@ class VideoPlayer(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self._display = QLabel("No video loaded", alignment=Qt.AlignCenter)
         self._display.setMinimumSize(320, 220)
+        self._display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._display.setStyleSheet("background:#111;color:#999;")
-        lay.addWidget(self._display)
+        lay.addWidget(self._display, stretch=1)
 
         ctrl = QHBoxLayout()
         self._btn_play = QPushButton("Play")
@@ -1391,7 +1393,7 @@ class VideoPlayer(QWidget):
 
         ctrl.addWidget(QLabel("Speed"))
         self._speed_combo = QComboBox()
-        self._speed_combo.addItems(["0.25x", "0.5x", "1x"])
+        self._speed_combo.addItems(["0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x"])
         self._speed_combo.setCurrentText("1x")
         self._speed_combo.currentTextChanged.connect(self._set_speed)
         ctrl.addWidget(self._speed_combo)
@@ -1469,6 +1471,11 @@ class VideoPlayer(QWidget):
     def seek(self, idx):
         self.pause()
         self._show(idx)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._cap and not self._playing:
+            self._show(self._cur)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Space:

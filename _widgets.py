@@ -7,7 +7,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor, QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSlider, QTableWidget, QToolButton,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QTableWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -183,6 +183,7 @@ class CollapsibleTableWidget(QWidget):
 
 class VideoPlayer(QWidget):
     video_finished = pyqtSignal()
+    frame_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -204,8 +205,9 @@ class VideoPlayer(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self._display = QLabel("No video loaded", alignment=Qt.AlignCenter)
         self._display.setMinimumSize(320, 220)
+        self._display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._display.setStyleSheet("background:#111;color:#999;")
-        lay.addWidget(self._display)
+        lay.addWidget(self._display, stretch=1)
 
         ctrl = QHBoxLayout()
         self._btn_play = QPushButton("Play")
@@ -222,7 +224,7 @@ class VideoPlayer(QWidget):
 
         ctrl.addWidget(QLabel("Speed"))
         self._speed_combo = QComboBox()
-        self._speed_combo.addItems(["0.25x", "0.5x", "1x"])
+        self._speed_combo.addItems(["0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x"])
         self._speed_combo.setCurrentText("1x")
         self._speed_combo.currentTextChanged.connect(self._set_speed)
         ctrl.addWidget(self._speed_combo)
@@ -270,6 +272,14 @@ class VideoPlayer(QWidget):
         self._slider.blockSignals(True)
         self._slider.setValue(idx)
         self._slider.blockSignals(False)
+        self.frame_changed.emit(idx)
+
+    def resizeEvent(self, e):
+        # Re-render the current frame at the new size when paused; during
+        # playback _show already re-scales every frame.
+        super().resizeEvent(e)
+        if self._cap and not self._playing:
+            self._show(self._cur)
 
     def _next_frame(self):
         nxt = self._cur + 1

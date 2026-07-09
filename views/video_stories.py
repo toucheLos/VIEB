@@ -529,6 +529,10 @@ class VideoStoriesView(QWidget):
         self._source: str | None = None
         self._current_bouts: pd.DataFrame | None = None
         self._current_story: dict | None = None
+        self._story_player = None
+        self._active_state_lbl = None
+        self._playhead_line = None
+        self._popout_dialog = None
         self._subject_active = False
         self._timepoint_active = False
         self._condition_active = False
@@ -605,6 +609,28 @@ class VideoStoriesView(QWidget):
             self._timeline_canvas = None
             cl.addWidget(_placeholder("Install matplotlib to view the timeline."))
 
+        # ── Full-session video player (synced to the timeline playhead) ──────
+        player_header = QHBoxLayout()
+        player_header.addWidget(_section_title("Session Video"))
+        self._active_state_lbl = QLabel("")
+        self._active_state_lbl.setStyleSheet("font-weight:bold; padding:2px 8px;")
+        player_header.addWidget(self._active_state_lbl)
+        player_header.addStretch()
+        self._popout_btn = QPushButton("⛶ Pop out")
+        self._popout_btn.setToolTip("Open the full session video in a larger, resizable window")
+        self._popout_btn.clicked.connect(self._on_popout_clicked)
+        player_header.addWidget(self._popout_btn)
+        cl.addLayout(player_header)
+
+        self._story_player = VideoPlayer()
+        self._story_player.setMinimumHeight(300)
+        self._story_player.frame_changed.connect(self._on_player_frame)
+        cl.addWidget(self._story_player)
+
+        self._video_note = _placeholder("Source video unavailable locally for this session.")
+        self._video_note.setVisible(False)
+        cl.addWidget(self._video_note)
+
         cl.addWidget(_section_title("State Legend"))
         self._legend_widget = QWidget()
         self._legend_layout = QGridLayout(self._legend_widget)
@@ -633,6 +659,23 @@ class VideoStoriesView(QWidget):
         compare_lay = QVBoxLayout(self._compare_content)
         compare_lay.setContentsMargins(0, 4, 0, 0)
         compare_lay.setSpacing(8)
+
+        # ── Progression summary: "is this animal getting better across the
+        #    whole study?" (cross-session), shown above the per-timepoint strips.
+        compare_lay.addWidget(_section_title("Progression summary"))
+        prog_row = QHBoxLayout()
+        if _MPL:
+            self._progress_canvas1 = MplCanvas(figsize=(4.3, 2.2))
+            self._progress_canvas1.setMinimumHeight(160)
+            self._progress_canvas2 = MplCanvas(figsize=(4.3, 2.2))
+            self._progress_canvas2.setMinimumHeight(160)
+            prog_row.addWidget(self._progress_canvas1)
+            prog_row.addWidget(self._progress_canvas2)
+        else:
+            self._progress_canvas1 = None
+            self._progress_canvas2 = None
+            prog_row.addWidget(_placeholder("Install matplotlib to view progression plots."))
+        compare_lay.addLayout(prog_row)
 
         compare_lay.addWidget(_section_title("Journey: state progression across timepoints"))
         if _MPL:
@@ -834,6 +877,65 @@ class VideoStoriesView(QWidget):
         self._render_timeline()
         self._render_legend()
         self._render_compare_section()
+        self._load_story_video(str(video_id))
+
+    # ─────────────────────────────────────────────── inline video player ──
+
+    def _fps(self) -> float:
+        try:
+            return float(self.cfg.get("fps", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _load_story_video(self, video_id: str) -> None:
+        """Load the full session video into the inline player (paused)."""
+        if self._story_player is None:
+            return
+        self._story_player.pause()
+        self._active_state_lbl.setText("")
+        video_path = resolve_source_video(video_id, self._feature_index)
+        if not video_path:
+            self._story_player.setVisible(False)
+            self._video_note.setVisible(True)
+            return
+        self._video_note.setVisible(False)
+        self._story_player.setVisible(True)
+        self._story_player.load(video_path)
+        self._update_active_state(0.0)
+
+    def _on_player_frame(self, idx: int) -> None:
+        sec = idx / self._fps()
+        self._move_playhead(sec)
+        self._update_active_state(sec)
+
+    def _move_playhead(self, sec: float) -> None:
+        if self._timeline_canvas is None or self._playhead_line is None:
+            return
+        self._playhead_line.set_xdata([sec, sec])
+        self._timeline_canvas.draw_idle()
+
+    def _update_active_state(self, sec: float) -> None:
+        if self._active_state_lbl is None:
+            return
+        bout = find_bout_at_time(self._current_bouts, sec)
+        if bout is None:
+            self._active_state_lbl.setText("")
+            return
+        sid = int(bout["state"])
+        colors = _state_colors(max(sid + 1, 10))
+        c = colors[sid] if sid < len(colors) else (0.4, 0.4, 0.4, 1.0)
+        rgb = tuple(int(255 * x) for x in c[:3])
+        self._active_state_lbl.setText(f"● {state_label_text(sid, self._state_labels)}")
+        self._active_state_lbl.setStyleSheet(
+            f"font-weight:bold; padding:2px 8px; color:rgb{rgb};"
+        )
+
+    def _seek_story_to(self, sec: float) -> None:
+        """Seek the inline player to a time in seconds and refresh the badge."""
+        if self._story_player is not None:
+            self._story_player.seek(int(round(sec * self._fps())))
+        self._move_playhead(sec)
+        self._update_active_state(sec)
 
     # ─────────────────────────────────────────────────────────── render ──
 
@@ -897,6 +999,7 @@ class VideoStoriesView(QWidget):
             return
         ax = self._timeline_canvas.ax
         ax.clear()
+        self._playhead_line = None
         bouts = self._current_bouts
         story = self._current_story or {}
         duration = float(story.get("duration_sec") or 0.0)
@@ -919,10 +1022,11 @@ class VideoStoriesView(QWidget):
                 mid = float(row["start_sec"]) + dur / 2.0
                 ax.text(mid, 0.5, str(int(row["state"])), ha="center", va="center", fontsize=7, color="white")
 
+        self._playhead_line = ax.axvline(0, color="#e74c3c", linewidth=1.5, alpha=0.9, zorder=5)
         ax.set_xlim(0, duration)
         ax.set_ylim(0, 1)
         ax.set_yticks([])
-        ax.set_xlabel("Time (s)")
+        ax.set_xlabel("Time (s) — click to seek the video below")
         self._timeline_canvas.draw()
 
     def _render_legend(self) -> None:
@@ -952,8 +1056,102 @@ class VideoStoriesView(QWidget):
         story = self._current_story or {}
         subject = self._subject_combo.currentText() if self._subject_active else story.get("subject_id")
         condition = self._condition_combo.currentText() if self._condition_active else None
+        self._render_progression_summary(subject)
         self._render_journey_strips(subject, condition, story)
         self._render_compare_metrics(subject)
+
+    def _journey_milestones(self) -> dict:
+        """Optional {timepoint: label} map for vertical reference lines on the
+        progression charts. Driven by config; empty (no-op) when absent."""
+        raw = self.cfg.get("journey_milestones") if isinstance(self.cfg, dict) else None
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): str(v) for k, v in raw.items() if not _is_blank(v)}
+
+    def _draw_milestones(self, ax, ordered_tp: list, x: list) -> None:
+        milestones = self._journey_milestones()
+        if not milestones:
+            return
+        tp_to_x = {str(tp): xi for tp, xi in zip(ordered_tp, x)}
+        for tp, label in milestones.items():
+            xi = tp_to_x.get(str(tp))
+            if xi is None:
+                continue
+            ax.axvline(xi, color="#555", linestyle="--", linewidth=1.0, alpha=0.7, zorder=1)
+            ax.text(xi, ax.get_ylim()[1], f" {label}", rotation=90, va="top", ha="left",
+                    fontsize=6, color="#555")
+
+    def _render_progression_summary(self, subject) -> None:
+        if self._progress_canvas1 is None or self._progress_canvas2 is None:
+            return
+        ax1 = self._progress_canvas1.ax
+        ax2 = self._progress_canvas2.ax
+        ax1.clear()
+        ax2.clear()
+
+        rows = subject_journey_rows(self._journeys, subject)
+        if rows.empty:
+            for ax in (ax1, ax2):
+                ax.text(0.5, 0.5, "No journey data for this subject", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=8)
+            self._progress_canvas1.draw()
+            self._progress_canvas2.draw()
+            return
+
+        tp_values = order_timepoints(rows["timepoint"].tolist(), RESULTS)
+        rows_by_tp = rows.set_index(rows["timepoint"].astype(str))
+        ordered_tp = [tp for tp in tp_values if str(tp) in rows_by_tp.index]
+        ordered_rows = [rows_by_tp.loc[str(tp)] for tp in ordered_tp]
+        ordered_rows = [r.iloc[0] if isinstance(r, pd.DataFrame) else r for r in ordered_rows]
+        x = list(range(len(ordered_tp)))
+        xt = [format_label_value(tp) for tp in ordered_tp]
+
+        # ── (1) Distance-from-baseline trajectory ──────────────────────────
+        dist = []
+        for r in ordered_rows:
+            d = pd.to_numeric(r.get("distance_from_baseline"), errors="coerce")
+            if pd.isna(d):
+                sim = pd.to_numeric(r.get("story_similarity_to_baseline"), errors="coerce")
+                d = (1.0 - sim) if not pd.isna(sim) else np.nan
+            dist.append(float(d))
+        ax1.axhline(0, color="#999", linewidth=1.0, linestyle="-", alpha=0.6, zorder=1)
+        ax1.plot(x, dist, marker="o", color="#8e44ad", linewidth=1.8, zorder=3)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(xt, fontsize=7)
+        ax1.set_ylabel("distance", fontsize=8)
+        ax1.set_title("Distance from baseline (recovery/learning)", fontsize=9)
+        self._draw_milestones(ax1, ordered_tp, x)
+
+        # ── (2) State-occupancy ribbon (stacked area) ──────────────────────
+        vectors = []
+        for r in ordered_rows:
+            try:
+                vec = json.loads(str(r.get("state_occupancy_vector") or "[]"))
+            except (ValueError, TypeError):
+                vec = []
+            vectors.append([float(v) for v in vec])
+        n_states = max((len(v) for v in vectors), default=0)
+        if n_states > 0 and len(x) > 0:
+            mat = np.zeros((n_states, len(vectors)))
+            for j, v in enumerate(vectors):
+                for s in range(len(v)):
+                    mat[s, j] = v[s]
+            colors = _state_colors(max(n_states, 10))
+            band_colors = [colors[s] if s < len(colors) else (0.4, 0.4, 0.4, 1.0) for s in range(n_states)]
+            ax2.stackplot(x, mat, colors=band_colors)
+            ax2.set_xlim(x[0], x[-1] if len(x) > 1 else x[0] + 1)
+            ax2.set_ylim(0, max(1.0, float(mat.sum(axis=0).max())))
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(xt, fontsize=7)
+            ax2.set_ylabel("occupancy", fontsize=8)
+            ax2.set_title("State occupancy across sessions", fontsize=9)
+            self._draw_milestones(ax2, ordered_tp, x)
+        else:
+            ax2.text(0.5, 0.5, "No occupancy data", ha="center", va="center",
+                     transform=ax2.transAxes, fontsize=8)
+
+        self._progress_canvas1.draw()
+        self._progress_canvas2.draw()
 
     def _render_journey_strips(self, subject, condition, story: dict) -> None:
         if self._compare_canvas is None:
@@ -1079,19 +1277,28 @@ class VideoStoriesView(QWidget):
     # ────────────────────────────────────────────────────── click-to-play ──
 
     def _on_timeline_click(self, event) -> None:
+        # Single-click seeks the inline session-video player to that time.
         if event.inaxes is None or event.xdata is None:
             return
+        self._seek_story_to(float(event.xdata))
+
+    def _on_popout_clicked(self) -> None:
         bouts = self._current_bouts
         if bouts is None or bouts.empty:
             return
-        bout = find_bout_at_time(bouts, float(event.xdata))
-        if bout is None:
-            return
+        # Pop out at the current playhead (fall back to the first bout).
+        sec = (self._story_player._cur / self._fps()) if self._story_player is not None else 0.0
+        bout = find_bout_at_time(bouts, sec) or bouts.iloc[0].to_dict()
         self._open_segment_dialog(bout)
 
     def _open_segment_dialog(self, bout: dict) -> None:
+        """Resizable pop-out that plays the *full* session video with a synced
+        mini-timeline playhead + active-state badge, opened at ``bout``."""
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"State {int(bout['state'])} — {format_duration(bout.get('start_sec'))}–{format_duration(bout.get('end_sec'))}")
+        dlg.setWindowTitle(
+            f"Session video — State {int(bout['state'])} @ {format_duration(bout.get('start_sec'))}"
+        )
+        dlg.setSizeGripEnabled(True)
         lay = QVBoxLayout(dlg)
 
         story = self._current_story or {}
@@ -1105,11 +1312,11 @@ class VideoStoriesView(QWidget):
                 motif_hits = bout_motif_membership(states, int(match[0]), top_motifs)
 
         header = QLabel(
-            f"State: {int(bout['state'])}\n"
+            f"State: {int(bout['state'])}   "
             f"Start: {format_duration(bout.get('start_sec'))}   "
             f"End: {format_duration(bout.get('end_sec'))}   "
             f"Duration: {format_duration(bout.get('duration_sec'))}\n"
-            f"Confidence: {format_number(bout.get('confidence_mean')) if not _is_blank(bout.get('confidence_mean')) else 'not available'}\n"
+            f"Confidence: {format_number(bout.get('confidence_mean')) if not _is_blank(bout.get('confidence_mean')) else 'not available'}   "
             f"Motif membership: {', '.join(str(m) for m in motif_hits) if motif_hits else 'none'}"
         )
         lay.addWidget(header)
@@ -1122,39 +1329,61 @@ class VideoStoriesView(QWidget):
             dlg.exec_()
             return
 
-        status_lbl = QLabel("Generating clip…")
-        lay.addWidget(status_lbl)
+        badge = QLabel("")
+        badge.setStyleSheet("font-weight:bold; padding:2px 8px;")
+        lay.addWidget(badge)
+
         player = VideoPlayer(parent=dlg)
-        player.setVisible(False)
         lay.addWidget(player, stretch=1)
-        dlg.resize(700, 560)
 
-        fps = float(self.cfg.get("fps", 30.0) or 30.0)
-        win_start, win_end = compute_clip_window(
-            float(bout["start_sec"]), float(bout["end_sec"]),
-            target_clip_sec=self._CLIP_TARGET_SEC, min_clip_sec=self._CLIP_MIN_SEC,
-            pad_before_sec=self._CLIP_PAD_BEFORE_SEC, pad_after_sec=self._CLIP_PAD_AFTER_SEC,
-            video_duration_sec=story.get("duration_sec"),
-        )
-        start_frame = int(round(win_start * fps))
-        end_frame = int(round(win_end * fps))
-        window_sec = max(win_end - win_start, self._CLIP_MIN_SEC)
-        out_dir = Path(_vc.get_clips_dir()) / "stories" / video_id
-        out_path = str(out_dir / f"f{start_frame}-{end_frame}.mp4")
+        duration = float(story.get("duration_sec") or 0.0)
+        bouts = self._current_bouts
+        fps = self._fps()
+        playhead = {"line": None, "canvas": None}
+        if _MPL and duration > 0 and bouts is not None and not bouts.empty:
+            mini = MplCanvas(figsize=(9, 1.2))
+            mini.setMinimumHeight(90)
+            ax = mini.ax
+            draw_bout_strip(
+                ax, bouts, 0, 1,
+                lambda row: (float(row["start_sec"]), float(row["end_sec"]) - float(row["start_sec"])),
+                load_possible_split_states(RESULTS),
+            )
+            playhead["line"] = ax.axvline(0, color="#e74c3c", linewidth=1.5, alpha=0.9, zorder=5)
+            playhead["canvas"] = mini
+            ax.set_xlim(0, duration)
+            ax.set_ylim(0, 1)
+            ax.set_yticks([])
+            ax.set_xlabel("Time (s) — click to seek")
+            mini.mpl_connect(
+                "button_press_event",
+                lambda ev: player.seek(int(round(float(ev.xdata) * fps)))
+                if ev.inaxes is not None and ev.xdata is not None else None,
+            )
+            lay.addWidget(mini)
 
-        def on_done(ok: bool, path_or_error: str) -> None:
-            status_lbl.setVisible(False)
-            if ok:
-                player.setVisible(True)
-                player.load(path_or_error)
-                player.play()
-            else:
-                status_lbl.setVisible(True)
-                status_lbl.setText(f"Could not generate clip: {path_or_error}")
+        def _update(idx: int) -> None:
+            sec = idx / fps
+            if playhead["line"] is not None:
+                playhead["line"].set_xdata([sec, sec])
+                playhead["canvas"].draw_idle()
+            b = find_bout_at_time(bouts, sec)
+            if b is None:
+                badge.setText("")
+                return
+            sid = int(b["state"])
+            colors = _state_colors(max(sid + 1, 10))
+            c = colors[sid] if sid < len(colors) else (0.4, 0.4, 0.4, 1.0)
+            rgb = tuple(int(255 * x) for x in c[:3])
+            badge.setText(f"● {state_label_text(sid, self._state_labels)}")
+            badge.setStyleSheet(f"font-weight:bold; padding:2px 8px; color:rgb{rgb};")
 
-        self._clip_worker = _ClipWorker(video_path, start_frame, end_frame, out_path, fps, window_sec)
-        self._clip_worker.done.connect(on_done)
-        self._clip_worker.start()
+        player.frame_changed.connect(_update)
+        player.load(video_path)
+        player._loop_btn.setChecked(True)
+        player.seek(int(round(float(bout.get("start_sec", 0.0)) * fps)))
+        player.play()
+        dlg.resize(880, 720)
 
         def cleanup() -> None:
             player.pause()

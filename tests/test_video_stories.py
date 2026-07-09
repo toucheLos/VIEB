@@ -314,11 +314,13 @@ def test_timeline_click_finds_correct_bout(tmp_path, monkeypatch):
         inaxes = view._timeline_canvas.ax
         xdata = 1.0
 
-    opened = []
-    view._open_segment_dialog = lambda bout: opened.append(bout)
+    # Single-click now seeks the inline session-video player to that time.
+    seeks = []
+    view._seek_story_to = lambda sec: seeks.append(sec)
     view._on_timeline_click(_FakeEvent())
-    assert len(opened) == 1
-    assert opened[0]["state"] == 0
+    assert seeks == [1.0]
+    # The bout active at that time is state 0.
+    assert vs.find_bout_at_time(view._current_bouts, 1.0)["state"] == 0
 
 
 def test_missing_source_video_shows_inline_message_no_crash(tmp_path, monkeypatch):
