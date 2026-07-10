@@ -3211,7 +3211,7 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
         for ax, col in zip(axes, state_cols):
             data = [df[df[group_col] == g][col].dropna().values for g in groups]
-            bp = ax.boxplot(data, labels=[str(g) for g in groups], patch_artist=True)
+            bp = ax.boxplot(data, tick_labels=[str(g) for g in groups], patch_artist=True)
             colors = plt.cm.tab10(np.linspace(0, 0.5, len(groups)))
             for patch, color in zip(bp["boxes"], colors):
                 patch.set_facecolor(color)

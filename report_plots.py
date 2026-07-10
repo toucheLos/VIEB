@@ -186,7 +186,7 @@ def state_duration_distribution(bouts: pd.DataFrame | None, results_dir: Path) -
     if not states or not any(len(g) for g in groups):
         return _skip(name, "no valid bout durations")
     fig, ax = plt.subplots(figsize=(max(7, 0.35 * len(states)), 5))
-    ax.boxplot(groups, labels=[f"S{int(s)}" for s in states], showfliers=False)
+    ax.boxplot(groups, tick_labels=[f"S{int(s)}" for s in states], showfliers=False)
     ax.set_xlabel("State")
     ax.set_ylabel("Bout duration (s)")
     ax.set_title("State Duration Distribution")
