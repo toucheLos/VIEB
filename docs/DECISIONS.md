@@ -615,3 +615,53 @@ whole session synced to the state timeline plus a summary of change across the
 study. Extends #49/#50.
 **Related:** `_widgets.py`, `user_interface.py`, `views/validation.py`,
 `views/video_stories.py`, `tests/test_video_stories.py`, #49, #50
+
+## 54 — `sample` branch: bundled 5-video demo project, DLC-complete
+**Decision/finding:** Added a `sample` branch carrying a self-contained demo
+project at `projects/sample/` (5 curated mouse fear-conditioning videos, pose
+tracking already run) so a new user can explore what VIEB does without
+supplying their own data. `.gitignore`'s blanket `projects/*`/`*.mp4`/
+`results/`/`metadata.csv`/`config.json` rules would otherwise swallow it, so a
+trailing carve-out (`!projects/sample/` + `!projects/sample/**`) re-includes
+just that subtree — verified with `git check-ignore -v` and `git add -n` that
+exactly the intended files stage and no other `projects/*` directory is
+affected. Source videos (640×480, ~9.2Mbps H.264) were re-encoded with the only
+available encoder in this environment (`libopenh264`, no `libx264`) at
+`-b:v 900k -maxrate 1200k`, audio dropped, to bring each file from
+145–245MB down to 5.5–9.8MB while preserving frame count (pose-index
+alignment) and visual quality for this footage. DLC pose output was converted
+per-video `.h5` → `.csv` (pandas `read_hdf`/`to_csv`) rather than shipped as
+H5, matching the CSV-first convention `_has_pose_csvs()` (`_utils.py`) and the
+architecture doc already treat as primary; `_full.pickle`/`_meta.pickle`
+sidecars were dropped as unused (`pose_io._find_dlc_csv` explicitly excludes
+them). `projects/sample/config.json` uses paths relative to the project dir
+(`"raw_videos"`, `"metadata.csv"`, `"results"`), which `project_manager._abs()`
+resolves against the project directory at load time — so the project works
+regardless of where the branch is cloned, without any machine-specific
+absolute paths baked in. `min_cluster_size` is left at the project's
+documented default (50) rather than hand-tuned for this dataset — finding a
+better state count for the sample data is exactly what the GUI's Cluster Runs
+view is for, not something to pre-bake into the demo.
+
+Fixed a real onboarding gap while wiring this up:
+`project_manager.session_source_status()` only detected pose data via a
+separate `pose_files_dir` (loose-CSV folder) or a single shared `h5_path` — it
+never checked for the standard per-video `<video>DLC*.csv`/`.h5` sitting
+beside each raw video, which is the convention `pose_io._find_dlc_csv` actually
+uses for the real pipeline. Without this fix, onboarding would tell a
+DLC-complete sample-branch user "ready for pose estimation, continue to Stage
+1," directly contradicting the point of the branch. Added
+`_count_paired_pose_files()` (one `iterdir()` pass, no recursion, per
+`test_stage0_session_source_status_is_lightweight`) and a new `"paired_pose"`
+key on `session_source_status()`'s result; OR'd it into the `has_pose` checks
+in both `onboard.py::_classify` and
+`user_interface.py::Stage0ReadinessPanel._determine_state`, which are meant to
+stay in sync per #52. Existing `pose_csvs`/`h5` semantics and their tests were
+left untouched.
+**Why:** Lowers the barrier to trying VIEB — clone, `onboard.py --path
+projects/sample`, open the GUI, and continue the pipeline from Stage 2 onward
+with no setup. The onboarding fix was necessary for that flow to actually say
+"ready," not just for it to technically work if the user ignored the readiness
+panel.
+**Related:** `projects/sample/`, `.gitignore`, `project_manager.py`,
+`onboard.py`, `user_interface.py`, `README.md`, #52.

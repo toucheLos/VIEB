@@ -553,6 +553,42 @@ def _count_files(folder: Path | str | None, suffixes: set[str]) -> int:
     return count
 
 
+def _count_paired_pose_files(raw_videos_dir: Path | str | None) -> int:
+    """Count raw videos in ``raw_videos_dir`` that have a per-video DLC pose
+    file (.csv or .h5) sitting beside them — the convention ``pose_io.
+    _find_dlc_csv`` uses (e.g. ``video1DLC_resnet50_....csv``), distinct from
+    the separate ``pose_files_dir``/``h5_path`` sources tracked elsewhere in
+    this function's caller. One ``iterdir()`` pass, no recursive scanning.
+    """
+    if not raw_videos_dir:
+        return 0
+    path = Path(raw_videos_dir)
+    if not path.exists() or not path.is_dir():
+        return 0
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return 0
+    video_stems = [p.stem for p in entries if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS]
+    if not video_stems:
+        return 0
+    # Longest stems first so a stem that is a prefix of another video's stem
+    # (e.g. "vid_1" vs "vid_10") can't double-match the wrong video's pose file.
+    video_stems.sort(key=len, reverse=True)
+    matched = 0
+    for stem in video_stems:
+        for p in entries:
+            if not p.is_file() or p.suffix.lower() not in {".csv", ".h5"}:
+                continue
+            name_lower = p.name.lower()
+            if name_lower.endswith("_full.h5") or name_lower.endswith("_full.pickle") or "metadata" in name_lower:
+                continue
+            if p.name.startswith(stem):
+                matched += 1
+                break
+    return matched
+
+
 def _metadata_row_count(path: Path | str | None) -> int:
     if not path:
         return 0
@@ -599,6 +635,7 @@ def session_source_status(
     pose_csv_count = _count_files(cfg.get("pose_files_dir"), {".csv"})
     h5_path = Path(cfg["h5_path"]) if cfg.get("h5_path") else None
     h5_exists = bool(h5_path and h5_path.exists() and h5_path.is_file())
+    paired_pose_count = _count_paired_pose_files(raw_info.path if raw_info.valid else None)
     metadata_rows = _metadata_row_count(meta_info.path if meta_info.valid else None)
     metadata_valid = False
     if metadata_rows:
@@ -614,13 +651,16 @@ def session_source_status(
         parts.append(f"{pose_csv_count} pose CSV(s)")
     if h5_exists:
         parts.append("H5 pose file")
+    if paired_pose_count:
+        parts.append(f"{paired_pose_count} video(s) with matching pose data")
     if metadata_valid:
         parts.append(f"{metadata_rows} metadata row(s)")
 
     result = {
-        "valid": bool(raw_count or pose_csv_count or h5_exists or metadata_valid),
+        "valid": bool(raw_count or pose_csv_count or h5_exists or paired_pose_count or metadata_valid),
         "raw_videos": raw_count,
         "pose_csvs": pose_csv_count,
+        "paired_pose": paired_pose_count,
         "h5": h5_exists,
         "metadata_rows": metadata_rows,
         "metadata_valid": metadata_valid,

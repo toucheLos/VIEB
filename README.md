@@ -69,6 +69,24 @@ python user_interface.py
 
 ---
 
+## Try it with sample data
+
+The `sample` branch bundles a small, ready-to-explore project — 5 mouse
+fear-conditioning videos with pose tracking already run, so there's nothing to
+label or train before you see VIEB work.
+
+```bash
+git checkout sample
+python onboard.py --path projects/sample   # creates + activates the project
+python user_interface.py                   # then continue the pipeline from the GUI
+```
+
+Onboarding (Stage 0) and pose estimation (Stage 1) are already done — the GUI
+will pick up from Stage 2 (Feature Extraction) and walk you through clustering,
+reports, motifs, and clip generation on the sample project.
+
+---
+
 ## Workflow
 
 VIEB is organized as a staged pipeline. Each stage builds on the previous one. The GUI guides you through all stages with a live terminal output and status indicators.

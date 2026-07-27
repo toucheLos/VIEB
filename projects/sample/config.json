@@ -1,0 +1,60 @@
+{
+  "project_name": "Sample",
+  "arena_bounds": {
+    "x_min": 0,
+    "y_min": 0,
+    "x_max": 640,
+    "y_max": 480
+  },
+  "fps": 30,
+  "min_cluster_size": 50,
+  "collapse_threshold": 0.5,
+  "use_wavelets": true,
+  "enable_state_collapse": false,
+  "onboarding_complete": true,
+  "last_completed_stage": "Pose Estimation / DLC Analysis",
+  "stage_status": {
+    "1": "done"
+  },
+  "context_groups": "A,B",
+  "context_descriptions": {
+    "A": "Fear conditioning context",
+    "B": "Neutral/discrimination context"
+  },
+  "hdbscan_min_samples": 0,
+  "umap_dims": 10,
+  "validate": false,
+  "min_confidence": 0.7,
+  "pose_source": "csv",
+  "column_map": {
+    "animal_id": "animal_id",
+    "day": "day",
+    "context": "context",
+    "experiment": "experiment",
+    "cohort": "",
+    "event": ""
+  },
+  "metadata_schema": {
+    "column_map": {
+      "session_id": "filename",
+      "animal_id": "animal_id",
+      "day": "day",
+      "context": "context",
+      "experiment": "experiment"
+    },
+    "optional_columns": {
+      "fear": "fear",
+      "no_shock": "no_shock"
+    }
+  },
+  "analysis_groups": [],
+  "ui_panels": {},
+  "external_paths": [],
+  "paths": {
+    "raw_videos": "raw_videos",
+    "pose_files": "",
+    "pose_h5": null,
+    "metadata": "metadata.csv",
+    "results": "results"
+  }
+}

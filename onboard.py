@@ -109,7 +109,11 @@ def _classify(project: Path, root: Path, validation=None):
     )
     ctx["source"] = source
     has_raw = source.get("raw_videos", 0) > 0
-    has_pose = source.get("pose_csvs", 0) > 0 or bool(source.get("h5"))
+    has_pose = (
+        source.get("pose_csvs", 0) > 0
+        or bool(source.get("h5"))
+        or source.get("paired_pose", 0) > 0
+    )
     if not has_raw and not has_pose:
         return ("needs_data", validation, ctx)
 
