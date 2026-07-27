@@ -665,3 +665,45 @@ with no setup. The onboarding fix was necessary for that flow to actually say
 panel.
 **Related:** `projects/sample/`, `.gitignore`, `project_manager.py`,
 `onboard.py`, `user_interface.py`, `README.md`, #52.
+
+## 55 — Fix: cluster-run bookkeeping wrote to the repo-root config.json, not the active project's
+**Decision/finding:** "Cluster runs aren't being saved" traced to every
+cluster-run-metadata write in `compare.py` resolving `config.json` via
+`os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")` —
+always the repo root, never the active project. With single-project-at-root
+this was invisible; with multi-project support (each project has its own
+`config.json`, e.g. `projects/sample/config.json`) it meant `results/runs/
+run_NNN/` snapshots were written correctly (`_res()` is project-aware) but the
+`current_run_saved`/`current_run_id`/`active_cluster_run` flags that track
+them landed in a stray root `config.json` instead — so the project's own
+config never reflected that a run had been saved, and the GUI's Cluster Runs
+view (which reads those flags to decide what to show) looked like saving
+silently wasn't working. Found and fixed 10 occurrences in `compare.py`
+(feature-extraction's `keypoint_roles`/`object_keypoints` lookup, the
+auto-save-previous-run and post-`--cluster` auto-save paths, the manual
+`_mark_run_saved()` path, `--collapse`'s saved-flag invalidation, and
+`--list-runs`/`--set-active`), 2 in `generate_clips.py` (`fps` lookup for
+`--motif-clips`), and one more in `views/cluster_runs.py`'s `_manager()`
+(`ClusterRunManager(RESULTS, config_path=ROOT / "config.json")` — `RESULTS`
+was already project-aware via `vieb_config.get_results_dir()`, only
+`config_path` was wrong). Fixed by adding one canonical
+`vieb_config.get_project_config_path()` (mirrors the resolution
+`vieb_config._save_config()` already used correctly) and routing every one of
+those 13 call sites through it instead of re-deriving the path locally.
+`views/cluster_runs.py`'s `self.cfg`/`_save_cfg()`-based handlers
+(`_save_current_run`, `_delete_current_run`, `_activate_run`) were already
+correct — they go through `_utils._get_project_config_path()`, a separate,
+already-project-aware helper — so only the `_manager()`-based reads
+(`list_runs()` active-run highlighting, `get_active_run()`) needed the fix.
+**Why:** Multi-project support was added incrementally and these particular
+writes were never migrated off the original single-project assumption baked
+into `os.path.dirname(os.path.abspath(__file__))`. Verified by re-running
+`compare.py --cluster` on the sample project and confirming
+`projects/sample/config.json` (not the repo-root `config.json`) receives the
+new `current_run_id`, and that the full test suite's 3 pre-existing failures
+(`test_diagnose_clusters.py` x2, `test_quantify.py` dtype test — reproduced
+identically with these changes stashed out) are unrelated pandas/CLI-flag
+drift, not caused by this fix.
+**Related:** `compare.py`, `vieb_config.py`, `generate_clips.py`,
+`views/cluster_runs.py`, `cluster_run_manager.py`, `_utils.py`
+(`_get_project_config_path`).

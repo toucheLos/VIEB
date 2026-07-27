@@ -82,6 +82,20 @@ def _save_config(data: dict) -> None:
     _pm.write_project_config(project, data)
 
 
+def get_project_config_path() -> str:
+    """Return the active project's config.json path.
+
+    Never the repo-root config.json: with multi-project support, each
+    project has its own config.json (e.g. projects/sample/config.json).
+    Callers that need to read/write project config directly (rather than via
+    _load_config()/_save_config()) — e.g. compare.py's cluster-run bookkeeping,
+    or views/cluster_runs.py's ClusterRunManager — should resolve the path
+    through here instead of hardcoding a path relative to their own module.
+    """
+    project = _pm.get_active_project(PROJECT_ROOT, _APP_CONFIG_PATH)
+    return str(Path(project) / "config.json")
+
+
 # ---------------------------------------------------------------------------
 # DLC project path resolution
 # ---------------------------------------------------------------------------

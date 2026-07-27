@@ -10,12 +10,14 @@ from PyQt5.QtWidgets import (
     QScrollArea, QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, _save_cfg
+from _utils import RESULTS, _save_cfg
 from cluster_run_manager import ClusterRunManager
+
+import vieb_config as _vc
 
 
 def _manager() -> ClusterRunManager:
-    return ClusterRunManager(RESULTS, config_path=ROOT / "config.json")
+    return ClusterRunManager(RESULTS, config_path=Path(_vc.get_project_config_path()))
 
 
 def _load_manifest(path: Path) -> dict | None:

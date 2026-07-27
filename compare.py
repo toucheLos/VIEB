@@ -36,6 +36,11 @@ def _meta(): return _vc.get_metadata_path()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def _project_config_path() -> str:
+    """Return the active project's config.json path (never the repo-root one)."""
+    return _vc.get_project_config_path()
+
+
 def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None, *, repair: bool = False):
     import project_manager as _pm
 
@@ -306,7 +311,7 @@ def _load_extractor_config():
     keypoint_roles = {}
     object_keypoints = []
     try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        cfg_path = _project_config_path()
         with open(cfg_path, encoding="utf-8") as _f:
             _cfg_data = json.load(_f)
             keypoint_roles = _cfg_data.get("keypoint_roles", {})
@@ -1104,7 +1109,7 @@ def _auto_save_previous_run() -> str | None:
     if not run_id:
         return None
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_path = _project_config_path()
     mgr = ClusterRunManager(_res(), config_path=cfg_path)
     mgr.save_run(run_id)
     print(f"Auto-saved previous run to results/runs/{run_id}/")
@@ -1144,7 +1149,7 @@ def _write_current_run_manifest(
     """Write results/shared/run_manifest.json and update config.json."""
     from cluster_run_manager import ClusterRunConfig, ClusterRunManager
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_path = _project_config_path()
     mgr = ClusterRunManager(_res(), config_path=cfg_path)
     run_cfg = ClusterRunConfig(
         min_cluster_size=min_cluster_size,
@@ -1472,11 +1477,11 @@ def _mark_run_saved() -> None:
 
     run_id = manifest.get("run_id", "")
     if run_id:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        cfg_path = _project_config_path()
         mgr = ClusterRunManager(_res(), config_path=cfg_path)
         mgr.save_run(run_id)
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_path = _project_config_path()
     cfg_data: dict = {}
     if os.path.exists(cfg_path):
         try:
@@ -1568,7 +1573,7 @@ def cmd_cluster(
     # ---- Run versioning: auto-save previous run if it exists and wasn't saved ----
     _prev_cluster_info = os.path.join(_res(), "shared", "cluster_info.json")
     if os.path.exists(_prev_cluster_info):
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _cfg_path = _project_config_path()
         _cfg_data: dict = {}
         if os.path.exists(_cfg_path):
             try:
@@ -1966,7 +1971,7 @@ def cmd_cluster(
     # ---- Auto-save run to results/runs/ ----
     try:
         from cluster_run_manager import ClusterRunManager
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _cfg_path = _project_config_path()
         _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
         _mgr.save_run(_current_run_id)
         print(f"Run auto-saved → results/runs/{_current_run_id}/")
@@ -2729,7 +2734,7 @@ def cmd_collapse(threshold: float = 0.5):
             json.dump(manifest, f, indent=2)
 
     # Mark the run as unsaved: the saved snapshot (if any) no longer matches shared/
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg_path = _project_config_path()
     if os.path.exists(cfg_path):
         try:
             with open(cfg_path, encoding="utf-8") as f:
@@ -4008,7 +4013,7 @@ def main():
 
     if args.list_runs:
         from cluster_run_manager import ClusterRunManager
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _cfg_path = _project_config_path()
         _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
         _runs = _mgr.list_runs()
         _active = _mgr.get_active_run()
@@ -4028,7 +4033,7 @@ def main():
 
     if args.set_active:
         from cluster_run_manager import ClusterRunManager
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _cfg_path = _project_config_path()
         _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
         try:
             _mgr.set_active_run(args.set_active)

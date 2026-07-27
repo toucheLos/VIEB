@@ -656,7 +656,7 @@ def cmd_motif_clips(
 
     cfg = {}
     try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        cfg_path = _vc.get_project_config_path()
         with open(cfg_path, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
@@ -1020,7 +1020,7 @@ def main():
     resolved_fps = args.fps
     if resolved_fps is None:
         try:
-            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            cfg_path = _vc.get_project_config_path()
             with open(cfg_path, encoding="utf-8") as f:
                 resolved_fps = float(json.load(f).get("fps", 30))
         except Exception:
