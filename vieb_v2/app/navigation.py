@@ -20,6 +20,7 @@ NAV_ITEMS = [
     "Journeys",
     "Analysis",
     "Artifacts",
+    "Cluster Runs",
 ]
 
 _NAV_BTN_QSS = f"""

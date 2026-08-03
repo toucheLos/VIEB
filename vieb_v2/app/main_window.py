@@ -11,6 +11,7 @@ from app import theme
 from app.navigation import NAV_ITEMS, Navigation
 from pages.analysis import AnalysisPage
 from pages.artifacts import ArtifactsPage
+from pages.cluster_runs import ClusterRunsPage
 from pages.journeys import JourneysPage
 from pages.overview import OverviewPage
 from pages.states_motifs import StatesMotifsPage
@@ -22,6 +23,7 @@ _PAGE_CLASSES = {
     "Journeys": JourneysPage,
     "Analysis": AnalysisPage,
     "Artifacts": ArtifactsPage,
+    "Cluster Runs": ClusterRunsPage,
 }
 
 
@@ -52,6 +54,12 @@ class MainWindow(QMainWindow):
             page = _PAGE_CLASSES[name]()
             self.pages[name] = page
             self.stack.addWidget(page)
+
+        # A run started on Analysis should show up in Cluster Runs without the
+        # user having to hunt for a Refresh button.
+        analysis, runs = self.pages.get("Analysis"), self.pages.get("Cluster Runs")
+        if analysis is not None and runs is not None:
+            analysis.run_recorded = runs.refresh
 
         self.setCentralWidget(central)
         self.show_page(NAV_ITEMS[0])

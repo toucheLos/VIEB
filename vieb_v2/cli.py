@@ -36,14 +36,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from representation import gpu, keypoints  # noqa: E402
+from representation import gpu, keypoints, run_registry  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
 from representation.align import align_all, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
 from representation.cluster import seed_stability  # noqa: E402
 from representation.embed import embed_all  # noqa: E402
 from representation.metrics import cluster_metrics, speed_diagnostics  # noqa: E402
-from representation.pooled_pca import PooledPCA  # noqa: E402
+from representation.pipeline import LATENT_METHODS, make_latent  # noqa: E402
 from representation.pose_loader import find_pose_files, load_sessions  # noqa: E402
 
 ALIGNED, SCORES, EMBEDDED, LABELS = (
@@ -188,24 +188,50 @@ def cmd_align(args):
     return OK
 
 
-def cmd_pca(args):
+def cmd_latent(args):
+    """Reduce aligned pose with PCA or diffusion maps -- the same slot."""
     data, meta = _load(os.path.join(args.out, ALIGNED))
     aligned = _unpack(data)
+    method = args.latent_method
 
     t0 = time.time()
-    pca = PooledPCA(var_threshold=args.var_threshold).fit(aligned)
-    scores = pca.transform_all(aligned)
-    report = pca.spectrum_report()
+    latent = make_latent(method, args.var_threshold, args.n_components,
+                         args.alpha, args.epsilon, args.diffusion_time,
+                         args.n_landmarks).fit(aligned)
+    scores = latent.transform_all(aligned)
+    report = latent.spectrum_report()
 
-    _log(f"pooled PCA over {sum(len(a) for a in aligned):,} frames from "
-         f"{len(aligned)} recording(s) in {time.time() - t0:.1f}s")
-    _log(f"  one basis for the whole project -- never per recording")
-    _log(f"  q={report['n_components']} components "
-         f"({report['explained_variance']:.1%} variance)")
+    _log(f"latent [{method}] over {sum(len(a) for a in aligned):,} frames "
+         f"from {len(aligned)} recording(s) in {time.time() - t0:.1f}s")
+    _log("  one basis for the whole project -- never per recording")
+    _log(f"  q={report['n_components']} components")
 
+    if method == "pca":
+        _log(f"  {report['explained_variance']:.1%} of variance retained")
+        _report_rank(report, meta)
+    else:
+        # A diffusion coordinate is not interpretable without the bandwidth,
+        # alpha and diffusion time that produced it.
+        _log(f"  epsilon={report['epsilon']:.4g} (10th percentile of pairwise "
+             f"squared distance), alpha={report['alpha']}, "
+             f"t={report['diffusion_time']}")
+        _log(f"  fitted on {report['n_landmarks']:,} landmarks, extended to "
+             f"all frames by Nystrom")
+        if report["spectral_gap"] is not None:
+            _log(f"  spectral gap {report['spectral_gap']:.4f}")
+        if report["alpha"] < 1.0:
+            _log("  alpha<1 lets sampling density distort the embedding: "
+                 "densely sampled (slow) regions get compressed")
+
+    _save(os.path.join(args.out, SCORES),
+          {**_pack(scores)},
+          {**meta, "latent_method": method, "latent": report, "pca": report})
+    return OK
+
+
+def _report_rank(report, meta):
     nonzero, expected = report["n_nonzero_directions"], meta["expected_rank"]
-    _log(f"  {nonzero} non-null directions, {expected} expected "
-         f"(rank 2K-3)")
+    _log(f"  {nonzero} non-null directions, {expected} expected (rank 2K-3)")
     if nonzero > expected:
         # Uniform weights give exactly 2K-3; per-frame confidence weighting
         # partially refills the rotation null, so the extra directions hold
@@ -216,11 +242,6 @@ def cmd_pca(args):
             _log(f"  WARNING: q={report['n_components']} exceeds the rank "
                  f"ceiling -- lower --var-threshold so noise directions are "
                  f"not retained")
-
-    _save(os.path.join(args.out, SCORES),
-          {**_pack(scores), "components": pca.components_, "mean": pca.mean_},
-          {**meta, "pca": report})
-    return OK
 
 
 def cmd_embed(args):
@@ -284,6 +305,20 @@ def cmd_cluster(args):
            "hdbscan_sample": sample, "metrics": metrics,
            "speed": speed, "seed_stability": stability})
 
+    # Record the run so the Cluster Runs page shows it alongside GUI runs.
+    run_registry.record(
+        args.out,
+        latent_method=meta.get("latent_method", "pca"),
+        params={"min_cluster_size": args.min_cluster_size,
+                "min_samples": args.min_samples,
+                "n_lags": meta.get("n_lags"),
+                "lag_stride": meta.get("lag_stride"),
+                "hdbscan_backend": backend},
+        metrics=metrics,
+        report=meta.get("latent"),
+        source="cli",
+    )
+
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(_jsonable({"metrics": metrics, "speed": speed,
@@ -297,12 +332,95 @@ def cmd_cluster(args):
 
 
 def cmd_run(args):
-    for step in (cmd_align, cmd_pca, cmd_embed, cmd_cluster):
+    for step in (cmd_align, cmd_latent, cmd_embed, cmd_cluster):
         code = step(args)
         if code:
             return code
     _log(f"done -- artifacts in {args.out}")
     return OK
+
+
+def cmd_compare_latents(args):
+    """Run both latents from one aligned checkpoint and print them side by side.
+
+    Reusing a single alignment is the point: the two arms then differ only in
+    the reducer, so any difference in the metrics is attributable to that and
+    not to a re-run of everything upstream.
+    """
+    data, meta = _load(os.path.join(args.out, ALIGNED))
+    aligned = _unpack(data)
+    use_gpu = gpu.resolve(args.gpu)
+    sample = None if args.hdbscan_sample <= 0 else args.hdbscan_sample
+
+    results = {}
+    for method in LATENT_METHODS:
+        _log(f"--- {method} ---")
+        t0 = time.time()
+        latent = make_latent(method, args.var_threshold, args.n_components,
+                             args.alpha, args.epsilon, args.diffusion_time,
+                             args.n_landmarks).fit(aligned)
+        scores = latent.transform_all(aligned)
+        embedded, _ = embed_all(scores, args.n_lags, args.lag_stride)
+        if embedded.shape[0] == 0:
+            raise _Attention(f"{method}: no frames survived delay embedding")
+
+        labels, _, backend = run_cluster(
+            embedded, args.min_cluster_size, args.min_samples,
+            use_gpu=use_gpu, return_backend=True, sample=sample)
+        results[method] = {
+            "metrics": cluster_metrics(labels),
+            "speed": speed_diagnostics(labels, embedded),
+            "latent": latent.spectrum_report(),
+            "backend": backend,
+            "seconds": time.time() - t0,
+        }
+        _log(f"  {time.time() - t0:.1f}s, backend {backend}")
+
+    _print_latent_comparison(results, args)
+
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(_jsonable(results), fh, indent=2)
+        _log(f"wrote {args.json}")
+    return OK
+
+
+def _print_latent_comparison(results, args):
+    methods = list(results)
+    print()
+    print("=" * 72)
+    print("Latent space comparison -- identical alignment, identical HDBSCAN")
+    print("=" * 72)
+    print(f"  min_cluster_size {args.min_cluster_size}   n_lags {args.n_lags}"
+          f"   lag_stride {args.lag_stride}")
+    print()
+    header = f"{'metric':<28}" + "".join(f"{m:>20}" for m in methods)
+    print(header)
+    print("-" * len(header))
+
+    def row(label, fn):
+        print(f"{label:<28}" + "".join(f"{fn(results[m]):>20}" for m in methods))
+
+    def fmt(v):
+        return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float)
+                                        else str(v))
+
+    row("n_states", lambda r: fmt(r["metrics"]["n_states"]))
+    row("noise_frac", lambda r: fmt(r["metrics"]["noise_frac"]))
+    row("largest_state_frac",
+        lambda r: fmt(r["metrics"]["clustered_only"]["largest_state_frac"]))
+    row("state_entropy",
+        lambda r: fmt(r["metrics"]["clustered_only"]["state_entropy"]))
+    row("noise_speed_ratio",
+        lambda r: fmt(r["speed"].get("noise_speed_ratio")))
+    row("n_components", lambda r: fmt(r["latent"]["n_components"]))
+    row("seconds", lambda r: fmt(round(r["seconds"], 1)))
+    print()
+    print("PCA distances are exact but linear. Diffusion distances are")
+    print("nonlinear and defined (random-walk connectivity), but depend on")
+    print("epsilon, alpha and t -- they are not comparable across settings.")
+    print("No winner is declared.")
+    print("=" * 72)
 
 
 def cmd_tune(args):
@@ -447,6 +565,25 @@ def build_parser():
         sp.add_argument("--lag-stride", type=int, default=2)
         sp.add_argument("--fps", type=float, default=30.0)
 
+    def latent_args(sp):
+        sp.add_argument("--latent-method", default="pca",
+                        choices=list(LATENT_METHODS),
+                        help="latent space builder (default: %(default)s)")
+        sp.add_argument("--var-threshold", type=float, default=0.95,
+                        help="PCA only: variance to retain")
+        sp.add_argument("--n-components", type=int, default=8,
+                        help="diffusion only: number of coordinates")
+        sp.add_argument("--alpha", type=float, default=1.0,
+                        help="diffusion only: density normalisation; 1.0 "
+                             "(Laplace-Beltrami) removes most of the sampling-"
+                             "density effect")
+        sp.add_argument("--epsilon", default="auto",
+                        help="diffusion only: kernel bandwidth, or 'auto'")
+        sp.add_argument("--diffusion-time", type=int, default=1,
+                        help="diffusion only: random-walk steps")
+        sp.add_argument("--n-landmarks", type=int, default=3000,
+                        help="diffusion only: points the operator is built on")
+
     def cluster_args(sp):
         sp.add_argument("--min-cluster-size", type=int, default=50)
         sp.add_argument("--min-samples", type=int, default=None)
@@ -465,10 +602,11 @@ def build_parser():
     pose_args(sp), out_args(sp), gpu_args(sp)
     sp.set_defaults(func=cmd_align)
 
-    sp = sub.add_parser("pca", help="pooled PCA across all recordings")
-    out_args(sp), gpu_args(sp)
-    sp.add_argument("--var-threshold", type=float, default=0.95)
-    sp.set_defaults(func=cmd_pca)
+    for name, helptext in (("latent", "pooled PCA or diffusion maps"),
+                           ("pca", "alias for `latent` (backwards compatible)")):
+        sp = sub.add_parser(name, help=helptext)
+        out_args(sp), gpu_args(sp), latent_args(sp)
+        sp.set_defaults(func=cmd_latent)
 
     sp = sub.add_parser("embed", help="delay-embed the PC scores")
     out_args(sp), gpu_args(sp), embed_args(sp)
@@ -478,14 +616,22 @@ def build_parser():
     out_args(sp), gpu_args(sp), cluster_args(sp)
     sp.set_defaults(func=cmd_cluster)
 
-    sp = sub.add_parser("run", help="align + pca + embed + cluster")
-    pose_args(sp), out_args(sp), gpu_args(sp), embed_args(sp), cluster_args(sp)
-    sp.add_argument("--var-threshold", type=float, default=0.95)
+    sp = sub.add_parser("run", help="align + latent + embed + cluster")
+    pose_args(sp), out_args(sp), gpu_args(sp), embed_args(sp)
+    latent_args(sp), cluster_args(sp)
     sp.set_defaults(func=cmd_run)
 
+    sp = sub.add_parser("compare-latents",
+                        help="run PCA and diffusion from one alignment")
+    out_args(sp), gpu_args(sp), embed_args(sp), latent_args(sp)
+    sp.add_argument("--min-cluster-size", type=int, default=50)
+    sp.add_argument("--min-samples", type=int, default=None)
+    sp.add_argument("--hdbscan-sample", type=int, default=300_000)
+    sp.add_argument("--json", default=None)
+    sp.set_defaults(func=cmd_compare_latents)
+
     sp = sub.add_parser("tune", help="suggest --lag-stride from the data")
-    pose_args(sp), out_args(sp), gpu_args(sp)
-    sp.add_argument("--var-threshold", type=float, default=0.95)
+    pose_args(sp), out_args(sp), gpu_args(sp), latent_args(sp)
     sp.add_argument("--n-lags", type=int, default=4)
     sp.add_argument("--fps", type=float, default=30.0)
     sp.add_argument("--max-lag", type=int, default=60)

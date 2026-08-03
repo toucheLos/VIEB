@@ -16,13 +16,41 @@ import numpy as np
 from . import keypoints
 from .align import align_all, null_leakage
 from .cluster import cluster_with_diagnostics, seed_stability
+from .diffusion import DiffusionMap
 from .embed import embed_all
 from .pooled_pca import PooledPCA
+
+LATENT_METHODS = ("pca", "diffusion")
+
+
+def _tick(progress, stage):
+    """Report stage progress, when a caller (the GUI worker) asked for it."""
+    if progress is not None:
+        progress(stage)
+
+
+def make_latent(method, var_threshold=0.95, n_components=8, alpha=1.0,
+                epsilon="auto", diffusion_time=1, n_landmarks=3000):
+    """Build the latent-space reducer.
+
+    Both classes expose fit / transform / transform_all / spectrum_report, so
+    the pipeline branches once here and is method-agnostic thereafter.
+    """
+    if method == "pca":
+        return PooledPCA(var_threshold=var_threshold)
+    if method == "diffusion":
+        return DiffusionMap(n_components=n_components, alpha=alpha,
+                            epsilon=epsilon, diffusion_time=diffusion_time,
+                            n_landmarks=n_landmarks)
+    raise ValueError(
+        f"latent_method must be one of {LATENT_METHODS}; got {method!r}")
 
 
 def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         min_cluster_size=50, min_samples=None, lag_weights=None,
-        stability_repeats=0, use_gpu=False):
+        stability_repeats=0, use_gpu=False, latent_method="pca",
+        n_components=8, alpha=1.0, epsilon="auto", diffusion_time=1,
+        n_landmarks=3000, progress=None):
     """Run the full pipeline over a project's recordings.
 
     sessions : list of (pose (T,K,2), conf (T,K) or None) per recording --
@@ -50,15 +78,19 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         selected.append((pose, conf))
 
     # 2. Egocentric alignment against one shared reference.
+    _tick(progress, "aligning")
     aligned, reference = align_all(selected)
     leakage = null_leakage(np.concatenate([a.reshape(a.shape[0], -1)
                                            for a in aligned], axis=0))
 
-    # 3. Pooled PCA -- one basis for the whole project, never per recording.
-    pca = PooledPCA(var_threshold=var_threshold).fit(aligned)
-    scores = pca.transform_all(aligned)
+    # 3. Pooled latent -- one basis for the whole project, never per recording.
+    _tick(progress, f"latent ({latent_method})")
+    latent = make_latent(latent_method, var_threshold, n_components, alpha,
+                         epsilon, diffusion_time, n_landmarks).fit(aligned)
+    scores = latent.transform_all(aligned)
 
     # 4. Delay embedding, boundary-safe by construction.
+    _tick(progress, "delay embedding")
     embedded, index = embed_all(scores, n_lags, lag_stride, lag_weights)
     if embedded.shape[0] == 0:
         raise ValueError(
@@ -67,6 +99,7 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         )
 
     # 5. HDBSCAN, keeping the -1 noise label.
+    _tick(progress, "clustering")
     result = cluster_with_diagnostics(embedded, min_cluster_size, min_samples,
                                       use_gpu=use_gpu)
 
@@ -93,7 +126,11 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
             "pose_dim": aligned[0].shape[1] * 2,
             "expected_rank": aligned[0].shape[1] * 2 - 3,
             "null_direction_leakage": leakage,
-            "pca": pca.spectrum_report(),
+            "latent_method": latent_method,
+            "latent": latent.spectrum_report(),
+            # Kept under the old key so existing callers and checkpoints keep
+            # working now that the reducer is swappable.
+            "pca": latent.spectrum_report(),
             "n_lags": n_lags,
             "lag_stride": lag_stride,
             "embedding_dim": int(embedded.shape[1]),
@@ -102,7 +139,7 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
             "umap": False,
-            "pca_backend": pca.backend_,
+            "latent_backend": latent.backend_,
             "hdbscan_backend": result.get("backend", "cpu"),
         },
     }

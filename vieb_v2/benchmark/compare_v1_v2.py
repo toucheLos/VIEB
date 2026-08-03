@@ -100,54 +100,50 @@ def run_v1_arm(project_dir, min_cluster_size, min_samples, recluster=False):
             "source": "v1 stored labels (UMAP + HDBSCAN + HMM)"}, None
 
 
-def run_v2_arm(pose_files, min_cluster_size, min_samples, n_lags, lag_stride):
-    """Load pose and run the v2 pipeline."""
-    sys.path.insert(0, os.environ.get("VIEB_V1_PATH", ""))
-    try:
-        from pose_io import load_pose
-    except ImportError:
-        return None, (
-            "pose_io.load_pose unavailable; set VIEB_V1_PATH to the v1 "
-            "checkout so the loader can be imported"
-        )
+def run_v2_arm(pose_files, min_cluster_size, min_samples, n_lags, lag_stride,
+               latent_method="pca"):
+    """Load pose and run the v2 pipeline with the given latent space."""
+    from representation.pose_loader import load_sessions
 
-    sessions, bodyparts = [], None
-    for path in pose_files:
-        pose, conf, names = load_pose(path)
-        bodyparts = bodyparts or names
-        sessions.append((pose, conf))
-
+    sessions, bodyparts, _ = load_sessions(pose_files)
     if not sessions:
         return None, "no pose sessions loaded"
 
     result = run_v2(sessions, bodyparts=bodyparts, n_lags=n_lags,
                     lag_stride=lag_stride, min_cluster_size=min_cluster_size,
-                    min_samples=min_samples)
+                    min_samples=min_samples, latent_method=latent_method)
     return result, None
 
 
-def format_report(v1, v2, params, notes):
-    """Render both columns side by side. States facts, draws no conclusion."""
+def format_report(columns, params, notes):
+    """Render every arm side by side. States facts, draws no conclusion.
+
+    `columns` is an ordered mapping of arm name -> metrics dict (or None).
+    """
     lines = []
     add = lines.append
+    names = list(columns)
+    width = 18
 
-    add("=" * 72)
-    add("VIEB representation benchmark -- v1 features vs v2 delay embedding")
-    add("=" * 72)
+    add("=" * 78)
+    add("VIEB representation benchmark -- v1 features vs v2 latent spaces")
+    add("=" * 78)
     add("")
     add("Parameters (identical across arms):")
     for k, v in params.items():
         add(f"  {k:<22} {v}")
     add("")
     add("ARCHITECTURAL ASYMMETRY -- read before comparing:")
-    add("  v1 arm: 91 engineered features -> UMAP -> HDBSCAN (+ HMM smoothing)")
-    add("  v2 arm: aligned pose -> pooled PCA -> delay embedding -> HDBSCAN")
+    add("  v1        : 91 engineered features -> UMAP -> HDBSCAN (+ HMM)")
+    add("  v2-PCA    : aligned pose -> pooled PCA -> delay embed -> HDBSCAN")
+    add("  v2-diffusion: same, with a diffusion map in place of PCA")
     add("  Identical min_cluster_size/min_samples across different")
     add("  dimensionalities is a convention, not a neutral comparison.")
     add("")
 
-    add(f"{'metric':<28} {'v1':>18} {'v2':>18}")
-    add("-" * 72)
+    header = f"{'metric':<28}" + "".join(f"{n:>{width}}" for n in names)
+    add(header)
+    add("-" * len(header))
     for label, key, conv in [
         ("n_states", "n_states", None),
         ("noise_frac", "noise_frac", None),
@@ -156,14 +152,16 @@ def format_report(v1, v2, params, notes):
         ("largest_state_frac (clean)", "largest_state_frac", "clustered_only"),
         ("state_entropy (clean)", "state_entropy", "clustered_only"),
     ]:
-        a = _get(v1, key, conv)
-        b = _get(v2, key, conv)
-        add(f"{label:<28} {_fmt(a):>18} {_fmt(b):>18}")
+        row = "".join(f"{_fmt(_get(columns[n], key, conv)):>{width}}"
+                      for n in names)
+        add(f"{label:<28}{row}")
 
     add("")
-    add("Both columns are computed by the same function. v1's stored")
+    add("All columns are computed by the same function. v1's stored")
     add("diagnostics are not read: its on-disk state_entropy is normalised")
     add("and its fractions are over total frames including noise.")
+    add("Diffusion distances additionally depend on epsilon, alpha and t, so")
+    add("they are not comparable across different diffusion settings.")
 
     if notes:
         add("")
@@ -173,7 +171,7 @@ def format_report(v1, v2, params, notes):
 
     add("")
     add("No winner is declared. Interpretation is left to the reader.")
-    add("=" * 72)
+    add("=" * 78)
     return "\n".join(lines)
 
 
@@ -221,44 +219,44 @@ def main(argv=None):
         notes.append(f"v1 source: {v1_result['source']}")
 
     pose_files = find_pose_files(args.project)
-    v2_metrics = None
+    columns = {"v1": v1_metrics, "v2-PCA": None, "v2-diffusion": None}
+
     if not pose_files:
         notes.append(
-            "v2 arm SKIPPED: no continuous per-frame pose found. The v2 "
+            "both v2 arms SKIPPED: no continuous per-frame pose found. The v2 "
             "pipeline starts from raw keypoints, so it cannot run on v1's "
             "derived features. Run DLC --analyze to produce pose, then re-run."
         )
     else:
-        v2_result, v2_err = run_v2_arm(pose_files, args.min_cluster_size,
-                                       args.min_samples, args.n_lags,
-                                       args.lag_stride)
-        if v2_err:
-            notes.append(f"v2 arm unavailable: {v2_err}")
-        else:
-            v2_metrics = v2_result["metrics"]
-            notes.append(
-                f"v2 PCs retained: {v2_result['report']['pca']['n_components']} "
-                f"({v2_result['report']['pca']['explained_variance']:.1%} variance)"
-            )
-            notes.append(
-                f"v2 null-direction leakage: "
-                f"{v2_result['report']['null_direction_leakage']:.3%}"
-            )
-            speed = v2_result["speed_diagnostics"]
+        for column, method in (("v2-PCA", "pca"),
+                               ("v2-diffusion", "diffusion")):
+            result, err = run_v2_arm(pose_files, args.min_cluster_size,
+                                     args.min_samples, args.n_lags,
+                                     args.lag_stride, latent_method=method)
+            if err:
+                notes.append(f"{column} unavailable: {err}")
+                continue
+            columns[column] = result["metrics"]
+            latent = result["report"]["latent"]
+            notes.append(f"{column}: {latent['n_components']} components")
+            if method == "diffusion":
+                notes.append(
+                    f"{column}: epsilon={latent['epsilon']:.4g}, "
+                    f"alpha={latent['alpha']}, t={latent['diffusion_time']}, "
+                    f"{latent['n_landmarks']} landmarks")
+            speed = result["speed_diagnostics"]
             if speed and speed.get("noise_speed_ratio"):
                 notes.append(
-                    f"v2 noise/clustered speed ratio: "
+                    f"{column}: noise/clustered speed ratio "
                     f"{speed['noise_speed_ratio']:.2f} "
-                    f"(>1 supports the density-duration account)"
-                )
+                    f"(>1 supports the density-duration account)")
 
-    report = format_report(v1_metrics, v2_metrics, params, notes)
-    print(report)
+    print(format_report(columns, params, notes))
 
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({"params": params, "v1": v1_metrics, "v2": v2_metrics,
-                       "notes": notes}, fh, indent=2)
+            json.dump({"params": params, "columns": columns, "notes": notes},
+                      fh, indent=2)
 
     # Missing pose is the expected state today, not an error.
     return 0
