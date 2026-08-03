@@ -22,7 +22,7 @@ from .pooled_pca import PooledPCA
 
 def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         min_cluster_size=50, min_samples=None, lag_weights=None,
-        stability_repeats=0):
+        stability_repeats=0, use_gpu=False):
     """Run the full pipeline over a project's recordings.
 
     sessions : list of (pose (T,K,2), conf (T,K) or None) per recording --
@@ -67,7 +67,8 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         )
 
     # 5. HDBSCAN, keeping the -1 noise label.
-    result = cluster_with_diagnostics(embedded, min_cluster_size, min_samples)
+    result = cluster_with_diagnostics(embedded, min_cluster_size, min_samples,
+                                      use_gpu=use_gpu)
 
     stability = (
         seed_stability(embedded, min_cluster_size, min_samples,
@@ -101,5 +102,7 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
             "umap": False,
+            "pca_backend": pca.backend_,
+            "hdbscan_backend": result.get("backend", "cpu"),
         },
     }

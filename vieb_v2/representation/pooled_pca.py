@@ -34,6 +34,10 @@ class PooledPCA:
             raise ValueError("var_threshold must be in (0, 1]")
         self.var_threshold = float(var_threshold)
         self.max_components = max_components
+        # Deliberately CPU-only. After dropping tail_tip the pose dimension is
+        # D = 14, so this is a 14x14 eigenproblem and the covariance is
+        # O(N*D^2); a GPU would add transfer overhead and nothing else.
+        self.backend_ = "cpu"
 
     def fit(self, sessions):
         """Fit on frames pooled across all recordings.
@@ -50,6 +54,7 @@ class PooledPCA:
         centered = pooled - self.mean_
         cov = np.cov(centered.T)
         vals, vecs = np.linalg.eigh(cov)
+
         order = np.argsort(vals)[::-1]
         vals, vecs = vals[order], vecs[:, order]
 
@@ -95,6 +100,7 @@ class PooledPCA:
         return {
             "n_components": self.n_components_,
             "var_threshold": self.var_threshold,
+            "backend": self.backend_,
             "explained_variance": float(
                 self.explained_variance_ratio_[: self.n_components_].sum()
             ),

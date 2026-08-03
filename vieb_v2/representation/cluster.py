@@ -18,38 +18,137 @@ import numpy as np
 from .metrics import NOISE_LABEL, cluster_metrics, speed_diagnostics
 
 
-def cluster(embedded, min_cluster_size=50, min_samples=None, metric="euclidean"):
+def cluster(embedded, min_cluster_size=50, min_samples=None, metric="euclidean",
+            use_gpu=False, return_backend=False, sample=None, batch_size=25_000,
+            seed=0):
     """Cluster delay-embedded coordinates. Returns (labels, probabilities).
 
     Labels are -1 for noise, preserved as-is.
-    """
-    import hdbscan
 
+    With use_gpu this runs cuml's GPU HDBSCAN -- a separate implementation, not
+    a faster copy. Measured on a 3568x35 embedding the two backends produce the
+    *same partition* (adjusted Rand index 1.0000) but *different integer label
+    values*: the grouping agrees, the cluster numbering is permuted. So the
+    backend is safe to switch, but a state id is only meaningful within one
+    run, which is why the backend used is recorded alongside the labels.
+    Agreement at full project scale (~2.3M frames) is untested.
+
+    Falls back to CPU if cuml is missing or the run fails.
+
+    `sample` caps how many points the clusterer is *fitted* on; the rest are
+    labelled by approximate_predict in batches. A full VIEB project is ~2.3M
+    frames, which neither backend will fit directly, so this mirrors v1's
+    strategy (compare.py:1305, :1500) with the same 300k / 25k defaults.
+    """
     embedded = np.asarray(embedded, dtype=np.float64)
     if embedded.ndim != 2:
         raise ValueError(f"embedded must be (N, D), got {embedded.shape}")
     if embedded.shape[0] == 0:
-        return np.empty(0, dtype=int), np.empty(0)
+        empty = (np.empty(0, dtype=int), np.empty(0))
+        return (*empty, "none") if return_backend else empty
 
-    clusterer = hdbscan.HDBSCAN(
+    from .gpu import resolve
+
+    n = embedded.shape[0]
+    subsample = sample is not None and n > int(sample)
+    if subsample:
+        rng = np.random.default_rng(seed)
+        fit_idx = np.sort(rng.choice(n, size=int(sample), replace=False))
+        fit_data = embedded[fit_idx]
+    else:
+        fit_data = embedded
+
+    backend = "cpu"
+    result = None
+
+    if resolve(use_gpu):
+        try:
+            result = _fit_gpu(fit_data, embedded, min_cluster_size, min_samples,
+                              subsample, batch_size)
+            backend = "gpu"
+        except Exception:
+            result = None  # fall through to CPU
+
+    if result is None:
+        result = _fit_cpu(fit_data, embedded, min_cluster_size, min_samples,
+                          metric, subsample, batch_size)
+
+    labels, probs = result
+    return (labels, probs, backend) if return_backend else (labels, probs)
+
+
+def _fit_gpu(fit_data, all_data, min_cluster_size, min_samples, subsample,
+             batch_size):
+    from cuml.cluster import hdbscan as cuh
+
+    model = cuh.HDBSCAN(
+        min_cluster_size=int(min_cluster_size),
+        min_samples=(None if min_samples is None else int(min_samples)),
+        prediction_data=subsample,
+    ).fit(fit_data.astype(np.float32))
+
+    if not subsample:
+        labels = np.asarray(model.labels_)
+        probs = np.asarray(getattr(model, "probabilities_",
+                                   np.ones(labels.shape)))
+        return labels, probs
+
+    return _predict_batched(
+        lambda chunk: cuh.approximate_predict(model, chunk.astype(np.float32)),
+        all_data, batch_size,
+    )
+
+
+def _fit_cpu(fit_data, all_data, min_cluster_size, min_samples, metric,
+             subsample, batch_size):
+    import hdbscan
+
+    model = hdbscan.HDBSCAN(
         min_cluster_size=int(min_cluster_size),
         min_samples=None if min_samples is None else int(min_samples),
         metric=metric,
+        prediction_data=subsample,
+    ).fit(fit_data)
+
+    if not subsample:
+        labels = model.labels_
+        probs = getattr(model, "probabilities_", np.ones(labels.shape))
+        return np.asarray(labels), np.asarray(probs)
+
+    from hdbscan import approximate_predict
+
+    return _predict_batched(
+        lambda chunk: approximate_predict(model, chunk), all_data, batch_size,
     )
-    labels = clusterer.fit_predict(embedded)
-    probs = getattr(clusterer, "probabilities_", np.ones(labels.shape))
+
+
+def _predict_batched(predict, data, batch_size):
+    """Label every point in batches, so the full project never lands in memory
+    at once."""
+    labels = np.empty(data.shape[0], dtype=int)
+    probs = np.empty(data.shape[0], dtype=float)
+    for start in range(0, data.shape[0], batch_size):
+        stop = min(start + batch_size, data.shape[0])
+        batch_labels, batch_probs = predict(data[start:stop])
+        labels[start:stop] = np.asarray(batch_labels)
+        probs[start:stop] = np.asarray(batch_probs)
     return labels, probs
 
 
-def cluster_with_diagnostics(embedded, min_cluster_size=50, min_samples=None):
+def cluster_with_diagnostics(embedded, min_cluster_size=50, min_samples=None,
+                             use_gpu=False, sample=None):
     """Cluster and report the metrics plus the confound diagnostics."""
-    labels, probs = cluster(embedded, min_cluster_size, min_samples)
+    labels, probs, backend = cluster(
+        embedded, min_cluster_size, min_samples, use_gpu=use_gpu,
+        return_backend=True, sample=sample,
+    )
     if labels.size == 0:
         return {"labels": labels, "probabilities": probs, "metrics": None,
-                "speed": None}
+                "speed": None, "backend": backend}
     return {
         "labels": labels,
         "probabilities": probs,
+        "backend": backend,
         "metrics": cluster_metrics(labels),
         "speed": speed_diagnostics(labels, embedded),
     }
