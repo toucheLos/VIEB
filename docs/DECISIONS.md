@@ -584,3 +584,54 @@ cluster; the underlying logic was already headless, so a wrapper avoided
 re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
+
+## 53 — v2 HPC GPU pipeline: driver-matched RAPIDS stack + a dedicated python/3.11.4 GPU venv
+**Decision/finding:** Ported v1's `_utils.py:90-177` driver→stack table into
+`vieb_v2/representation/gpu.py` (`GPU_STACKS`, `detect_nvidia_driver`,
+`select_gpu_stack`, `stack_message`), dropping the WSL2 half as irrelevant on a
+Linux cluster. `gpu.report()` now carries both halves of the question — what is
+installed (the existing run-it-don't-import-it probes) and what *should* be
+(driver-matched recommendation) — since an idle GPU can mean "nothing
+installed" or "wrong RAPIDS pin", which need different fixes. `doctor` prints
+the recommendation and gains `--print-packages`, which emits only the pinned
+pip arguments on stdout (reason goes to stderr, exit 1 when no stack matches),
+so `install_gpu.slurm` consumes the table without duplicating it in bash;
+it needs only the stdlib, so it answers before cuml/cupy exist.
+
+The long-open "wheels on the existing 3.13 venv vs. rebuild on 3.11.4"
+question is resolved, and the reason it was stuck is that it had no fixed
+answer: `~/vieb/venv` is Python 3.13.12 (already outside `pyproject.toml`'s
+own `requires-python = ">=3.10,<3.13"`), and per PyPI, RAPIDS 24.12 /
+cupy 12.2.0 publishes **no** 3.13 wheels at all (`cuml-cu12==24.12.0` is a
+source tarball only) while RAPIDS 26.4 / cupy 14.1.1 does (abi3 + cp313). So
+`--only-binary=:all:` would have succeeded or failed depending on which stack
+the driver resolved to. Chosen resolution: GPU installs always build a
+dedicated `python/3.11.4` venv (`hpc/install_gpu.slurm`, `$HOME/vieb/venv-gpu`),
+which both stacks have wheels for; the default 3.13 venv stays CPU-only and
+untouched. The venv path is recorded in `hpc/.gpu_venv`, checked by
+`submit.sh` before queuing and by `02_compare_latents.slurm` on start.
+
+`install_gpu.slurm` is a one-time preflight, deliberately **not** chained into
+`submit.sh` — it would put a gpu-partition job on the critical path of every
+submission to redo work that only changes when the driver does. `doctor.slurm`
+moved to `partition=gpu` because `nvidia-smi` does not exist on a login node
+(verified), so a driver recommendation is impossible anywhere else; it keeps
+using the default venv on purpose, since its job is to compare installed
+against recommended. `02_compare_latents.slurm` moved to `partition=gpu
+--gres=gpu:1` with `--gpu on` (not `auto`): a silent CPU fallback would spend
+the whole 36h GPU allocation, and `gpu.resolve()` already raises in the first
+second instead. `01_align.slurm` stays CPU on `normal` — `gpu.py`'s own
+reasoning is that the pooled PCA is a 14×14 eigenproblem; only HDBSCAN, which
+labels all 28.6M frames of the current project, is worth a device. Also
+removed the vestigial `module load python/3.11.4` from `01_align.slurm` and
+`doctor.slurm`, where it was silently shadowed by the 3.13 venv activated on
+the next line.
+**Why:** GPU support was half-decided: the CLI had `--gpu auto|on|off` and
+capability probes, but the HPC scripts ran `--gpu off` on `partition=normal`
+and `doctor` could only report what was already installed, never what to
+install — leaving no path from "GPU is idle" to "GPU is working."
+**Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/cli.py`,
+`vieb_v2/hpc/install_gpu.slurm` (new), `vieb_v2/hpc/doctor.slurm`,
+`vieb_v2/hpc/02_compare_latents.slurm`, `vieb_v2/hpc/submit.sh`,
+`vieb_v2/hpc/01_align.slurm`, `vieb_v2/tests/test_gpu.py`,
+`vieb_v2/tests/test_cli.py`, `_utils.py:90-177`, #3, #32, #52

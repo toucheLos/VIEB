@@ -17,6 +17,9 @@ redo alignment and PCA over millions of frames.
 GPU (--gpu auto|on|off) applies to HDBSCAN only. The pooled PCA is a 14x14
 eigenproblem and gains nothing from a device. "on" fails immediately if the GPU
 backend is unusable rather than silently spending a batch allocation on CPU.
+`doctor` reports whether a GPU works here and, from the driver version, which
+pinned RAPIDS stack to install; `doctor --print-packages` emits that stack as
+pip arguments, which is how hpc/install_gpu.slurm builds its venv.
 
 Exit codes:
     0  completed
@@ -111,6 +114,17 @@ def cmd_doctor(args):
     """Preflight, so a batch job is not queued against a broken environment."""
     report = gpu.report()
 
+    if args.print_packages:
+        # Machine-readable: hpc/install_gpu.slurm pipes this into pip, which is
+        # why nothing else may touch stdout here. Needs only the stdlib, so it
+        # still answers before cuml/cupy exist -- no chicken-and-egg.
+        packages = report["recommended_stack_packages"]
+        if not packages:
+            print(f"[vieb2] {report['stack_message']}", file=sys.stderr)
+            return NEEDS_ATTENTION
+        print("\n".join(packages))
+        return OK
+
     _log(f"python           {sys.version.split()[0]}")
     _log(f"numpy            {np.__version__}")
     for name in ("hdbscan", "cuml", "cupy", "pandas", "h5py", "tables"):
@@ -130,6 +144,20 @@ def cmd_doctor(args):
             if report["cupy_linalg_reason"] else ""))
     if report["forced_cpu"]:
         _log("VIEB_FORCE_CPU is set -- all GPU paths disabled")
+    _log()
+
+    _log(f"NVIDIA driver     {report['driver'] or 'not detected'}"
+         + (f"  (CUDA {report['driver_cuda']})" if report["driver_cuda"] else ""))
+    if report["driver_gpu_name"]:
+        _log(f"driver GPU name   {report['driver_gpu_name']}")
+    if report["driver_error"] and not report["driver_ok"]:
+        _log(f"nvidia-smi        {report['driver_error'].splitlines()[0][:80]}")
+    _log(f"recommended stack {report['recommended_stack_label'] or 'none'}")
+    _log(report["stack_message"])
+    if report["recommended_stack_packages"] and not report["hdbscan_gpu"]:
+        _log("to build a venv for this stack:  sbatch hpc/install_gpu.slurm")
+        _log("  (a separate python/3.11.4 venv -- the RAPIDS pins do not all")
+        _log("   publish wheels for the 3.13 the default venv is built on)")
     _log()
 
     _log("GPU is used for HDBSCAN only. The pooled PCA is a 14x14")
@@ -587,6 +615,9 @@ def build_parser():
 
     sp = sub.add_parser("doctor", help="environment and GPU preflight")
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("--print-packages", action="store_true",
+                    help="print only the pinned packages of the RAPIDS stack "
+                         "matching the detected driver, one per line, for pip")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("align", help="drop noisy keypoints, align pose")
