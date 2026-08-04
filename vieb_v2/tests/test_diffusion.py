@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -188,3 +189,36 @@ def test_diffusion_time_shrinks_trailing_coordinates():
     last1 = np.abs(dm1.transform(x)[:, -1]).mean()
     last4 = np.abs(dm4.transform(x)[:, -1]).mean()
     assert last4 < last1
+
+
+def test_far_outlier_gets_a_finite_zero_embedding_not_nan():
+    # A single mistracked keypoint can put one frame far outside every
+    # landmark's neighborhood, underflowing exp(-d/epsilon_) to exactly 0 for
+    # all of them. That must not become 0/0 = NaN; it should resolve to a
+    # defined (zero) embedding, with no floating-point warning escaping.
+    x, _ = _spiral(n=800)
+    dm = DiffusionMap(n_components=3, n_landmarks=200).fit([x])
+
+    far = np.array([[1e6, 1e6]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = dm.transform(far)
+
+    assert np.isfinite(out).all()
+    assert np.allclose(out, 0.0)
+
+
+def test_degenerate_extensions_are_counted_in_the_report():
+    x, _ = _spiral(n=800)
+    dm = DiffusionMap(n_components=3, n_landmarks=200).fit([x])
+
+    report = dm.spectrum_report()
+    assert report["n_degenerate_extensions"] == 0
+    assert report["degenerate_extension_frac"] == 0.0
+
+    dm.transform(np.array([[1e6, 1e6], [1e6, 1e6]]))  # 2 degenerate points
+    dm.transform(x[:8])                                # 8 ordinary points
+
+    report = dm.spectrum_report()
+    assert report["n_degenerate_extensions"] == 2
+    assert report["degenerate_extension_frac"] == pytest.approx(2 / 10)

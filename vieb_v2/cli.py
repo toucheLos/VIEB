@@ -241,6 +241,7 @@ def cmd_latent(args):
         if report["alpha"] < 1.0:
             _log("  alpha<1 lets sampling density distort the embedding: "
                  "densely sampled (slow) regions get compressed")
+        _report_degenerate_extensions(report)
 
     _save(os.path.join(args.out, SCORES),
           {**_pack(scores)},
@@ -261,6 +262,25 @@ def _report_rank(report, meta):
             _log(f"  WARNING: q={report['n_components']} exceeds the rank "
                  f"ceiling -- lower --var-threshold so noise directions are "
                  f"not retained")
+
+
+def _report_degenerate_extensions(report):
+    """Warn when Nystrom extended a frame from an empty landmark neighborhood.
+
+    n_degenerate_extensions > 0 usually means a single mistracked keypoint put
+    a frame far outside epsilon_'s neighborhood, not that the animal jumped --
+    see representation/diffusion.py's module docstring. Those frames get a
+    defined (zero) embedding rather than crashing, but a high fraction is
+    worth knowing about.
+    """
+    n = report.get("n_degenerate_extensions", 0)
+    if not n:
+        return
+    frac = report.get("degenerate_extension_frac", 0.0)
+    _log(f"  WARNING: {n:,} frame(s) ({frac:.4%}) fell outside every "
+         f"landmark's neighborhood and got a zero embedding -- likely "
+         f"single mistracked keypoints, not real jumps. Raise --epsilon "
+         f"or check upstream tracking/alignment if this fraction is large.")
 
 
 def cmd_embed(args):
@@ -379,6 +399,10 @@ def cmd_compare_latents(args):
                              args.alpha, args.epsilon, args.diffusion_time,
                              args.n_landmarks).fit(aligned)
         scores = latent.transform_all(aligned)
+        latent_report = latent.spectrum_report()
+        if method != "pca":
+            _report_degenerate_extensions(latent_report)
+
         embedded, _ = embed_all(scores, args.n_lags, args.lag_stride)
         if embedded.shape[0] == 0:
             raise _Attention(f"{method}: no frames survived delay embedding")
@@ -389,7 +413,7 @@ def cmd_compare_latents(args):
         results[method] = {
             "metrics": cluster_metrics(labels),
             "speed": speed_diagnostics(labels, embedded),
-            "latent": latent.spectrum_report(),
+            "latent": latent_report,
             "backend": backend,
             "seconds": time.time() - t0,
         }

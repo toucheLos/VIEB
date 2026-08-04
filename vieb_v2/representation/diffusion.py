@@ -132,6 +132,8 @@ class DiffusionMap:
         self.n_components_ = q
         self._row_sums = d          # for the Nystrom extension
         self._degree = degree
+        self._n_extended = 0
+        self._n_degenerate_extensions = 0
         return self
 
     def _choose_landmarks(self, pooled):
@@ -199,10 +201,23 @@ class DiffusionMap:
     def _extend(self, x):
         kernel = np.exp(-_sq_dists(x, self.landmarks_) / self.epsilon_)
 
+        # A query point far enough outside epsilon_'s neighborhood underflows
+        # exp(-d/epsilon_) to exactly 0.0 against every landmark -- almost
+        # always one mistracked keypoint in an otherwise normal frame (see the
+        # module docstring), not a real jump, but real data hits this at
+        # multi-million-frame scale. Counted so the caller can see how often.
+        raw_degree = kernel.sum(axis=1)
+        degenerate = raw_degree <= 0.0
+        if degenerate.any():
+            self._n_degenerate_extensions += int(degenerate.sum())
+        self._n_extended += x.shape[0]
+
         if self.alpha > 0:
             # Use the landmark degrees so new points sit in the same
-            # normalisation as the fitted operator.
-            own = kernel.sum(axis=1) ** self.alpha
+            # normalisation as the fitted operator. Floored before the power,
+            # not after: 0.0 ** alpha is still 0.0, which would turn a
+            # degenerate row's division into 0/0 = NaN instead of 0/eps = 0.
+            own = np.maximum(raw_degree, 1e-300) ** self.alpha
             kernel = kernel / np.outer(own, self._degree ** self.alpha)
 
         row = kernel.sum(axis=1, keepdims=True)
@@ -246,6 +261,13 @@ class DiffusionMap:
                 self.eigenvalues_.sum() / max(self.eigenvalues_.sum(), 1e-300)
             ),
             "n_nonzero_directions": int((self.eigenvalues_ > 1e-12).sum()),
+            # Points Nystrom-extended from an all-zero landmark kernel -- see
+            # _extend's comment. Zero until transform/transform_all is called.
+            "n_degenerate_extensions": self._n_degenerate_extensions,
+            "degenerate_extension_frac": (
+                self._n_degenerate_extensions / self._n_extended
+                if self._n_extended else 0.0
+            ),
         }
 
 

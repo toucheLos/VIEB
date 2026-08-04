@@ -206,6 +206,21 @@ def test_print_packages_rejects_a_driver_too_old_for_any_stack(monkeypatch,
     assert capsys.readouterr().out.strip() == ""
 
 
+def test_degenerate_extension_warning_is_silent_when_zero(capsys):
+    cli._report_degenerate_extensions({"n_degenerate_extensions": 0,
+                                       "degenerate_extension_frac": 0.0})
+    assert capsys.readouterr().out == ""
+
+
+def test_degenerate_extension_warning_names_the_count_and_fraction(capsys):
+    cli._report_degenerate_extensions({"n_degenerate_extensions": 3,
+                                       "degenerate_extension_frac": 0.5})
+    out = capsys.readouterr().out
+    assert "3" in out
+    assert "50.0000%" in out
+    assert "WARNING" in out
+
+
 def test_sample_then_predict_labels_every_frame(project):
     # A full project is ~2.3M frames, so HDBSCAN is fitted on a subsample and
     # the rest labelled by approximate_predict. Every frame must still get one.
