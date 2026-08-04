@@ -36,7 +36,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from representation import gpu, keypoints, run_registry  # noqa: E402
+from representation import checkpoints, gpu, keypoints, run_registry  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
 from representation.align import align_all, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
@@ -46,8 +46,10 @@ from representation.metrics import cluster_metrics, speed_diagnostics  # noqa: E
 from representation.pipeline import LATENT_METHODS, make_latent  # noqa: E402
 from representation.pose_loader import find_pose_files, load_sessions  # noqa: E402
 
-ALIGNED, SCORES, EMBEDDED, LABELS = (
-    "aligned.npz", "scores.npz", "embedded.npz", "labels.npz")
+ALIGNED = checkpoints.ALIGNED
+SCORES = checkpoints.SCORES
+EMBEDDED = checkpoints.EMBEDDED
+LABELS = checkpoints.LABELS
 
 OK, NEEDS_ATTENTION, FAILED = 0, 1, 2
 
@@ -59,35 +61,24 @@ def _log(msg=""):
 
 
 def _save(path, arrays, meta):
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    np.savez_compressed(path, meta=json.dumps(_jsonable(meta)), **arrays)
+    checkpoints.save(path, arrays, meta)
     _log(f"wrote {path}")
 
 
 def _load(path):
-    if not os.path.exists(path):
+    try:
+        return checkpoints.load(path)
+    except FileNotFoundError:
         raise _Attention(
             f"missing {path} -- run the earlier stage first, or use `run`")
-    data = np.load(path, allow_pickle=False)
-    return data, json.loads(str(data["meta"]))
 
 
 class _Attention(Exception):
     """Recoverable: the command could not proceed but nothing is broken."""
 
 
-def _pack(sessions):
-    """Store ragged per-recording arrays without losing the boundaries.
-
-    A flattened blob would let a later stage delay-embed across two animals,
-    so the lengths travel with the data.
-    """
-    return {"stacked": np.concatenate(sessions, axis=0),
-            "lengths": np.array([len(s) for s in sessions])}
-
-
-def _unpack(data):
-    return np.split(data["stacked"], np.cumsum(data["lengths"])[:-1])
+_pack = checkpoints.pack
+_unpack = checkpoints.unpack
 
 
 def _load_pose(args):

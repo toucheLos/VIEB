@@ -15,11 +15,14 @@ def _app():
     return _QAPP
 
 
-def test_nav_has_six_entries_including_cluster_runs():
+def test_nav_is_the_union_of_v1_and_v2_pages():
+    # v1's information architecture (Overview/Pipeline/Cluster Runs/Analysis/
+    # Artifacts/Settings/Help) plus v2's own States & Motifs and Journeys.
     _app()
     from app.navigation import NAV_ITEMS
-    assert NAV_ITEMS == ["Overview", "States & Motifs", "Journeys",
-                         "Analysis", "Artifacts", "Cluster Runs"]
+    assert NAV_ITEMS == ["Overview", "Pipeline", "States & Motifs", "Journeys",
+                         "Cluster Runs", "Analysis", "Artifacts", "Settings",
+                         "Help"]
 
 
 def test_every_nav_item_still_swaps_pages():

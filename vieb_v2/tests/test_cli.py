@@ -192,6 +192,38 @@ def test_limit_restricts_recordings(project, capsys):
         == [300, 300]
 
 
+def test_cli_can_resume_from_a_gui_written_run(project, tmp_path):
+    """A GUI run and a CLI run must be indistinguishable on disk.
+
+    The GUI runs the pipeline in memory; if it did not also write the stage
+    checkpoints, the Pipeline page would report 0/4 after a successful run and
+    the CLI could not re-cluster without redoing alignment.
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+
+    from app.worker import PipelineWorker
+    from representation import checkpoints
+
+    pose, out = project
+    worker = PipelineWorker(pose, out, {"latent_method": "pca",
+                                        "min_cluster_size": 30})
+    finished = []
+    worker.finished_ok.connect(finished.append)
+    worker.failed.connect(lambda msg: finished.append(AssertionError(msg)))
+    worker.run()                      # synchronous; no thread needed
+    assert finished and not isinstance(finished[0], Exception), finished
+
+    # All four stage checkpoints present, exactly as `cli run` leaves them.
+    assert sorted(checkpoints.completed_stages(out)) == \
+        sorted(checkpoints.STAGE_FILES)
+
+    # ...and the CLI picks up where the GUI left off.
+    assert cli.main(["cluster", "--out", out, "--min-cluster-size", "40",
+                     "--gpu", "off"]) in (cli.OK, cli.NEEDS_ATTENTION)
+
+
 def test_every_subcommand_has_help():
     parser = cli.build_parser()
     for name in ("doctor", "align", "pca", "embed", "cluster", "run",

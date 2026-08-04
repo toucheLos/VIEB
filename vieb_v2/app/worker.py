@@ -42,13 +42,28 @@ class PipelineWorker(QThread):
                 )
                 return
 
-            from representation import run_registry
+            from representation import checkpoints, run_registry
             from representation.pipeline import run as run_pipeline
 
             result = run_pipeline(
                 sessions, bodyparts=bodyparts,
                 progress=lambda stage: self.progress.emit(stage),
                 **self.options,
+            )
+
+            # Write the same checkpoints the CLI writes, so a GUI run is
+            # indistinguishable on disk and the Pipeline/Artifacts pages
+            # report it identically.
+            self.progress.emit("writing checkpoints")
+            checkpoints.save_run(
+                self.out_dir,
+                aligned=result["aligned"],
+                scores=result["scores"],
+                embedded=result["embedded"],
+                index=result["index"],
+                labels=result["labels"],
+                probs=result["probabilities"],
+                meta=result["report"],
             )
 
             run_registry.record(

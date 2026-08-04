@@ -115,6 +115,9 @@ def run(sessions, bodyparts=None, n_lags=4, lag_stride=2, var_threshold=0.95,
         "index": index,
         "embedded": embedded,
         "scores": scores,
+        # Returned so a caller can persist the same stage checkpoints the CLI
+        # writes, rather than having to redo the alignment to obtain them.
+        "aligned": aligned,
         "reference": reference,
         "metrics": result["metrics"],
         "speed_diagnostics": result["speed"],
