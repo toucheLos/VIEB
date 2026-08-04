@@ -31,8 +31,35 @@ HPC_DIR="$REPO_DIR/vieb_v2/hpc"
 module purge
 module load python/3.11.4
 
-echo "=== building $GPU_VENV on $(python --version 2>&1) ==="
-[ -d "$GPU_VENV" ] || python -m venv "$GPU_VENV"
+# The module ships python3 but NO bare `python`, so a bare `python` here falls
+# through to whatever else is on PATH -- conda's base env, 3.13 on this cluster
+# -- and would silently build a 3.13 venv, the one thing this script exists to
+# avoid. Use python3 explicitly, then verify rather than trust.
+MODULE_PY="$(command -v python3)"
+echo "=== building $GPU_VENV on $("$MODULE_PY" --version) ($MODULE_PY) ==="
+PY_MM="$("$MODULE_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+if [ "$PY_MM" != "3.11" ]; then
+    echo "expected python 3.11 from the module, got $PY_MM at $MODULE_PY" >&2
+    echo "something ahead of the module on PATH is shadowing it" >&2
+    exit 1
+fi
+
+[ -d "$GPU_VENV" ] || "$MODULE_PY" -m venv "$GPU_VENV"
+
+# The venv interpreter is dynamically linked against the module's
+# libpython3.11.so.1.0, which nothing but LD_LIBRARY_PATH locates. Bake it into
+# the venv so activating it works in a shell that never loaded the module --
+# otherwise the only symptom is a bare loader error naming the .so.
+PY_LIBDIR="$("$MODULE_PY" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+if ! grep -q VIEB_PY_LIBDIR "$GPU_VENV/bin/activate"; then
+    cat >> "$GPU_VENV/bin/activate" << EOF
+
+# VIEB_PY_LIBDIR -- added by hpc/install_gpu.slurm, see the comment there
+export LD_LIBRARY_PATH="$PY_LIBDIR:\${LD_LIBRARY_PATH:-}"
+EOF
+    echo "=== added LD_LIBRARY_PATH=$PY_LIBDIR to the venv's activate ==="
+fi
+
 source "$GPU_VENV/bin/activate"
 python -m pip install --upgrade pip
 
