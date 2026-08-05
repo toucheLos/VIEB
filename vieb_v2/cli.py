@@ -122,6 +122,7 @@ def cmd_doctor(args):
     _log()
 
     _log(f"GPU device       {report['device'] or 'none visible'}")
+    _log(f"driver           {report['driver'] or 'not detected'}")
     _log(f"HDBSCAN on GPU   {report['hdbscan_gpu']}"
          + (f"  ({report['hdbscan_gpu_reason']})"
             if report["hdbscan_gpu_reason"] else ""))
@@ -140,6 +141,20 @@ def cmd_doctor(args):
     _log("(adjusted Rand index 1.0000) but number the clusters differently,")
     _log("so a state id is only meaningful within one run. Untested at the")
     _log("~2.3M-frame scale of a full project. The backend used is recorded.")
+
+    if report["install_command"]:
+        _log()
+        _log(f"GPU clustering is unavailable. Driver {report['driver']} "
+             f"supports {report['recommended_stack']}.")
+        _log(f"Install it into this venv (Python {report['python_version']}):")
+        _log(f"    {report['install_command']}")
+        _log("--only-binary=:all: is deliberate: without it a missing wheel")
+        _log("becomes a source build that fails on a missing CUDA header.")
+        if report["python_version"] not in ("3.10", "3.11", "3.12"):
+            _log(f"NOTE: RAPIDS wheels may not exist for Python "
+                 f"{report['python_version']}. A venv is bound to the Python "
+                 f"that built it, so `module load python/3.11.4` alone will "
+                 f"not change it -- the venv must be recreated.")
 
     if report["loader_hint"]:
         _log()

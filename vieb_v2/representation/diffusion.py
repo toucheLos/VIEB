@@ -60,9 +60,13 @@ class DiffusionMap:
     # -- short-circuits the manifold entirely (0.09).
     EPSILON_PERCENTILE = 10.0
 
+    # Deliberately no use_gpu parameter. The landmark eigendecomposition is a
+    # 3000x3000 dense eigh and the Nystrom extension is batched matmul; neither
+    # is currently offloaded, so accepting a use_gpu flag here would claim an
+    # acceleration that does not happen. GPU support in this pipeline means
+    # HDBSCAN (see representation/cluster.py) and nothing else.
     def __init__(self, n_components=8, alpha=1.0, epsilon="auto",
-                 diffusion_time=1, n_landmarks=3000, random_state=0,
-                 use_gpu=False):
+                 diffusion_time=1, n_landmarks=3000, random_state=0):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1]")
         if diffusion_time < 0:
@@ -73,7 +77,6 @@ class DiffusionMap:
         self.diffusion_time = diffusion_time
         self.n_landmarks = int(n_landmarks)
         self.random_state = random_state
-        self.use_gpu = use_gpu
         self.backend_ = "cpu"
 
     # ------------------------------------------------------------------ fit

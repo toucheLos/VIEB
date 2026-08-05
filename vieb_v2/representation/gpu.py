@@ -152,6 +152,79 @@ def loader_path_hint():
     )
 
 
+# Driver-gated RAPIDS stacks, ported from v1's _utils.GPU_STACKS. Bare
+# `pip install cuml cupy` is wrong twice over: `cuml` on plain PyPI is an
+# unrelated abandoned package, and bare `cupy` has no prebuilt wheel so pip
+# falls back to a source build needing a full CUDA dev toolkit. The suffixed
+# wheels from pypi.nvidia.com are prebuilt and bundle their own runtime libs.
+RAPIDS_STACKS = [
+    {
+        "id": "rapids-26.04-cuda12.9",
+        "label": "RAPIDS 26.04 / CUDA 12.9",
+        "min_driver": (575, 51, 3),
+        "packages": ["cuml-cu12==26.4.0", "cupy-cuda12x==14.1.1"],
+    },
+    {
+        "id": "rapids-24.12-cuda12.2",
+        "label": "RAPIDS 24.12 / CUDA 12.2",
+        "min_driver": (525, 60, 13),
+        "packages": ["cuml-cu12==24.12.0", "cupy-cuda12x==12.2.0"],
+    },
+]
+
+
+def driver_version():
+    """NVIDIA driver version from nvidia-smi. -> (text, tuple) or (None, None)."""
+    import re
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return None, None
+    if proc.returncode != 0:
+        return None, None
+
+    text = (proc.stdout or "").strip().splitlines()
+    if not text:
+        return None, None
+    match = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", text[0])
+    if not match:
+        return text[0], None
+    return text[0], tuple(int(p) for p in match.groups(default="0"))
+
+
+def recommended_stack(driver_tuple=None):
+    """Highest RAPIDS stack this driver supports, or None."""
+    if driver_tuple is None:
+        _text, driver_tuple = driver_version()
+    if driver_tuple is None:
+        return None
+    for stack in RAPIDS_STACKS:            # ordered newest-first
+        if driver_tuple >= stack["min_driver"]:
+            return stack
+    return None
+
+
+def install_command(stack=None):
+    """The exact pip command for this machine, or a reason it can't be given.
+
+    `--only-binary=:all:` is deliberate: without it a missing wheel silently
+    becomes a source build that fails minutes later on a missing cublas header,
+    which is the failure this whole table exists to prevent.
+    """
+    stack = stack or recommended_stack()
+    if stack is None:
+        return None
+    packages = " ".join(stack["packages"])
+    return (f"pip install --only-binary=:all: "
+            f"--extra-index-url=https://pypi.nvidia.com {packages}")
+
+
 def resolve(use_gpu):
     """Turn auto|on|off into a bool for the HDBSCAN backend.
 
@@ -178,12 +251,18 @@ def report():
     gpu_ok, gpu_reason = hdbscan_backend()
     cupy_ok, cupy_reason = cupy_linalg()
     info = device_info()
+    driver_text, driver_tuple = driver_version()
+    stack = recommended_stack(driver_tuple)
     return {
         **info,
+        "driver": driver_text,
         "hdbscan_gpu": gpu_ok,
         "hdbscan_gpu_reason": gpu_reason,
         "cupy_linalg": cupy_ok,
         "cupy_linalg_reason": cupy_reason,
         "forced_cpu": forced_cpu(),
         "loader_hint": loader_path_hint(),
+        "recommended_stack": stack["label"] if stack else None,
+        "install_command": (None if gpu_ok else install_command(stack)),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
     }
