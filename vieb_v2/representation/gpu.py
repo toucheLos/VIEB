@@ -287,13 +287,29 @@ def stack_message(driver_info):
             f"installed against this driver.")
 
 
+_EXPLICIT_ON = (True, "on", "yes", "true")
+
+
+def explicitly_requested(use_gpu):
+    """True when the caller demanded a GPU rather than accepting whatever is
+    there.
+
+    `resolve` only answers "should this run on GPU", which is the same bool for
+    "on" and for an "auto" that happened to find a device. The difference
+    matters once a *runtime* failure happens: under "on" the caller has said a
+    CPU fallback is not an acceptable outcome, so the same tuple that drives
+    resolve's raise-early behaviour is shared here rather than restated.
+    """
+    return use_gpu in _EXPLICIT_ON
+
+
 def resolve(use_gpu):
     """Turn auto|on|off into a bool for the HDBSCAN backend.
 
     "on" raises rather than silently falling back, because quietly spending
     hours on CPU in a GPU job is worse than failing in the first second.
     """
-    if use_gpu in (True, "on", "yes", "true"):
+    if explicitly_requested(use_gpu):
         ok, reason = hdbscan_backend()
         if not ok:
             raise RuntimeError(

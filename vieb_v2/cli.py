@@ -241,6 +241,7 @@ def cmd_latent(args):
         if report["alpha"] < 1.0:
             _log("  alpha<1 lets sampling density distort the embedding: "
                  "densely sampled (slow) regions get compressed")
+        _report_operator_health(report)
         _report_degenerate_extensions(report)
 
     _save(os.path.join(args.out, SCORES),
@@ -262,6 +263,29 @@ def _report_rank(report, meta):
             _log(f"  WARNING: q={report['n_components']} exceeds the rank "
                  f"ceiling -- lower --var-threshold so noise directions are "
                  f"not retained")
+
+
+def _report_operator_health(report):
+    """Report landmark pruning and the stationary-eigenvector count.
+
+    These are the two numbers that distinguish a diffusion map from an
+    expensive lookup table. n_trivial_eigenvectors > 1 means the operator was
+    disconnected and the coordinates encode component membership rather than
+    geometry -- the failure that once sent a 36h GPU job down the CPU path with
+    nothing in the log to say so.
+    """
+    pruned = report.get("n_landmarks_pruned", 0)
+    kept = report.get("n_landmarks", 0)
+    if pruned:
+        _log(f"  pruned {pruned:,} isolated landmark(s), {kept:,} kept "
+             f"(epsilon {report.get('epsilon', float('nan')):.1f})")
+
+    trivial = report.get("n_trivial_eigenvectors", 1)
+    if trivial > 1:
+        _log(f"  WARNING: {trivial} eigenvalues equal 1.0 where a connected "
+             f"operator has exactly 1 -- the embedding reflects which "
+             f"disconnected piece a frame landed in, not the manifold. Raise "
+             f"--epsilon or --n-landmarks before trusting these states.")
 
 
 def _report_degenerate_extensions(report):
@@ -401,6 +425,7 @@ def cmd_compare_latents(args):
         scores = latent.transform_all(aligned)
         latent_report = latent.spectrum_report()
         if method != "pca":
+            _report_operator_health(latent_report)
             _report_degenerate_extensions(latent_report)
 
         embedded, _ = embed_all(scores, args.n_lags, args.lag_stride)

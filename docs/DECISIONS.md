@@ -635,3 +635,61 @@ install — leaving no path from "GPU is idle" to "GPU is working."
 `vieb_v2/hpc/02_compare_latents.slurm`, `vieb_v2/hpc/submit.sh`,
 `vieb_v2/hpc/01_align.slurm`, `vieb_v2/tests/test_gpu.py`,
 `vieb_v2/tests/test_cli.py`, `_utils.py:90-177`, #3, #32, #52
+
+## 54 — Diffusion maps: isolated landmarks must be pruned, and every λ=1 eigenvector dropped
+**Decision/finding:** Root-caused the v2 GPU job that ran 18h on CPU with a
+silent log (job 46264, `--gpu on`). Two independent defects, one data-shaped
+and one control-flow-shaped, compounded:
+
+*The embedding.* `DiffusionMap.fit` built its operator on 3000 landmarks
+sampled evenly in time. On the 28.6M-frame project ~142 of those are outlier
+poses that no neighbourhood reaches, so each forms its own connected component.
+A disconnected component contributes an eigenvalue of **exactly 1.0**, and
+since 1.0 is the largest eigenvalue the operator admits, those spikes sort to
+the *top* of the spectrum and evict every genuine mode from the retained set —
+measured participation ratio ≈ 1 (each "coordinate" was a spike on one
+landmark). The embedding degenerated into component indicators: **20k frames
+collapsed onto 29 distinct points**. Fixed by `_prune_isolated`, which drops
+landmarks whose off-diagonal kernel mass is below `MIN_NEIGHBOR_MASS = 1.0`
+("one effective neighbour"), iteratively, re-resolving epsilon each round.
+Measured on the real checkpoint: 142/3000 pruned (4.7%), epsilon essentially
+unchanged (478.6 vs 501.4), spectrum decays properly (λ₁ 0.988 → λ₈ 0.935),
+exactly one trivial eigenvector, **49,869/50,000 distinct embedded points**.
+
+Rejected: connecting the same graph by *raising* epsilon instead. Binary search
+puts the smallest connecting bandwidth at the 90.3rd percentile of pairwise
+distances — 12.7× the default — which is deep in the short-circuit regime
+`EPSILON_PERCENTILE` was tuned to avoid (the module's own measurements put p50
+at rank-corr 0.09). Dropping a handful of unreachable outlier poses is both
+cheaper and more honest than over-smoothing the whole manifold to accommodate
+them.
+
+*The eigenvector mask.* `_non_trivial` looked for the first λ=1 eigenvector
+that was *constant* and `break`ed. On a connected operator λ=1 has multiplicity
+1 and is constant, so that read correctly. On a disconnected one the
+multiplicity equals the component count and `eigh` returns an arbitrary basis
+of that eigenspace — component indicators, not constants — so the constancy
+test recognised none of them and let all but one through. Now keyed on the
+eigenvalue alone, with `n_trivial_eigenvectors > 1` warning loudly
+(`DegenerateOperatorWarning`) since that is the signature of an operator that
+is still fragmented.
+
+*The silent fallback.* `representation/cluster.py:cluster()` caught every
+`_fit_gpu` exception with a bare `except Exception: result = None` and no log,
+so cuML dying on the degenerate embedding was invisible and CPU HDBSCAN
+inherited 28.6M points. `--gpu on` now re-raises with the original exception
+chained (`gpu.explicitly_requested()` shares `resolve()`'s spelling tuple, so
+there is one source of truth for what counts as a demand for GPU); `auto`
+still falls back, but via `GPUFallbackWarning` rather than silence. This is
+the same principle as #53 — fail in the first second rather than spend the
+allocation — extended from capability-probe time to fit time, which is where
+it actually bit.
+**Why:** `--gpu on` existed precisely so a GPU job could not quietly become a
+CPU job, but the guarantee stopped at the capability probe; a runtime failure
+walked straight past it. And the degenerate embedding would have produced
+meaningless states even if the clustering had finished.
+**Related:** `vieb_v2/representation/diffusion.py`,
+`vieb_v2/representation/cluster.py`, `vieb_v2/representation/gpu.py`,
+`vieb_v2/cli.py` (`_report_operator_health`),
+`vieb_v2/tests/test_diffusion.py`, `vieb_v2/tests/test_cluster.py` (new), #53,
+#34
