@@ -294,3 +294,104 @@ def test_every_subcommand_has_help():
         with pytest.raises(SystemExit) as exc:
             parser.parse_args([name, "--help"])
         assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Koopman basins beside HDBSCAN states
+# ---------------------------------------------------------------------------
+
+def _two_arms(n_recordings=3, window=8, seed=0):
+    """Koopman labels every frame; HDBSCAN labels all but the delay window."""
+    rng = np.random.default_rng(seed)
+    lengths = [200, 150, 250][:n_recordings]
+
+    k_index = np.concatenate([
+        np.stack([np.full(n, r), np.arange(n)], axis=1)
+        for r, n in enumerate(lengths)])
+    h_index = np.concatenate([
+        np.stack([np.full(n - window, r), np.arange(window, n)], axis=1)
+        for r, n in enumerate(lengths)])
+
+    k_labels = rng.integers(0, 5, len(k_index)).astype(np.int32)
+    lookup = {rf: k_labels[i] for i, rf in enumerate(map(tuple, k_index))}
+    h_labels = np.array([lookup[rf] for rf in map(tuple, h_index)],
+                        dtype=np.int32)
+    return ({"labels": h_labels, "index": h_index, "n_frames": h_labels.size},
+            {"labels": k_labels, "index": k_index, "n_frames": k_labels.size})
+
+
+def test_koopman_and_hdbscan_are_joined_on_index_not_position():
+    """The two label arrays differ in length by one delay window per recording,
+    so a positional comparison silently offsets every recording after the
+    first. Same labels in, ARI 1.0 out -- only if the join is on (rec, frame).
+    """
+    hdb, koop = _two_arms()
+    joined = cli._join_on_index(hdb, koop)
+
+    assert joined["n_joined"] == hdb["n_frames"]
+    assert joined["n_dropped_by_delay_window"] == 3 * 8
+    assert joined["adjusted_rand"] == pytest.approx(1.0)
+
+    # The trap this guards against: identical partitions, compared row by row.
+    positional = cli._adjusted_rand(hdb["labels"],
+                                    koop["labels"][:hdb["n_frames"]])
+    assert positional < 0.5, (
+        "a positional compare agreed here, so this test would not catch the "
+        "offset it exists to catch")
+
+
+def test_join_survives_recordings_absent_from_one_arm():
+    """A recording dropped entirely by one arm must not shift the others."""
+    hdb, koop = _two_arms()
+    keep = hdb["index"][:, 0] != 1
+    hdb = {"labels": hdb["labels"][keep], "index": hdb["index"][keep],
+           "n_frames": int(keep.sum())}
+
+    joined = cli._join_on_index(hdb, koop)
+    assert joined["n_joined"] == hdb["n_frames"]
+    assert joined["adjusted_rand"] == pytest.approx(1.0)
+
+
+def test_koopman_subcommand_writes_labels_beside_hdbscan(project, capsys):
+    """End to end: both label sets survive, and both score with one metric set.
+
+    Koopman's -1 is metrics.NOISE_LABEL, so nothing here is special-cased for
+    the method that produced the labels.
+    """
+    from representation import checkpoints
+
+    pose, out = project
+    assert cli.main(["run", "--pose", pose, "--out", out,
+                     "--min-cluster-size", "30", "--gpu", "off"]) == cli.OK
+    cli.main(["koopman", "--out", out, "--n-regions", "8"])
+
+    # Both must exist: they are built from different frame sets, so one
+    # overwriting the other would make the comparison impossible.
+    assert os.path.exists(os.path.join(out, cli.LABELS))
+    assert os.path.exists(os.path.join(out, checkpoints.KOOPMAN_LABELS))
+
+    koop = cli._score_labels(out, checkpoints.KOOPMAN_LABELS, cli.SCORES, None)
+    hdb = cli._score_labels(out, cli.LABELS, cli.EMBEDDED, "embedded")
+    assert koop["metrics"]["n_states"] == koop["report"]["n_attractors"]
+
+    # Koopman keeps the delay window HDBSCAN drops, so it is strictly longer.
+    assert koop["n_frames"] > hdb["n_frames"]
+
+    joined = cli._join_on_index(hdb, koop)
+    assert joined["n_joined"] == hdb["n_frames"]
+    assert joined["n_dropped_by_delay_window"] > 0
+
+
+def test_compare_koopman_declares_no_winner(project, capsys):
+    pose, out = project
+    assert cli.main(["run", "--pose", pose, "--out", out,
+                     "--min-cluster-size", "30", "--gpu", "off"]) == cli.OK
+    cli.main(["koopman", "--out", out, "--n-regions", "8"])
+    capsys.readouterr()
+
+    assert cli.main(["compare-koopman", "--pca-out", out]) == cli.OK
+    printed = capsys.readouterr().out
+    assert "No winner is declared." in printed
+    assert "joined on (recording, frame), not position" in printed
+    # The two -1s share a value, not a meaning -- the table must say so.
+    assert "share a value, not a meaning" in printed

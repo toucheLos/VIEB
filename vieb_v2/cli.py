@@ -580,6 +580,167 @@ def _print_latent_comparison(results, args):
     print("=" * 72)
 
 
+def cmd_compare_koopman(args):
+    """HDBSCAN states beside Koopman basins, for both latents.
+
+    Four arms from two out-dirs. Every arm is scored with the *same* metrics --
+    Koopman's `-1` is already `metrics.NOISE_LABEL` -- so nothing here is
+    special-cased for the method that produced the labels.
+    """
+    arms, joins = {}, {}
+    for latent, out in (("pca", args.pca_out), ("diffusion", args.diffusion_out)):
+        if not out:
+            continue
+        hdb = _score_labels(out, LABELS, EMBEDDED, "embedded")
+        koop = _score_labels(out, checkpoints.KOOPMAN_LABELS, SCORES, None)
+        if hdb:
+            arms[f"{latent}-HDBSCAN"] = hdb
+        if koop:
+            arms[f"{latent}-Koopman"] = koop
+        if hdb and koop:
+            joins[latent] = _join_on_index(hdb, koop)
+
+    if not arms:
+        raise _Attention(
+            f"no labels found under {args.pca_out!r} or {args.diffusion_out!r}"
+            f" -- run `cluster` and `koopman` first")
+
+    _print_koopman_comparison(arms, joins)
+
+    if args.json:
+        payload = {
+            "arms": {k: {"metrics": v["metrics"], "speed": v["speed"],
+                         "report": v["report"]} for k, v in arms.items()},
+            "index_join": joins,
+        }
+        with open(args.json, "w") as fh:
+            json.dump(_jsonable(payload), fh, indent=2)
+        _log(f"wrote {args.json}")
+    return OK
+
+
+def _score_labels(out, labels_name, points_name, points_key):
+    """Load one arm's labels and score them against the space they live in."""
+    path = os.path.join(out, labels_name)
+    if not os.path.exists(path):
+        _log(f"skipping {path} -- not found")
+        return None
+
+    data, meta = checkpoints.load(path)
+    labels, index = data["labels"], data["index"]
+
+    pdata, _ = checkpoints.load(os.path.join(out, points_name))
+    points = (pdata[points_key] if points_key
+              else np.concatenate(_unpack(pdata), axis=0))
+
+    return {"labels": labels, "index": index, "n_frames": int(labels.size),
+            "metrics": cluster_metrics(labels),
+            "speed": speed_diagnostics(labels, points),
+            "report": {k: v for k, v in meta.items()
+                       if k in ("n_attractors", "n_fixed_points",
+                                "n_limit_cycles", "n_regions",
+                                "transition_fraction", "knn_subsampled",
+                                "knn_sample", "limit_cycle_period_s",
+                                "limit_cycle_plausible", "min_cluster_size",
+                                "hdbscan_backend", "hdbscan_sample")}}
+
+
+def _join_on_index(hdb, koop):
+    """Align two label arrays on (recording, frame) -- never positionally.
+
+    Koopman labels every frame of `scores.npz`; HDBSCAN labels the delay-
+    embedded frames, which are fewer by one window per recording. Comparing
+    them row by row would silently offset every recording after the first.
+    """
+    def key(index):
+        # One int64 per frame. Frame counts are ~10^4, so a 10^6 stride keeps
+        # recordings from colliding while staying far inside int64.
+        return index[:, 0].astype(np.int64) * 1_000_000 + index[:, 1]
+
+    hk, kk = key(hdb["index"]), key(koop["index"])
+    order = np.argsort(kk)
+    pos = np.searchsorted(kk[order], hk)
+    pos[pos >= kk.size] = 0
+    matched = kk[order][pos] == hk
+
+    hl = hdb["labels"][matched]
+    kl = koop["labels"][order][pos[matched]]
+
+    both = (hl >= 0) & (kl >= 0)
+    agree_noise = float(((hl < 0) == (kl < 0)).mean()) if hl.size else None
+    return {
+        "n_hdbscan_frames": int(hdb["n_frames"]),
+        "n_koopman_frames": int(koop["n_frames"]),
+        "n_joined": int(matched.sum()),
+        "n_dropped_by_delay_window": int(koop["n_frames"] - matched.sum()),
+        "both_assigned_frac": float(both.mean()) if hl.size else None,
+        "noise_agreement_frac": agree_noise,
+        "adjusted_rand": _adjusted_rand(hl[both], kl[both]),
+    }
+
+
+def _adjusted_rand(a, b):
+    """ARI between two partitions, on the frames both assigned."""
+    if a.size == 0:
+        return None
+    try:
+        from sklearn.metrics import adjusted_rand_score
+    except ImportError:
+        return None
+    return float(adjusted_rand_score(a, b))
+
+
+def _print_koopman_comparison(arms, joins):
+    names = list(arms)
+    print()
+    print("=" * 78)
+    print("HDBSCAN states vs Koopman basins -- same alignment, same latents")
+    print("=" * 78)
+    header = f"{'metric':<26}" + "".join(f"{n:>26}" for n in names)
+    print(header)
+    print("-" * len(header))
+
+    def fmt(v):
+        return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float)
+                                        else str(v))
+
+    def row(label, fn):
+        print(f"{label:<26}" + "".join(f"{fmt(fn(arms[n])):>26}" for n in names))
+
+    row("n_states", lambda r: r["metrics"]["n_states"])
+    row("n_frames", lambda r: r["n_frames"])
+    row("noise_frac", lambda r: r["metrics"]["noise_frac"])
+    row("largest_state_frac",
+        lambda r: r["metrics"]["clustered_only"]["largest_state_frac"])
+    row("state_entropy",
+        lambda r: r["metrics"]["clustered_only"]["state_entropy"])
+    row("noise_speed_ratio", lambda r: r["speed"].get("noise_speed_ratio"))
+    row("size_speed_rank_corr", lambda r: r["speed"].get("size_speed_rank_corr"))
+    row("n_fixed_points", lambda r: r["report"].get("n_fixed_points"))
+    row("n_limit_cycles", lambda r: r["report"].get("n_limit_cycles"))
+    row("n_regions", lambda r: r["report"].get("n_regions"))
+
+    for latent, j in joins.items():
+        print()
+        print(f"{latent}: joined on (recording, frame), not position")
+        print(f"  {j['n_koopman_frames']:,} koopman frames, "
+              f"{j['n_hdbscan_frames']:,} hdbscan frames, "
+              f"{j['n_joined']:,} joined")
+        print(f"  {j['n_dropped_by_delay_window']:,} frames exist only in "
+              f"koopman -- the delay window hdbscan drops per recording")
+        print(f"  both assigned {fmt(j['both_assigned_frac'])}   "
+              f"noise agreement {fmt(j['noise_agreement_frac'])}   "
+              f"ARI {fmt(j['adjusted_rand'])}")
+
+    print()
+    print("noise means different things per column: HDBSCAN's -1 is a frame")
+    print("that failed to cluster, Koopman's is a frame near a separatrix.")
+    print("They share a value, not a meaning. The Koopman flow field is")
+    print("unvalidated on this data (no v_coherence run), so these basins are")
+    print("exploratory. No winner is declared.")
+    print("=" * 78)
+
+
 def cmd_tune(args):
     scores_path = os.path.join(args.out, SCORES)
     if not os.path.exists(scores_path):
@@ -804,6 +965,15 @@ def build_parser():
     sp.add_argument("--seed", type=int, default=0)
     sp.add_argument("--json", default=None, help="write the report as JSON")
     sp.set_defaults(func=cmd_koopman)
+
+    sp = sub.add_parser("compare-koopman",
+                        help="HDBSCAN states vs Koopman basins, both latents")
+    sp.add_argument("--pca-out", default=None,
+                    help="out-dir holding the PCA arm's checkpoints")
+    sp.add_argument("--diffusion-out", default=None,
+                    help="out-dir holding the diffusion arm's checkpoints")
+    sp.add_argument("--json", default=None, help="write the comparison as JSON")
+    sp.set_defaults(func=cmd_compare_koopman)
 
     sp = sub.add_parser("run", help="align + latent + embed + cluster")
     pose_args(sp), out_args(sp), gpu_args(sp), embed_args(sp)
