@@ -33,7 +33,9 @@ sbatch full_pipeline.sbatch
 | `02_compare_latents.sbatch` | `gpu` | stage 2 only: both latents + HDBSCAN |
 | `submit.sh` | — | chains 01 → 02 with `--dependency=afterok` |
 | `latent.sbatch` | `normal` | one latent, **checkpointed** to `scores.npz` (`compare-latents` never writes it) |
+| `embed_cluster.sbatch` | `gpu` | delay embed + HDBSCAN, **checkpointed** to `labels.npz` (`compare-latents` never writes it either) |
 | `koopman.sbatch` | `normal` | attractor topology: states as basins, no clustering |
+| `compare_koopman.sbatch` | `normal` | HDBSCAN states vs Koopman basins, all four arms, joined on `index` |
 | `install_gpu.sh` | — | installs the RAPIDS stack matching this driver |
 
 **`full_pipeline.sbatch`** is the simplest: one job, one log, everything done.
@@ -153,6 +155,19 @@ To sweep the clustering parameter against one existing embedding:
 
 ```bash
 python -m cli sweep --out <existing run> --min-cluster-sizes 25,50,100,200 --gpu on
+```
+
+To test the Koopman arm end to end against an existing `scores.npz`, sweep
+`--n-regions` into separate out-dirs (the state count is only an output if the
+parameter that could fake it has been varied — #55, #57), then compare:
+
+```bash
+for n in 12 24 48 96 192; do
+    d=~/vieb2-results/koopman_pca_r$n
+    mkdir -p "$d" && ln -sf ~/vieb2-results/koopman_pca/scores.npz "$d/"
+    sbatch --export=ALL,OUT_DIR=$d,N_REGIONS=$n koopman.sbatch
+done
+sbatch --export=ALL compare_koopman.sbatch   # needs labels.npz in both base dirs
 ```
 
 Runs launched here also appear in the GUI's Cluster Runs and Overview pages —
