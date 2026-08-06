@@ -6,7 +6,7 @@
 cd ~/vieb/vieb_v2/hpc
 
 # 1. one-time: CPU packages
-source ~/vieb/venv/bin/activate
+source "${VENV:-~/vieb/venv}/bin/activate"
 pip install numpy pandas tables hdbscan
 
 # 2. one-time: GPU packages, on a GPU node so the right driver is queried

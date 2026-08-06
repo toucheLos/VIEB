@@ -585,7 +585,116 @@ re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
 
-## 53 — Koopman attractor-topology decomposition built and synthetically verified; its real-data half deferred on an unmet `flow-field` prerequisite
+## 53 — v2 HPC GPU pipeline: driver-matched RAPIDS stack + a dedicated python/3.11.4 GPU venv
+**Decision/finding:** Ported v1's `_utils.py:90-177` driver→stack table into
+`vieb_v2/representation/gpu.py` (`GPU_STACKS`, `detect_nvidia_driver`,
+`select_gpu_stack`, `stack_message`), dropping the WSL2 half as irrelevant on a
+Linux cluster. `gpu.report()` now carries both halves of the question — what is
+installed (the existing run-it-don't-import-it probes) and what *should* be
+(driver-matched recommendation) — since an idle GPU can mean "nothing
+installed" or "wrong RAPIDS pin", which need different fixes. `doctor` prints
+the recommendation and gains `--print-packages`, which emits only the pinned
+pip arguments on stdout (reason goes to stderr, exit 1 when no stack matches),
+so `install_gpu.slurm` consumes the table without duplicating it in bash;
+it needs only the stdlib, so it answers before cuml/cupy exist.
+
+The long-open "wheels on the existing 3.13 venv vs. rebuild on 3.11.4"
+question is resolved, and the reason it was stuck is that it had no fixed
+answer: `~/vieb/venv` is Python 3.13.12 (already outside `pyproject.toml`'s
+own `requires-python = ">=3.10,<3.13"`), and per PyPI, RAPIDS 24.12 /
+cupy 12.2.0 publishes **no** 3.13 wheels at all (`cuml-cu12==24.12.0` is a
+source tarball only) while RAPIDS 26.4 / cupy 14.1.1 does (abi3 + cp313). So
+`--only-binary=:all:` would have succeeded or failed depending on which stack
+the driver resolved to. Chosen resolution: GPU installs always build a
+dedicated `python/3.11.4` venv (`hpc/install_gpu.slurm`, `$HOME/vieb/venv-gpu`),
+which both stacks have wheels for; the default 3.13 venv stays CPU-only and
+untouched. The venv path is recorded in `hpc/.gpu_venv`, checked by
+`submit.sh` before queuing and by `02_compare_latents.slurm` on start.
+
+`install_gpu.slurm` is a one-time preflight, deliberately **not** chained into
+`submit.sh` — it would put a gpu-partition job on the critical path of every
+submission to redo work that only changes when the driver does. `doctor.slurm`
+moved to `partition=gpu` because `nvidia-smi` does not exist on a login node
+(verified), so a driver recommendation is impossible anywhere else; it keeps
+using the default venv on purpose, since its job is to compare installed
+against recommended. `02_compare_latents.slurm` moved to `partition=gpu
+--gres=gpu:1` with `--gpu on` (not `auto`): a silent CPU fallback would spend
+the whole 36h GPU allocation, and `gpu.resolve()` already raises in the first
+second instead. `01_align.slurm` stays CPU on `normal` — `gpu.py`'s own
+reasoning is that the pooled PCA is a 14×14 eigenproblem; only HDBSCAN, which
+labels all 28.6M frames of the current project, is worth a device. Also
+removed the vestigial `module load python/3.11.4` from `01_align.slurm` and
+`doctor.slurm`, where it was silently shadowed by the 3.13 venv activated on
+the next line.
+**Why:** GPU support was half-decided: the CLI had `--gpu auto|on|off` and
+capability probes, but the HPC scripts ran `--gpu off` on `partition=normal`
+and `doctor` could only report what was already installed, never what to
+install — leaving no path from "GPU is idle" to "GPU is working."
+**Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/cli.py`,
+`vieb_v2/hpc/install_gpu.slurm` (new), `vieb_v2/hpc/doctor.slurm`,
+`vieb_v2/hpc/02_compare_latents.slurm`, `vieb_v2/hpc/submit.sh`,
+`vieb_v2/hpc/01_align.slurm`, `vieb_v2/tests/test_gpu.py`,
+`vieb_v2/tests/test_cli.py`, `_utils.py:90-177`, #3, #32, #52
+
+## 54 — Diffusion maps: isolated landmarks must be pruned, and every λ=1 eigenvector dropped
+**Decision/finding:** Root-caused the v2 GPU job that ran 18h on CPU with a
+silent log (job 46264, `--gpu on`). Two independent defects, one data-shaped
+and one control-flow-shaped, compounded:
+
+*The embedding.* `DiffusionMap.fit` built its operator on 3000 landmarks
+sampled evenly in time. On the 28.6M-frame project ~142 of those are outlier
+poses that no neighbourhood reaches, so each forms its own connected component.
+A disconnected component contributes an eigenvalue of **exactly 1.0**, and
+since 1.0 is the largest eigenvalue the operator admits, those spikes sort to
+the *top* of the spectrum and evict every genuine mode from the retained set —
+measured participation ratio ≈ 1 (each "coordinate" was a spike on one
+landmark). The embedding degenerated into component indicators: **20k frames
+collapsed onto 29 distinct points**. Fixed by `_prune_isolated`, which drops
+landmarks whose off-diagonal kernel mass is below `MIN_NEIGHBOR_MASS = 1.0`
+("one effective neighbour"), iteratively, re-resolving epsilon each round.
+Measured on the real checkpoint: 142/3000 pruned (4.7%), epsilon essentially
+unchanged (478.6 vs 501.4), spectrum decays properly (λ₁ 0.988 → λ₈ 0.935),
+exactly one trivial eigenvector, **49,869/50,000 distinct embedded points**.
+
+Rejected: connecting the same graph by *raising* epsilon instead. Binary search
+puts the smallest connecting bandwidth at the 90.3rd percentile of pairwise
+distances — 12.7× the default — which is deep in the short-circuit regime
+`EPSILON_PERCENTILE` was tuned to avoid (the module's own measurements put p50
+at rank-corr 0.09). Dropping a handful of unreachable outlier poses is both
+cheaper and more honest than over-smoothing the whole manifold to accommodate
+them.
+
+*The eigenvector mask.* `_non_trivial` looked for the first λ=1 eigenvector
+that was *constant* and `break`ed. On a connected operator λ=1 has multiplicity
+1 and is constant, so that read correctly. On a disconnected one the
+multiplicity equals the component count and `eigh` returns an arbitrary basis
+of that eigenspace — component indicators, not constants — so the constancy
+test recognised none of them and let all but one through. Now keyed on the
+eigenvalue alone, with `n_trivial_eigenvectors > 1` warning loudly
+(`DegenerateOperatorWarning`) since that is the signature of an operator that
+is still fragmented.
+
+*The silent fallback.* `representation/cluster.py:cluster()` caught every
+`_fit_gpu` exception with a bare `except Exception: result = None` and no log,
+so cuML dying on the degenerate embedding was invisible and CPU HDBSCAN
+inherited 28.6M points. `--gpu on` now re-raises with the original exception
+chained (`gpu.explicitly_requested()` shares `resolve()`'s spelling tuple, so
+there is one source of truth for what counts as a demand for GPU); `auto`
+still falls back, but via `GPUFallbackWarning` rather than silence. This is
+the same principle as #53 — fail in the first second rather than spend the
+allocation — extended from capability-probe time to fit time, which is where
+it actually bit.
+**Why:** `--gpu on` existed precisely so a GPU job could not quietly become a
+CPU job, but the guarantee stopped at the capability probe; a runtime failure
+walked straight past it. And the degenerate embedding would have produced
+meaningless states even if the clustering had finished.
+**Related:** `vieb_v2/representation/diffusion.py`,
+`vieb_v2/representation/cluster.py`, `vieb_v2/representation/gpu.py`,
+`vieb_v2/cli.py` (`_report_operator_health`),
+`vieb_v2/tests/test_diffusion.py`, `vieb_v2/tests/test_cluster.py` (new), #53,
+#34
+
+## 55 — Koopman attractor-topology decomposition built and synthetically verified; its real-data half deferred on an unmet `flow-field` prerequisite
 **Decision/finding:** Added `vieb_v2/representation/koopman.py` (+
 `vieb_v2/tests/test_koopman.py`) on branch `koopman`: global SVD-based DMD,
 per-region affine Koopman operators, and topology extraction (fixed points,
@@ -650,3 +759,44 @@ cycle every time, recovered period 1.004–1.030 s (eigenvalue) and 1.000 s
 `vieb_v2/tests/test_koopman.py`, `vieb_v2/representation/metrics.py`,
 `vieb_v2/representation/checkpoints.py`, `vieb_v2/representation/embed.py`
 (the boundary guard this mirrors)
+
+## 56 — Merging `v2` into `koopman`: v2's GPU/driver stack wins wholesale, and the `.sbatch` suite replaces the `.slurm` one
+
+**Decision:** `v2` and `koopman` solved the same GPU-preflight problem in
+parallel from a shared base (`dd67c6d`). The merge resolves toward `v2` in
+every overlapping file rather than splicing the two:
+
+1. **`representation/gpu.py` and `representation/diffusion.py` take `v2`
+   wholesale.** `v2`'s driver detection (`GPU_STACKS` / `detect_nvidia_driver`
+   / `select_gpu_stack` / `stack_message`) is a strict superset of koopman's
+   `RAPIDS_STACKS` path, and its `diffusion.py` carries the lookup-table-collapse
+   and Nyström-NaN fixes that koopman's copy predates. `use_gpu` defaults to
+   `False`, so koopman-side callers that dropped the kwarg still work.
+2. **`cmd_doctor` keeps only `v2`'s body.** The automatic merge appended
+   koopman's tail block to `v2`'s, and that block reads `install_command`,
+   `recommended_stack` and `python_version` — keys `v2`'s `report()` does not
+   emit, so `doctor` raised `KeyError` on every invocation. The block was
+   deleted rather than aliased into `report()`: `v2`'s lines above it already
+   print the recommended stack, the `stack_message`, and the 3.11-vs-3.13 venv
+   caveat, so aliasing would only have duplicated the advice.
+3. **`hpc/submit.sh` and the `.sbatch` suite are koopman's**; the four
+   re-added `.slurm` files (`01_align`, `02_compare_latents`, `doctor`,
+   `install_gpu`) were deleted. `hpc/README.md` documents the `.sbatch` suite,
+   and `install_gpu` is a plain `./install_gpu.sh`, not a batch job — the three
+   stale `hpc/install_gpu.slurm` references in `cli.py` were repointed.
+
+**Also:** every `.sbatch` (and `install_gpu.sh`) hardcoded
+`source "$HOME/vieb/venv/bin/activate"`. That venv is Python 3.13, which
+`install_gpu.sh` itself warns cannot host RAPIDS; the GPU stack lives in a
+separate 3.11 venv. All five now use `VENV="${VENV:-$HOME/vieb/venv}"`, so the
+venv is selectable per-submission without editing tracked files. This
+generalizes the local path hack that was sitting in `git stash`, which is
+therefore obsolete — it patches files this merge deleted.
+
+**Why:** Two parallel solutions to one problem cannot both survive without a
+rule for which wins; picking per-file by supersededness keeps one driver-
+detection code path instead of two that drift. The `KeyError` is the concrete
+cost of splicing instead of choosing.
+**Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/representation/diffusion.py`,
+`vieb_v2/cli.py`, `vieb_v2/hpc/*.sbatch`, `vieb_v2/hpc/install_gpu.sh`,
+`vieb_v2/hpc/README.md`, decisions #53, #54, #55

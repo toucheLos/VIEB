@@ -158,6 +158,69 @@ def test_doctor_runs_without_a_gpu(monkeypatch, capsys):
         gpu.reset_cache()
 
 
+def test_doctor_reports_the_recommended_stack(monkeypatch, capsys):
+    monkeypatch.setattr(gpu, "detect_nvidia_driver", lambda: {
+        "ok": True, "driver": "575.57.08", "driver_tuple": (575, 57, 8),
+        "cuda": "12.9", "gpu_name": "NVIDIA A100-SXM4-80GB", "error": None})
+    assert cli.main(["doctor"]) == cli.OK
+    out = capsys.readouterr().out
+    assert "575.57.08" in out
+    assert "RAPIDS 26.04" in out
+
+
+def test_print_packages_emits_only_pip_arguments(monkeypatch, capsys):
+    # install_gpu.sh pipes this straight into pip, so a stray log line on
+    # stdout would become a bogus package name.
+    monkeypatch.setattr(gpu, "detect_nvidia_driver", lambda: {
+        "ok": True, "driver": "575.57.08", "driver_tuple": (575, 57, 8),
+        "cuda": "12.9", "gpu_name": None, "error": None})
+    assert cli.main(["doctor", "--print-packages"]) == cli.OK
+
+    captured = capsys.readouterr()
+    lines = captured.out.strip().splitlines()
+    stack = gpu.select_gpu_stack((575, 57, 8))
+    assert lines == stack["packages"]
+    assert not any(line.startswith("[vieb2]") for line in lines)
+
+
+def test_print_packages_says_nothing_on_stdout_without_a_driver(monkeypatch,
+                                                                capsys):
+    # The login-node case: exit non-zero and keep stdout empty so the caller's
+    # package array comes back empty rather than holding an error string.
+    monkeypatch.setattr(gpu, "detect_nvidia_driver", lambda: {
+        "ok": False, "driver": None, "driver_tuple": None, "cuda": None,
+        "gpu_name": None, "error": "nvidia-smi not found"})
+    assert cli.main(["doctor", "--print-packages"]) == cli.NEEDS_ATTENTION
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert "gpu partition" in captured.err
+
+
+def test_print_packages_rejects_a_driver_too_old_for_any_stack(monkeypatch,
+                                                               capsys):
+    monkeypatch.setattr(gpu, "detect_nvidia_driver", lambda: {
+        "ok": True, "driver": "470.1", "driver_tuple": (470, 1),
+        "cuda": "11.4", "gpu_name": None, "error": None})
+    assert cli.main(["doctor", "--print-packages"]) == cli.NEEDS_ATTENTION
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_degenerate_extension_warning_is_silent_when_zero(capsys):
+    cli._report_degenerate_extensions({"n_degenerate_extensions": 0,
+                                       "degenerate_extension_frac": 0.0})
+    assert capsys.readouterr().out == ""
+
+
+def test_degenerate_extension_warning_names_the_count_and_fraction(capsys):
+    cli._report_degenerate_extensions({"n_degenerate_extensions": 3,
+                                       "degenerate_extension_frac": 0.5})
+    out = capsys.readouterr().out
+    assert "3" in out
+    assert "50.0000%" in out
+    assert "WARNING" in out
+
+
 def test_sample_then_predict_labels_every_frame(project):
     # A full project is ~2.3M frames, so HDBSCAN is fitted on a subsample and
     # the rest labelled by approximate_predict. Every frame must still get one.

@@ -13,9 +13,15 @@ the detection bias the representation is meant to be evaluated against.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from .metrics import NOISE_LABEL, cluster_metrics, speed_diagnostics
+
+
+class GPUFallbackWarning(UserWarning):
+    """Raised when GPU HDBSCAN failed at fit time and CPU took over."""
 
 
 def cluster(embedded, min_cluster_size=50, min_samples=None, metric="euclidean",
@@ -47,7 +53,7 @@ def cluster(embedded, min_cluster_size=50, min_samples=None, metric="euclidean",
         empty = (np.empty(0, dtype=int), np.empty(0))
         return (*empty, "none") if return_backend else empty
 
-    from .gpu import resolve
+    from .gpu import explicitly_requested, resolve
 
     n = embedded.shape[0]
     subsample = sample is not None and n > int(sample)
@@ -66,8 +72,28 @@ def cluster(embedded, min_cluster_size=50, min_samples=None, metric="euclidean",
             result = _fit_gpu(fit_data, embedded, min_cluster_size, min_samples,
                               subsample, batch_size)
             backend = "gpu"
-        except Exception:
-            result = None  # fall through to CPU
+        except Exception as exc:
+            # gpu.resolve() only proves the backend *can* run a toy problem; it
+            # cannot predict a failure on this particular embedding. Under
+            # "--gpu on" the caller has already said a CPU fallback is not an
+            # acceptable outcome, so honour that here too -- a fallback that
+            # silently downgrades a 36h GPU allocation to single-core CPU is
+            # exactly the failure resolve() exists to prevent, just deferred to
+            # fit time. Under "auto" the fallback is the point, but it is
+            # announced rather than swallowed: a run that quietly took the slow
+            # path is indistinguishable from one that never had a GPU.
+            if explicitly_requested(use_gpu):
+                raise RuntimeError(
+                    f"GPU HDBSCAN was requested with --gpu on but failed while "
+                    f"fitting {fit_data.shape[0]} x {fit_data.shape[1]} points: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            warnings.warn(
+                f"GPU HDBSCAN failed ({type(exc).__name__}: {exc}); "
+                f"falling back to CPU, which is much slower at this scale.",
+                GPUFallbackWarning, stacklevel=2,
+            )
+            result = None
 
     if result is None:
         result = _fit_cpu(fit_data, embedded, min_cluster_size, min_samples,

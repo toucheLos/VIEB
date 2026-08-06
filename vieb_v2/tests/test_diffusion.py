@@ -1,13 +1,29 @@
 import os
 import sys
+import warnings
 
 import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from representation.diffusion import DiffusionMap  # noqa: E402
+from representation.diffusion import (  # noqa: E402
+    DegenerateOperatorWarning, DiffusionMap,
+)
 from representation.pooled_pca import PooledPCA  # noqa: E402
+
+
+def _spiral_with_outliers(n=800, n_outliers=12, spread=400.0, seed=0):
+    """A clean manifold plus a handful of far-flung points.
+
+    This is the shape of the real failure: mistracked frames land far outside
+    every neighbourhood, become their own connected components, and each one
+    contributes a lambda = 1 spike that outranks the genuine modes.
+    """
+    x, t = _spiral(n=n, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    outliers = rng.normal(size=(n_outliers, 2)) * 10 + spread
+    return np.vstack([x, outliers]), t
 
 
 def _spiral(n=800, seed=0, noise=0.05):
@@ -188,3 +204,116 @@ def test_diffusion_time_shrinks_trailing_coordinates():
     last1 = np.abs(dm1.transform(x)[:, -1]).mean()
     last4 = np.abs(dm4.transform(x)[:, -1]).mean()
     assert last4 < last1
+
+
+def test_far_outlier_gets_a_finite_zero_embedding_not_nan():
+    # A single mistracked keypoint can put one frame far outside every
+    # landmark's neighborhood, underflowing exp(-d/epsilon_) to exactly 0 for
+    # all of them. That must not become 0/0 = NaN; it should resolve to a
+    # defined (zero) embedding, with no floating-point warning escaping.
+    x, _ = _spiral(n=800)
+    dm = DiffusionMap(n_components=3, n_landmarks=200).fit([x])
+
+    far = np.array([[1e6, 1e6]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = dm.transform(far)
+
+    assert np.isfinite(out).all()
+    assert np.allclose(out, 0.0)
+
+
+def test_isolated_landmarks_do_not_evict_the_real_modes():
+    # The regression that cost an 18h GPU job. Outliers form singleton
+    # components; each contributes lambda = 1, and since 1.0 is the largest
+    # eigenvalue possible they sort above every genuine mode and fill the
+    # retained set with spikes. Pruning them keeps the geometry recoverable.
+    x, t = _spiral_with_outliers()
+    dm = DiffusionMap(n_components=4, n_landmarks=len(x)).fit([x])
+
+    assert dm.n_landmarks_pruned_ > 0
+    assert dm.n_trivial_eigenvectors_ == 1
+    # Leading coordinate still parametrises the manifold.
+    psi = dm.transform(x[:800])[:, 0]
+    corr = abs(np.corrcoef(np.argsort(np.argsort(psi)),
+                           np.argsort(np.argsort(t)))[0, 1])
+    assert corr > 0.95, dm.epsilon_
+
+
+def test_isolated_landmarks_used_to_collapse_the_embedding():
+    # Directly asserts the symptom: without pruning the coordinates become
+    # component indicators, so many distinct frames share one embedded point.
+    x, _ = _spiral_with_outliers()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DegenerateOperatorWarning)
+        pruned = DiffusionMap(n_components=4, n_landmarks=len(x)).fit([x])
+        unpruned = DiffusionMap(n_components=4, n_landmarks=len(x),
+                                min_neighbor_mass=0.0).fit([x])
+
+    def distinct(dm):
+        return np.unique(np.round(dm.transform(x[:800]), 6), axis=0).shape[0]
+
+    assert distinct(unpruned) < 100
+    assert distinct(pruned) > 700
+
+
+def test_disconnected_operator_warns_instead_of_failing_silently():
+    # If pruning cannot connect it, that must be visible -- the old code
+    # returned an indicator-function "embedding" with no signal at all.
+    x, _ = _spiral_with_outliers()
+    with pytest.warns(DegenerateOperatorWarning, match="disconnected"):
+        DiffusionMap(n_components=4, n_landmarks=len(x),
+                     min_neighbor_mass=0.0).fit([x])
+
+
+def test_every_stationary_eigenvector_is_dropped_not_just_the_first():
+    # eigh returns an arbitrary basis of a degenerate lambda = 1 eigenspace, so
+    # testing each vector for constancy recognises none of them. The mask must
+    # key on the eigenvalue alone.
+    vals = np.array([1.0, 1.0, 1.0, 0.8, 0.5])
+    keep = DiffusionMap._non_trivial(vals)
+    assert keep.tolist() == [False, False, False, True, True]
+
+
+def test_pruning_refuses_to_gut_the_landmark_set():
+    # A threshold that would drop most landmarks means the bandwidth is wrong,
+    # not that a few poses are outliers -- say so rather than silently
+    # returning an operator built on the leftovers.
+    x, _ = _spiral(n=300)
+    with pytest.raises(ValueError, match="bandwidth"):
+        DiffusionMap(n_components=3, n_landmarks=300,
+                     min_neighbor_mass=1e9).fit([x])
+
+
+def test_clean_data_prunes_nothing():
+    # The fix must be inert when there is nothing wrong.
+    x, _ = _spiral(n=600)
+    dm = DiffusionMap(n_components=3, n_landmarks=600).fit([x])
+    assert dm.n_landmarks_pruned_ == 0
+    assert dm.n_trivial_eigenvectors_ == 1
+
+
+def test_report_exposes_the_connectivity_diagnostics():
+    x, _ = _spiral_with_outliers()
+    report = DiffusionMap(n_components=3,
+                          n_landmarks=len(x)).fit([x]).spectrum_report()
+    assert report["n_landmarks_pruned"] > 0
+    assert report["n_trivial_eigenvectors"] == 1
+    # n_landmarks reports what the operator was actually built on.
+    assert report["n_landmarks"] == len(x) - report["n_landmarks_pruned"]
+
+
+def test_degenerate_extensions_are_counted_in_the_report():
+    x, _ = _spiral(n=800)
+    dm = DiffusionMap(n_components=3, n_landmarks=200).fit([x])
+
+    report = dm.spectrum_report()
+    assert report["n_degenerate_extensions"] == 0
+    assert report["degenerate_extension_frac"] == 0.0
+
+    dm.transform(np.array([[1e6, 1e6], [1e6, 1e6]]))  # 2 degenerate points
+    dm.transform(x[:8])                                # 8 ordinary points
+
+    report = dm.spectrum_report()
+    assert report["n_degenerate_extensions"] == 2
+    assert report["degenerate_extension_frac"] == pytest.approx(2 / 10)

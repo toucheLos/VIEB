@@ -18,7 +18,8 @@ REPO_DIR="${REPO_DIR:-$HOME/vieb}"
 
 module purge
 module load python/3.11.4
-source "$HOME/vieb/venv/bin/activate"
+VENV="${VENV:-$HOME/vieb/venv}"
+source "$VENV/bin/activate"
 
 cd "$REPO_DIR/vieb_v2"
 
@@ -34,9 +35,9 @@ case "$py_version" in
         echo "python/3.11.4' does not change an existing venv. To rebuild:"
         echo
         echo "    module purge && module load python/3.11.4"
-        echo "    rm -rf $HOME/vieb/venv"
-        echo "    python -m venv $HOME/vieb/venv"
-        echo "    source $HOME/vieb/venv/bin/activate"
+        echo "    rm -rf $VENV"
+        echo "    python -m venv $VENV"
+        echo "    source $VENV/bin/activate"
         echo "    pip install numpy pandas tables hdbscan"
         echo
         read -r -p "Continue anyway? [y/N] " reply

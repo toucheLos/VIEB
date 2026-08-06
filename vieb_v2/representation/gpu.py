@@ -11,15 +11,59 @@ algebra call fails, because libcublas/libcusolver are not on the loader path. An
 import-based check would report "GPU available" and then die partway through a
 job -- on a cluster that costs the whole allocation. So each backend is
 exercised once with a tiny problem and the answer cached.
+
+Probing answers "does the GPU work here"; it cannot answer "what should I
+install". That needs the driver version, because RAPIDS wheels are pinned
+against a minimum driver and pip will happily install a stack the driver
+cannot load. GPU_STACKS below is the driver -> stack table, ported from v1's
+_utils.py (its WSL2 half is dropped -- irrelevant on a Linux cluster).
 """
 
 from __future__ import annotations
 
 import glob
 import os
+import re
+import subprocess
 import sys
 
 _PROBE_CACHE = {}
+
+# Pinned RAPIDS stacks, oldest first. Each entry is the *minimum* NVIDIA driver
+# that can load it, so a newer driver qualifies for more than one and the newest
+# match wins. Keep in sync with v1's _utils.GPU_STACKS and pyproject's [gpu].
+GPU_STACKS = [
+    {
+        "id": "rapids-24.12-cuda12.2",
+        "label": "RAPIDS 24.12 / CUDA 12.2",
+        "min_driver": (525, 60, 13),
+        "packages": [
+            "cuml-cu12==24.12.0",
+            "cudf-cu12==24.12.0",
+            "cupy-cuda12x==12.2.0",
+            "cuda-python==12.2.1",
+            "cuda-toolkit[cublas,cufft,curand,cusolver,cusparse]==12.2.2",
+            "nvidia-cuda-runtime-cu12==12.2.140",
+            "nvidia-cuda-nvrtc-cu12==12.2.140",
+            "nvidia-nvjitlink-cu12==12.2.140",
+            "nvidia-cublas-cu12==12.2.5.6",
+            "nvidia-cufft-cu12==11.0.8.103",
+            "nvidia-curand-cu12==10.3.3.141",
+            "nvidia-cusolver-cu12==11.5.2.141",
+            "nvidia-cusparse-cu12==12.1.2.141",
+        ],
+    },
+    {
+        "id": "rapids-26.04-cuda12.9",
+        "label": "RAPIDS 26.04 / CUDA 12.9",
+        "min_driver": (575, 51, 3),
+        "packages": [
+            "cudf-cu12==26.4.0",
+            "cuml-cu12==26.4.0",
+            "cupy-cuda12x==14.1.1",
+        ],
+    },
+]
 
 
 def _cached(key, fn):
@@ -152,77 +196,111 @@ def loader_path_hint():
     )
 
 
-# Driver-gated RAPIDS stacks, ported from v1's _utils.GPU_STACKS. Bare
-# `pip install cuml cupy` is wrong twice over: `cuml` on plain PyPI is an
-# unrelated abandoned package, and bare `cupy` has no prebuilt wheel so pip
-# falls back to a source build needing a full CUDA dev toolkit. The suffixed
-# wheels from pypi.nvidia.com are prebuilt and bundle their own runtime libs.
-RAPIDS_STACKS = [
-    {
-        "id": "rapids-26.04-cuda12.9",
-        "label": "RAPIDS 26.04 / CUDA 12.9",
-        "min_driver": (575, 51, 3),
-        "packages": ["cuml-cu12==26.4.0", "cupy-cuda12x==14.1.1"],
-    },
-    {
-        "id": "rapids-24.12-cuda12.2",
-        "label": "RAPIDS 24.12 / CUDA 12.2",
-        "min_driver": (525, 60, 13),
-        "packages": ["cuml-cu12==24.12.0", "cupy-cuda12x==12.2.0"],
-    },
-]
+def _parse_version_tuple(text):
+    m = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", text)
+    if not m:
+        return None
+    return tuple(int(part) for part in m.groups(default="0"))
 
 
-def driver_version():
-    """NVIDIA driver version from nvidia-smi. -> (text, tuple) or (None, None)."""
-    import re
-    import subprocess
+def _version_gte(found, required):
+    size = max(len(found), len(required))
+    found = found + (0,) * (size - len(found))
+    required = required + (0,) * (size - len(required))
+    return found >= required
 
+
+def detect_nvidia_driver():
+    """Return NVIDIA driver/GPU details from nvidia-smi.
+
+    Not cached: unlike the probes this costs a subprocess, not a fitted model,
+    and on a cluster the same checkout runs on nodes with different hardware.
+    """
+    info = {
+        "ok": False,
+        "gpu_name": None,
+        "driver": None,
+        "driver_tuple": None,
+        "cuda": None,
+        "error": None,
+    }
     try:
         proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=driver_version",
-             "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception:
-        return None, None
+            ["nvidia-smi"], capture_output=True, text=True, timeout=8)
+    except Exception as exc:
+        # FileNotFoundError on a login node without the driver -- expected, and
+        # the reason `doctor` has to run on a GPU node to say anything useful.
+        info["error"] = str(exc)
+        return info
     if proc.returncode != 0:
-        return None, None
+        info["error"] = (proc.stderr or proc.stdout).strip()
+        return info
 
-    text = (proc.stdout or "").strip().splitlines()
-    if not text:
-        return None, None
-    match = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", text[0])
-    if not match:
-        return text[0], None
-    return text[0], tuple(int(p) for p in match.groups(default="0"))
+    text = proc.stdout
+    driver = re.search(r"Driver Version:\s*([0-9.]+)", text)
+    cuda = re.search(r"CUDA Version:\s*([0-9.]+)", text)
+    if driver:
+        info["driver"] = driver.group(1)
+        info["driver_tuple"] = _parse_version_tuple(driver.group(1))
+    if cuda:
+        info["cuda"] = cuda.group(1)
+
+    try:
+        gpu_proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        info["gpu_name"] = gpu_proc.stdout.strip().splitlines()[0].strip() or None
+    except Exception:
+        pass
+
+    info["ok"] = bool(info["driver_tuple"])
+    return info
 
 
-def recommended_stack(driver_tuple=None):
-    """Highest RAPIDS stack this driver supports, or None."""
-    if driver_tuple is None:
-        _text, driver_tuple = driver_version()
-    if driver_tuple is None:
+def select_gpu_stack(driver_tuple):
+    """Newest pinned RAPIDS stack this driver can load, or None."""
+    if not driver_tuple:
         return None
-    for stack in RAPIDS_STACKS:            # ordered newest-first
-        if driver_tuple >= stack["min_driver"]:
+    for stack in sorted(GPU_STACKS, key=lambda s: s["min_driver"], reverse=True):
+        if _version_gte(driver_tuple, stack["min_driver"]):
             return stack
     return None
 
 
-def install_command(stack=None):
-    """The exact pip command for this machine, or a reason it can't be given.
+def stack_message(driver_info):
+    """One line of installation advice for whatever the driver turned out to be."""
+    if not driver_info.get("ok"):
+        return ("No working NVIDIA driver was detected. On a cluster this is "
+                "expected on a login node -- run doctor on the gpu partition.")
 
-    `--only-binary=:all:` is deliberate: without it a missing wheel silently
-    becomes a source build that fails minutes later on a missing cublas header,
-    which is the failure this whole table exists to prevent.
+    driver = driver_info.get("driver") or "unknown"
+    cuda = driver_info.get("cuda") or "unknown"
+    stack = select_gpu_stack(driver_info.get("driver_tuple"))
+    if stack:
+        return (f"Detected NVIDIA driver {driver} (CUDA {cuda}). "
+                f"Recommended install: {stack['label']}.")
+
+    minimum = min(s["min_driver"] for s in GPU_STACKS)
+    min_text = ".".join(str(part) for part in minimum)
+    return (f"Detected NVIDIA driver {driver} (CUDA {cuda}). The pinned RAPIDS "
+            f"stacks require driver {min_text} or newer -- no GPU stack can be "
+            f"installed against this driver.")
+
+
+_EXPLICIT_ON = (True, "on", "yes", "true")
+
+
+def explicitly_requested(use_gpu):
+    """True when the caller demanded a GPU rather than accepting whatever is
+    there.
+
+    `resolve` only answers "should this run on GPU", which is the same bool for
+    "on" and for an "auto" that happened to find a device. The difference
+    matters once a *runtime* failure happens: under "on" the caller has said a
+    CPU fallback is not an acceptable outcome, so the same tuple that drives
+    resolve's raise-early behaviour is shared here rather than restated.
     """
-    stack = stack or recommended_stack()
-    if stack is None:
-        return None
-    packages = " ".join(stack["packages"])
-    return (f"pip install --only-binary=:all: "
-            f"--extra-index-url=https://pypi.nvidia.com {packages}")
+    return use_gpu in _EXPLICIT_ON
 
 
 def resolve(use_gpu):
@@ -231,7 +309,7 @@ def resolve(use_gpu):
     "on" raises rather than silently falling back, because quietly spending
     hours on CPU in a GPU job is worse than failing in the first second.
     """
-    if use_gpu in (True, "on", "yes", "true"):
+    if explicitly_requested(use_gpu):
         ok, reason = hdbscan_backend()
         if not ok:
             raise RuntimeError(
@@ -251,18 +329,26 @@ def report():
     gpu_ok, gpu_reason = hdbscan_backend()
     cupy_ok, cupy_reason = cupy_linalg()
     info = device_info()
-    driver_text, driver_tuple = driver_version()
-    stack = recommended_stack(driver_tuple)
+    driver = detect_nvidia_driver()
+    stack = select_gpu_stack(driver.get("driver_tuple"))
     return {
         **info,
-        "driver": driver_text,
         "hdbscan_gpu": gpu_ok,
         "hdbscan_gpu_reason": gpu_reason,
         "cupy_linalg": cupy_ok,
         "cupy_linalg_reason": cupy_reason,
         "forced_cpu": forced_cpu(),
         "loader_hint": loader_path_hint(),
-        "recommended_stack": stack["label"] if stack else None,
-        "install_command": (None if gpu_ok else install_command(stack)),
-        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        # What is installed (above) versus what should be (below) -- a GPU can
+        # be idle here because nothing is installed or because the wrong
+        # RAPIDS pin is, and those need different fixes.
+        "driver_ok": driver["ok"],
+        "driver": driver["driver"],
+        "driver_cuda": driver["cuda"],
+        "driver_gpu_name": driver["gpu_name"],
+        "driver_error": driver["error"],
+        "recommended_stack_id": stack["id"] if stack else None,
+        "recommended_stack_label": stack["label"] if stack else None,
+        "recommended_stack_packages": list(stack["packages"]) if stack else [],
+        "stack_message": stack_message(driver),
     }

@@ -29,7 +29,8 @@ REPO_DIR="${REPO_DIR:-$HOME/vieb}"
 
 module purge
 module load python/3.11.4
-source "$HOME/vieb/venv/bin/activate"
+VENV="${VENV:-$HOME/vieb/venv}"
+source "$VENV/bin/activate"
 
 cd "$REPO_DIR/vieb_v2"
 

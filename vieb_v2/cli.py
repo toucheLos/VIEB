@@ -17,6 +17,9 @@ redo alignment and PCA over millions of frames.
 GPU (--gpu auto|on|off) applies to HDBSCAN only. The pooled PCA is a 14x14
 eigenproblem and gains nothing from a device. "on" fails immediately if the GPU
 backend is unusable rather than silently spending a batch allocation on CPU.
+`doctor` reports whether a GPU works here and, from the driver version, which
+pinned RAPIDS stack to install; `doctor --print-packages` emits that stack as
+pip arguments, which is how hpc/install_gpu.sh builds its venv.
 
 Exit codes:
     0  completed
@@ -111,6 +114,17 @@ def cmd_doctor(args):
     """Preflight, so a batch job is not queued against a broken environment."""
     report = gpu.report()
 
+    if args.print_packages:
+        # Machine-readable: hpc/install_gpu.sh pipes this into pip, which is
+        # why nothing else may touch stdout here. Needs only the stdlib, so it
+        # still answers before cuml/cupy exist -- no chicken-and-egg.
+        packages = report["recommended_stack_packages"]
+        if not packages:
+            print(f"[vieb2] {report['stack_message']}", file=sys.stderr)
+            return NEEDS_ATTENTION
+        print("\n".join(packages))
+        return OK
+
     _log(f"python           {sys.version.split()[0]}")
     _log(f"numpy            {np.__version__}")
     for name in ("hdbscan", "cuml", "cupy", "pandas", "h5py", "tables"):
@@ -122,7 +136,6 @@ def cmd_doctor(args):
     _log()
 
     _log(f"GPU device       {report['device'] or 'none visible'}")
-    _log(f"driver           {report['driver'] or 'not detected'}")
     _log(f"HDBSCAN on GPU   {report['hdbscan_gpu']}"
          + (f"  ({report['hdbscan_gpu_reason']})"
             if report["hdbscan_gpu_reason"] else ""))
@@ -133,6 +146,20 @@ def cmd_doctor(args):
         _log("VIEB_FORCE_CPU is set -- all GPU paths disabled")
     _log()
 
+    _log(f"NVIDIA driver     {report['driver'] or 'not detected'}"
+         + (f"  (CUDA {report['driver_cuda']})" if report["driver_cuda"] else ""))
+    if report["driver_gpu_name"]:
+        _log(f"driver GPU name   {report['driver_gpu_name']}")
+    if report["driver_error"] and not report["driver_ok"]:
+        _log(f"nvidia-smi        {report['driver_error'].splitlines()[0][:80]}")
+    _log(f"recommended stack {report['recommended_stack_label'] or 'none'}")
+    _log(report["stack_message"])
+    if report["recommended_stack_packages"] and not report["hdbscan_gpu"]:
+        _log("to build a venv for this stack:  ./hpc/install_gpu.sh")
+        _log("  (a separate python/3.11.4 venv -- the RAPIDS pins do not all")
+        _log("   publish wheels for the 3.13 the default venv is built on)")
+    _log()
+
     _log("GPU is used for HDBSCAN only. The pooled PCA is a 14x14")
     _log("eigenproblem, so cupy is not needed by the pipeline; it is")
     _log("reported because a broken cupy signals a misconfigured CUDA env.")
@@ -141,20 +168,6 @@ def cmd_doctor(args):
     _log("(adjusted Rand index 1.0000) but number the clusters differently,")
     _log("so a state id is only meaningful within one run. Untested at the")
     _log("~2.3M-frame scale of a full project. The backend used is recorded.")
-
-    if report["install_command"]:
-        _log()
-        _log(f"GPU clustering is unavailable. Driver {report['driver']} "
-             f"supports {report['recommended_stack']}.")
-        _log(f"Install it into this venv (Python {report['python_version']}):")
-        _log(f"    {report['install_command']}")
-        _log("--only-binary=:all: is deliberate: without it a missing wheel")
-        _log("becomes a source build that fails on a missing CUDA header.")
-        if report["python_version"] not in ("3.10", "3.11", "3.12"):
-            _log(f"NOTE: RAPIDS wheels may not exist for Python "
-                 f"{report['python_version']}. A venv is bound to the Python "
-                 f"that built it, so `module load python/3.11.4` alone will "
-                 f"not change it -- the venv must be recreated.")
 
     if report["loader_hint"]:
         _log()
@@ -228,6 +241,8 @@ def cmd_latent(args):
         if report["alpha"] < 1.0:
             _log("  alpha<1 lets sampling density distort the embedding: "
                  "densely sampled (slow) regions get compressed")
+        _report_operator_health(report)
+        _report_degenerate_extensions(report)
 
     _save(os.path.join(args.out, SCORES),
           {**_pack(scores)},
@@ -248,6 +263,48 @@ def _report_rank(report, meta):
             _log(f"  WARNING: q={report['n_components']} exceeds the rank "
                  f"ceiling -- lower --var-threshold so noise directions are "
                  f"not retained")
+
+
+def _report_operator_health(report):
+    """Report landmark pruning and the stationary-eigenvector count.
+
+    These are the two numbers that distinguish a diffusion map from an
+    expensive lookup table. n_trivial_eigenvectors > 1 means the operator was
+    disconnected and the coordinates encode component membership rather than
+    geometry -- the failure that once sent a 36h GPU job down the CPU path with
+    nothing in the log to say so.
+    """
+    pruned = report.get("n_landmarks_pruned", 0)
+    kept = report.get("n_landmarks", 0)
+    if pruned:
+        _log(f"  pruned {pruned:,} isolated landmark(s), {kept:,} kept "
+             f"(epsilon {report.get('epsilon', float('nan')):.1f})")
+
+    trivial = report.get("n_trivial_eigenvectors", 1)
+    if trivial > 1:
+        _log(f"  WARNING: {trivial} eigenvalues equal 1.0 where a connected "
+             f"operator has exactly 1 -- the embedding reflects which "
+             f"disconnected piece a frame landed in, not the manifold. Raise "
+             f"--epsilon or --n-landmarks before trusting these states.")
+
+
+def _report_degenerate_extensions(report):
+    """Warn when Nystrom extended a frame from an empty landmark neighborhood.
+
+    n_degenerate_extensions > 0 usually means a single mistracked keypoint put
+    a frame far outside epsilon_'s neighborhood, not that the animal jumped --
+    see representation/diffusion.py's module docstring. Those frames get a
+    defined (zero) embedding rather than crashing, but a high fraction is
+    worth knowing about.
+    """
+    n = report.get("n_degenerate_extensions", 0)
+    if not n:
+        return
+    frac = report.get("degenerate_extension_frac", 0.0)
+    _log(f"  WARNING: {n:,} frame(s) ({frac:.4%}) fell outside every "
+         f"landmark's neighborhood and got a zero embedding -- likely "
+         f"single mistracked keypoints, not real jumps. Raise --epsilon "
+         f"or check upstream tracking/alignment if this fraction is large.")
 
 
 def cmd_embed(args):
@@ -366,6 +423,11 @@ def cmd_compare_latents(args):
                              args.alpha, args.epsilon, args.diffusion_time,
                              args.n_landmarks).fit(aligned)
         scores = latent.transform_all(aligned)
+        latent_report = latent.spectrum_report()
+        if method != "pca":
+            _report_operator_health(latent_report)
+            _report_degenerate_extensions(latent_report)
+
         embedded, _ = embed_all(scores, args.n_lags, args.lag_stride)
         if embedded.shape[0] == 0:
             raise _Attention(f"{method}: no frames survived delay embedding")
@@ -376,7 +438,7 @@ def cmd_compare_latents(args):
         results[method] = {
             "metrics": cluster_metrics(labels),
             "speed": speed_diagnostics(labels, embedded),
-            "latent": latent.spectrum_report(),
+            "latent": latent_report,
             "backend": backend,
             "seconds": time.time() - t0,
         }
@@ -602,6 +664,9 @@ def build_parser():
 
     sp = sub.add_parser("doctor", help="environment and GPU preflight")
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("--print-packages", action="store_true",
+                    help="print only the pinned packages of the RAPIDS stack "
+                         "matching the detected driver, one per line, for pip")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("align", help="drop noisy keypoints, align pose")
