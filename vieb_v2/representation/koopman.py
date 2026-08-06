@@ -50,6 +50,8 @@ labels unchanged.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from .metrics import NOISE_LABEL
@@ -728,6 +730,18 @@ def _n_distinct(neighbour_labels):
     return changed.sum(axis=1)
 
 
+def _n_jobs():
+    """Cores to use: the scheduler's allocation where there is one, else all."""
+    for var in ("SLURM_CPUS_PER_TASK", "OMP_NUM_THREADS"):
+        try:
+            n = int(os.environ.get(var, ""))
+        except ValueError:
+            continue
+        if n > 0:
+            return n
+    return -1
+
+
 def _neighbour_query(points, k):
     """A reusable `(block, k) -> indices` query, sklearn when available.
 
@@ -740,10 +754,14 @@ def _neighbour_query(points, k):
     except ImportError:
         pass
     else:
-        # n_jobs=-1 is not a micro-optimisation here: the query is the whole
+        # Threading the query is not a micro-optimisation here: it is the whole
         # cost at project scale (28.6M frames against a 1M-point index in 9-D
         # measures ~150 min single-threaded), and sklearn defaults to one core.
-        fitted = NearestNeighbors(n_neighbors=k, n_jobs=-1).fit(points)
+        # -1 would mean *every* core on the box, which on a shared batch node
+        # ignores the cgroup the scheduler allocated -- four such jobs on one
+        # 64-core node oversubscribe it 4x. SLURM_CPUS_PER_TASK is that
+        # allocation, so it wins where it is set.
+        fitted = NearestNeighbors(n_neighbors=k, n_jobs=_n_jobs()).fit(points)
         return lambda block, k_: fitted.kneighbors(block, n_neighbors=k_)[1]
 
     squared = (points ** 2).sum(axis=1)
