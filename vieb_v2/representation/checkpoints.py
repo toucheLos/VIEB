@@ -21,6 +21,10 @@ ALIGNED = "aligned.npz"
 SCORES = "scores.npz"
 EMBEDDED = "embedded.npz"
 LABELS = "labels.npz"
+# Basin labels sit beside HDBSCAN's rather than overwriting them: the two are
+# built from different frame sets (no delay window is dropped here), so both
+# must survive for the comparison to be possible at all.
+KOOPMAN_LABELS = "koopman_labels.npz"
 
 STAGE_FILES = (ALIGNED, SCORES, EMBEDDED, LABELS)
 

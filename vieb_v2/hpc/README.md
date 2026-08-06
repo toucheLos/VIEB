@@ -30,6 +30,8 @@ sbatch full_pipeline.sbatch
 | `01_align.sbatch` | `normal` | stage 1 only: alignment (no GPU benefit) |
 | `02_compare_latents.sbatch` | `gpu` | stage 2 only: both latents + HDBSCAN |
 | `submit.sh` | — | chains 01 → 02 with `--dependency=afterok` |
+| `latent.sbatch` | `normal` | one latent, **checkpointed** to `scores.npz` (`compare-latents` never writes it) |
+| `koopman.sbatch` | `normal` | attractor topology: states as basins, no clustering |
 | `install_gpu.sh` | — | installs the RAPIDS stack matching this driver |
 
 **`full_pipeline.sbatch`** is the simplest: one job, one log, everything done.
@@ -92,9 +94,19 @@ $OUT_DIR/
   scores.npz               latent coordinates
   embedded.npz             delay embedding
   labels.npz               cluster labels (-1 = noise, never force-assigned)
+  koopman_labels.npz       basin labels (-1 = near a separatrix, NOT noise)
+  koopman_report_r<N>.json attractor topology at --n-regions N
   runs.json                run registry -- also read by the GUI
   latent_comparison.json   PCA vs diffusion, side by side
 ```
+
+`koopman_labels.npz` carries the same three arrays as `labels.npz`, so it
+drops into the same slot. It is **not** positionally comparable with it:
+Koopman labels every frame of `scores.npz`, while HDBSCAN labels the
+delay-embedded frames, which are fewer by one window per recording. Join the
+two on the `index` array (`recording`, `frame`) that both checkpoints carry.
+Its `-1` means *near a separatrix* -- a transition -- not HDBSCAN noise; the
+meaning is recorded in the checkpoint's `noise_label_means`.
 
 The comparison is also printed in the job log. It reports `n_states`,
 `noise_frac`, `largest_state_frac`, `state_entropy` and `noise_speed_ratio`

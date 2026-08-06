@@ -641,7 +641,8 @@ def basins(adjacency, found, n_regions):
     return basin
 
 
-def separatrices(stacked, labels, knn=12, seed=0):
+def separatrices(stacked, labels, knn=12, seed=0, index_sample=1_000_000,
+                 query_chunk=500_000):
     """Frames whose neighbours do not agree on an attractor.
 
     3d asks for points where forward integration is unstable under small
@@ -651,46 +652,110 @@ def separatrices(stacked, labels, knn=12, seed=0):
     separatrix -- a transition, and the direct analogue of keypoint-MoSeq's
     model-free changepoints.
 
+    Above `index_sample` frames the neighbour index is fitted on a seeded
+    subsample and every frame is queried against it, rather than fitting on all
+    N. This mirrors what `--hdbscan-sample` already does for clustering: a
+    fit-and-query over all pairs is what does not scale, not the query itself.
+    Every frame still receives a label -- only the pool of possible neighbours
+    is subsampled. Set `index_sample=0` to force the exact all-frames index.
+
     Returns (near_separatrix mask, agreement fraction).
     """
     n = stacked.shape[0]
     k = int(min(max(2, knn) + 1, n))
-    idx = _knn_indices(stacked, k)
 
-    neighbour_labels = labels[idx[:, 1:]]
-    agreement = (neighbour_labels == labels[:, None]).mean(axis=1)
-    assigned = labels >= 0
-    distinct = np.array([np.unique(row[row >= 0]).size
-                         for row in neighbour_labels])
+    sub = None
+    if index_sample and n > index_sample:
+        rng = np.random.default_rng(seed)
+        sub = np.sort(rng.choice(n, size=int(index_sample), replace=False))
+        points, index_labels = stacked[sub], labels[sub]
+    else:
+        points, index_labels = stacked, labels
 
-    near = (~assigned) | (distinct > 1)
+    query = _neighbour_query(points, k)
+
+    near = np.empty(n, dtype=bool)
+    agreement = np.empty(n, dtype=np.float32)
+    for start in range(0, n, max(1, int(query_chunk))):
+        stop = min(start + max(1, int(query_chunk)), n)
+        idx = query(stacked[start:stop], k)
+
+        # A frame is not its own neighbour. On the full index the self-match is
+        # always column 0; on a subsampled one it is present only when the
+        # frame was itself sampled, so it is located rather than assumed.
+        if sub is None:
+            keep = idx[:, 1:]
+        else:
+            keep = _drop_self(idx, sub[idx] == np.arange(start, stop)[:, None])
+
+        neighbour_labels = index_labels[keep]
+        block = labels[start:stop]
+        agreement[start:stop] = (neighbour_labels == block[:, None]).mean(axis=1)
+        near[start:stop] = (block < 0) | (_n_distinct(neighbour_labels) > 1)
+
     return near, agreement.astype(np.float32)
 
 
-def _knn_indices(points, k, chunk=512):
-    """k nearest neighbours, sklearn when available and brute force otherwise.
+def _drop_self(idx, is_self):
+    """Drop one self-match per row, or the furthest neighbour when there is none.
 
-    The brute-force path is O(N^2) and is meant for verification-scale data. A
-    full project is ~2.3M frames, where only the tree-based path is viable --
-    hence the preference rather than a straight reimplementation.
+    Keeps every row the same width, so a frame that happened to be sampled into
+    the index is not left with one neighbour fewer than one that was not.
+    """
+    n, k = idx.shape
+    pos = np.where(is_self.any(axis=1), is_self.argmax(axis=1), k - 1)
+    mask = np.ones((n, k), dtype=bool)
+    mask[np.arange(n), pos] = False
+    return idx[mask].reshape(n, k - 1)
+
+
+def _n_distinct(neighbour_labels):
+    """Per-row count of distinct non-negative labels.
+
+    Sorting beats a per-row `np.unique` loop by orders of magnitude at project
+    scale, where this runs over tens of millions of rows.
+    """
+    # Sorting alone separates the classes -- every negative label sorts ahead of
+    # every valid one -- so no sentinel is needed. A sentinel would have to be
+    # representable in the label dtype, and under NumPy 2's weak promotion an
+    # out-of-range one is silently wrapped rather than upcast, which reads as
+    # noise being a distinct state.
+    ordered = np.sort(neighbour_labels, axis=1)
+    valid = ordered >= 0
+    changed = np.empty(ordered.shape, dtype=bool)
+    changed[:, 0] = valid[:, 0]
+    changed[:, 1:] = valid[:, 1:] & (ordered[:, 1:] != ordered[:, :-1])
+    return changed.sum(axis=1)
+
+
+def _neighbour_query(points, k):
+    """A reusable `(block, k) -> indices` query, sklearn when available.
+
+    The index is built once and queried in chunks: at project scale the build
+    dominates, so refitting per chunk would cost more than the queries do. The
+    brute-force fallback is O(N*M) and is meant for verification-scale data.
     """
     try:
         from sklearn.neighbors import NearestNeighbors
-
-        return NearestNeighbors(n_neighbors=k).fit(points).kneighbors(points)[1]
     except ImportError:
         pass
+    else:
+        # n_jobs=-1 is not a micro-optimisation here: the query is the whole
+        # cost at project scale (28.6M frames against a 1M-point index in 9-D
+        # measures ~150 min single-threaded), and sklearn defaults to one core.
+        fitted = NearestNeighbors(n_neighbors=k, n_jobs=-1).fit(points)
+        return lambda block, k_: fitted.kneighbors(block, n_neighbors=k_)[1]
 
-    n = points.shape[0]
     squared = (points ** 2).sum(axis=1)
-    out = np.empty((n, k), dtype=int)
-    for start in range(0, n, chunk):
-        block = points[start:start + chunk]
-        d = squared[None, :] - 2.0 * (block @ points.T) + (block ** 2).sum(axis=1)[:, None]
-        nearest = np.argpartition(d, kth=k - 1, axis=1)[:, :k]
+
+    def brute(block, k_):
+        d = (squared[None, :] - 2.0 * (block @ points.T)
+             + (block ** 2).sum(axis=1)[:, None])
+        nearest = np.argpartition(d, kth=k_ - 1, axis=1)[:, :k_]
         order = np.take_along_axis(d, nearest, axis=1).argsort(axis=1)
-        out[start:start + chunk] = np.take_along_axis(nearest, order, axis=1)
-    return out
+        return np.take_along_axis(nearest, order, axis=1)
+
+    return brute
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +766,7 @@ def extract_topology(sessions, fps=30.0, n_regions=48, v_percentile=25.0,
                      unit_tol=0.05, knn=12, seed=0, partition_method="kmeans",
                      min_edge_frac=0.05, min_edge_count=3, cycle_min_regions=3,
                      coherence_tol=0.5, min_attractor_frac=0.001,
-                     plausible_hz=(0.5, 12.0)):
+                     plausible_hz=(0.5, 12.0), knn_sample=1_000_000):
     """Full pipeline: flow -> local operators -> topology -> basin labels.
 
     The returned `labels` are the behavioral states. No clustering is run.
@@ -756,7 +821,8 @@ def extract_topology(sessions, fps=30.0, n_regions=48, v_percentile=25.0,
     labels = np.concatenate([basin_of_region[np.asarray(ids)]
                              for ids in region_ids]).astype(np.int32)
 
-    near, agreement = separatrices(stacked, labels, knn, seed)
+    near, agreement = separatrices(stacked, labels, knn, seed,
+                                   index_sample=knn_sample)
     labels = labels.copy()
     labels[near] = NOISE_LABEL
 
@@ -788,6 +854,12 @@ def extract_topology(sessions, fps=30.0, n_regions=48, v_percentile=25.0,
             "limit_cycle_plausible": [a["plausible"] for a in cycles],
             "transition_fraction": float(near.mean()),
             "n_regions": n_regions,
+            "knn": int(knn),
+            # Recorded, not implied: above this many frames the separatrix
+            # neighbour index is fitted on a subsample, so a reader can tell an
+            # exact result from an approximate one.
+            "knn_sample": int(knn_sample),
+            "knn_subsampled": bool(knn_sample and stacked.shape[0] > knn_sample),
             "v_threshold": v_threshold,
             "coherence_tol": coherence_tol,
             "min_attractor_frac": min_attractor_frac,

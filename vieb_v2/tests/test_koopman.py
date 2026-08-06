@@ -311,3 +311,52 @@ def test_save_topology_matches_the_labels_npz_shape(topology, tmp_path):
     assert data["labels"].shape == topology["labels"].shape
     assert data["index"].shape[1] == 2
     assert "separatrix" in meta["noise_label_means"]
+
+
+# ---------------------------------------------------------------------------
+# Scale: the subsampled separatrix index
+# ---------------------------------------------------------------------------
+
+def test_subsampled_knn_index_leaves_the_topology_standing():
+    """VERIFICATION 4b -- the approximation must not change the answer.
+
+    Above `knn_sample` frames the separatrix neighbour index is fitted on a
+    subsample rather than on all N. `_make_sessions` is 14000 frames, so the
+    threshold is forced far below that to exercise the path the real run takes
+    -- at project scale (28.6M frames) it is always the subsampled one.
+    """
+    sessions = _make_sessions()
+    n_frames = sum(len(s) for s in sessions)
+
+    exact = extract_topology(sessions, fps=FPS, n_regions=60, seed=0, knn=12,
+                             plausible_hz=(0.2, 12.0), knn_sample=0)
+    approx = extract_topology(sessions, fps=FPS, n_regions=60, seed=0, knn=12,
+                              plausible_hz=(0.2, 12.0), knn_sample=2000)
+
+    assert exact["report"]["knn_subsampled"] is False
+    assert approx["report"]["knn_subsampled"] is True
+    assert approx["report"]["knn_sample"] == 2000
+
+    # The topology is a property of the flow, not of the neighbour index --
+    # subsampling only decides which frames sit near a separatrix.
+    for key in ("n_attractors", "n_fixed_points", "n_limit_cycles"):
+        assert approx["report"][key] == exact["report"][key], key
+
+    assert approx["labels"].shape == (n_frames,)
+    assert approx["probabilities"].shape == (n_frames,)
+    assert 0.0 < approx["report"]["transition_fraction"] < 0.5
+
+    # Every frame is still labelled -- only the neighbour pool was sampled.
+    assert (approx["labels"] >= NOISE_LABEL).all()
+    agree = float((approx["labels"] == exact["labels"]).mean())
+    assert agree > 0.9, f"subsampling moved {1 - agree:.1%} of frames"
+
+
+def test_subsampled_index_is_deterministic_under_seed():
+    sessions = _make_sessions()
+    kw = dict(fps=FPS, n_regions=60, seed=0, knn=12, plausible_hz=(0.2, 12.0),
+              knn_sample=2000)
+    first = extract_topology(sessions, **kw)
+    second = extract_topology(sessions, **kw)
+    assert np.array_equal(first["labels"], second["labels"])
+    assert np.array_equal(first["probabilities"], second["probabilities"])

@@ -800,3 +800,55 @@ cost of splicing instead of choosing.
 **Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/representation/diffusion.py`,
 `vieb_v2/cli.py`, `vieb_v2/hpc/*.sbatch`, `vieb_v2/hpc/install_gpu.sh`,
 `vieb_v2/hpc/README.md`, decisions #53, #54, #55
+
+## 57 — Koopman wired to the CLI; the separatrix kNN is subsampled, and its `-1` is joined by index, never position
+
+**Decision:** `koopman.py` had no caller — no CLI subcommand, no sbatch, no
+importer (decision #55 deferred the real-data half). It is now reachable as
+`python -m cli koopman`, with three changes forced by the jump from
+verification scale (14k frames) to Luna (4925 sessions, 28,626,107 frames --
+12x the "~2.3M frames" `_knn_indices` was written against):
+
+1. **The separatrix neighbour index is fitted on a subsample.** A
+   fit-and-query over all pairs is what does not scale, not the query. Above
+   `--knn-sample` (default 1,000,000) frames the index is fitted on a seeded
+   subsample and *every* frame is queried against it, so every frame still gets
+   a label — only the pool of possible neighbours is sampled. This mirrors what
+   `--hdbscan-sample` already does for clustering. `knn_sample` and
+   `knn_subsampled` are written into the report so an approximate result is
+   visible rather than implied; `--knn-sample 0` forces the exact index.
+2. **`n_jobs=-1` on the neighbour query.** sklearn defaults to one core, and
+   the query is the whole cost at this scale: 28.6M frames against a 1M-point
+   index in 9-D measures ~150 min single-threaded.
+3. **The per-row `np.unique` loop is gone.** Counting distinct neighbour
+   labels row by row is fine at 14k rows and hopeless at 28.6M. It is now a
+   sort-and-count. The obvious sentinel implementation is a **bug** under
+   NumPy 2: `np.where(labels >= 0, labels, np.iinfo(np.int64).max)` on an
+   `int32` array silently wraps the sentinel to `-1` under weak promotion
+   rather than upcasting, so noise reads as a distinct state and frames are
+   over-flagged as transitions. Sorting alone separates the classes — every
+   negative sorts ahead of every valid label — so no sentinel is needed.
+
+**Index alignment.** `koopman_labels.npz` carries the same three arrays as
+`labels.npz` and drops into the same slot, but the two are **not** positionally
+comparable: Koopman labels every frame of `scores.npz` (28,626,107) while
+HDBSCAN labels the delay-embedded frames (28,586,707), fewer by one window per
+recording (4925 x 8 = 39,400). They must be joined on the `index` array
+(`recording`, `frame`) both checkpoints carry. Its `-1` is `metrics.NOISE_LABEL`
+by value but means *near a separatrix*, not HDBSCAN noise.
+
+**Also:** `compare-latents` computes latents in memory and never writes
+`scores.npz`; only `latent` does. Since Koopman reads `scores.npz`, a
+`latent.sbatch` was added to checkpoint one latent per `OUT_DIR`.
+`--n-regions` is the one free parameter that could manufacture the state
+count, so `koopman.sbatch` documents sweeping it into *separate* out-dirs —
+`koopman_labels.npz` has a fixed name and arms sharing an out-dir would
+overwrite each other's labels and registry.
+
+**Why:** The state count is supposed to be an output. That claim is only worth
+anything if the parameter that could fake it has been varied, and if the
+approximations taken to make the run feasible are recorded where a reader will
+see them.
+**Related:** `vieb_v2/representation/koopman.py`, `vieb_v2/cli.py`,
+`vieb_v2/hpc/koopman.sbatch`, `vieb_v2/hpc/latent.sbatch`,
+`vieb_v2/representation/checkpoints.py`, decisions #53, #55

@@ -39,7 +39,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from representation import checkpoints, gpu, keypoints, run_registry  # noqa: E402
+from representation import checkpoints, gpu, keypoints, koopman  # noqa: E402
+from representation import run_registry  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
 from representation.align import align_all, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
@@ -394,6 +395,94 @@ def cmd_cluster(args):
     return OK
 
 
+def cmd_koopman(args):
+    """Behavioral states as basins of attraction -- no clustering is run.
+
+    Reads `scores.npz`, not `embedded.npz`: the Koopman operator is fitted on
+    consecutive frames of the latent itself, so the delay embedding HDBSCAN
+    needs would be a second, redundant history. That is also why the label
+    array is longer than HDBSCAN's -- no boundary window is dropped -- and why
+    the two must be joined on `index`, never positionally.
+
+    The state count is an output here, not a parameter. `--n-regions` is the
+    one free knob that could manufacture it, so sweep it before believing it.
+    """
+    data, meta = _load(os.path.join(args.out, SCORES))
+    scores = _unpack(data)
+
+    t0 = time.time()
+    result = koopman.extract_topology(
+        scores, fps=args.fps, n_regions=args.n_regions,
+        v_percentile=args.v_percentile, knn=args.knn, seed=args.seed,
+        min_edge_frac=args.min_edge_frac, min_edge_count=args.min_edge_count,
+        coherence_tol=args.coherence_tol, knn_sample=args.knn_sample,
+    )
+    report = result["report"]
+    labels = result["labels"]
+    _log(f"koopman topology over {labels.size:,} frames from "
+         f"{len(scores)} recording(s) in {time.time() - t0:.1f}s")
+    _report_topology(report)
+
+    metrics = cluster_metrics(labels)
+    speed = speed_diagnostics(labels, np.concatenate(scores, axis=0))
+    _report_metrics(metrics, speed)
+
+    path = koopman.save_topology(
+        os.path.join(args.out, checkpoints.KOOPMAN_LABELS), result)
+    _log(f"wrote {path}")
+
+    run_registry.record(
+        args.out,
+        latent_method=meta.get("latent_method", "pca"),
+        params={"n_regions": report["n_regions"], "fps": args.fps,
+                "v_percentile": args.v_percentile,
+                "coherence_tol": args.coherence_tol,
+                "min_edge_frac": args.min_edge_frac,
+                "min_edge_count": args.min_edge_count,
+                "knn": args.knn, "knn_sample": args.knn_sample,
+                "method": "koopman"},
+        metrics=metrics,
+        report=report,
+        source="cli",
+    )
+
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(_jsonable({"report": report, "metrics": metrics,
+                                 "speed": speed}), fh, indent=2)
+        _log(f"wrote {args.json}")
+
+    if report["n_attractors"] < 2:
+        _log("fewer than two attractors -- the flow did not decompose; try a "
+             "larger --n-regions or a lower --min-edge-frac")
+        return NEEDS_ATTENTION
+    return OK
+
+
+def _report_topology(report):
+    _log(f"  {report['n_attractors']} attractor(s): "
+         f"{report['n_fixed_points']} fixed point(s), "
+         f"{report['n_limit_cycles']} limit cycle(s)")
+    _log(f"  over {report['n_regions']} regions -- the state count is an "
+         f"output, but sweep --n-regions before trusting it")
+    for period, ok in zip(report["limit_cycle_period_s"],
+                          report["limit_cycle_plausible"]):
+        if period:
+            _log(f"    cycle period {period:.3f}s = {1.0 / period:.2f} Hz"
+                 f"  plausible={ok}")
+    frac = report["transition_fraction"]
+    _log(f"  transition_fraction {frac:.4f} (frames near a separatrix)")
+    if frac >= 0.5:
+        _log("    WARNING: a majority of frames sit near a separatrix, so the "
+             "partition is doing the talking, not the animal")
+    if report["knn_subsampled"]:
+        _log(f"  separatrix kNN index fitted on a {report['knn_sample']:,}-frame "
+             f"subsample; every frame was still queried against it")
+    _log(f"  global DMD rank {report['global_rank']}, "
+         f"residual {report['global_residual']:.4g}, "
+         f"{report['n_growing_modes']} growing mode(s)")
+
+
 def cmd_run(args):
     for step in (cmd_align, cmd_latent, cmd_embed, cmd_cluster):
         code = step(args)
@@ -686,6 +775,35 @@ def build_parser():
     sp = sub.add_parser("cluster", help="HDBSCAN on the embedding")
     out_args(sp), gpu_args(sp), cluster_args(sp)
     sp.set_defaults(func=cmd_cluster)
+
+    # No gpu_args: this path is pure numpy/sklearn. The GPU accelerates
+    # HDBSCAN only, and no clustering is run here.
+    sp = sub.add_parser("koopman",
+                        help="basins of attraction as states (no clustering)")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--n-regions", type=int, default=48,
+                    help="Voronoi cells the flow is partitioned into; the one "
+                         "free parameter that could manufacture the state "
+                         "count, so sweep it (default: %(default)s)")
+    sp.add_argument("--v-percentile", type=float, default=25.0,
+                    help="||v|| percentile below which a region counts as slow")
+    sp.add_argument("--coherence-tol", type=float, default=0.5,
+                    help="direction coherence separating a cycle from a freeze")
+    sp.add_argument("--min-edge-frac", type=float, default=0.05,
+                    help="share of outgoing mass an edge needs to survive")
+    sp.add_argument("--min-edge-count", type=int, default=3,
+                    help="absolute frame count an edge needs to survive; a "
+                         "sparse region's stray frame can clear the share floor")
+    sp.add_argument("--knn", type=int, default=12,
+                    help="neighbours voting on whether a frame is a transition")
+    sp.add_argument("--knn-sample", type=int, default=1_000_000, metavar="N",
+                    help="fit the separatrix neighbour index on at most N "
+                         "frames, then query all of them against it; 0 forces "
+                         "the exact all-frames index (default: %(default)s)")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--json", default=None, help="write the report as JSON")
+    sp.set_defaults(func=cmd_koopman)
 
     sp = sub.add_parser("run", help="align + latent + embed + cluster")
     pose_args(sp), out_args(sp), gpu_args(sp), embed_args(sp)
