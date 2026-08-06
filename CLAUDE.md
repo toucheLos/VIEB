@@ -12,7 +12,7 @@ After finishing each user-requested task in this repository, stage and commit th
 
 ## Project Overview
 
-VIEB (Video Interpreter Excluding Bias) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.
+VIEB (Video Interpreter Excluding Bias) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 3,846 videos (~22.4M frames).
 
 ## Installation
 
@@ -31,10 +31,10 @@ Dependencies are in `pyproject.toml`. There is no `requirements.txt`. Python 3.1
 ```bash
 python setup_dlc_training.py               # Add videos, extract frames, open labeling GUI
 python setup_dlc_training.py --label       # Open next unlabeled video (numbered queue)
-python setup_dlc_training.py --label 39    # Jump to video #39/222 in the queue
+python setup_dlc_training.py --label 39    # Jump to video #39/3846 in the queue
 python setup_dlc_training.py --train       # Create dataset and train (after labeling)
 python setup_dlc_training.py --evaluate    # Evaluate trained model (check mAP)
-python setup_dlc_training.py --analyze     # Run pose estimation on all 222 videos → CSV
+python setup_dlc_training.py --analyze     # Run pose estimation on all 3,846 videos → CSV
 ```
 
 ### Per-video behavioral analysis
@@ -99,7 +99,7 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 
 `main.py --all` fits an independent model per video — cluster IDs are **not** comparable across videos.
 
-`compare.py` fits **one shared pipeline** on all 1.28M frames pooled together:
+`compare.py` fits **one shared pipeline** on all ~22.4M frames pooled together:
 1. Standardize with `BehaviorPreprocessor(use_pca=False)` → 91D (or 51D with `--no-wavelets`)
 2. Reduce with **UMAP** (fit on ≤200k-frame sample, transform all) → 10D
 3. Cluster with **HDBSCAN** (min_cluster_size=50 by default) — noise frames labeled `-1`
@@ -321,7 +321,7 @@ Stage 8 completion is detected by checking whether the `clips/` directory exists
 
 ### DLC project structure
 
-The DLC project lives in `VIEB-Carlos-2026-02-11/`. Config at `VIEB-Carlos-2026-02-11/config.yaml`. Labeled frames in `VIEB-Carlos-2026-02-11/labeled-data/<video_name>/`. Labeling queue (random order of all 222 videos) persisted in `VIEB-Carlos-2026-02-11/labeling_queue.txt`.
+The DLC project lives in `VIEB-Carlos-2026-02-11/`. Config at `VIEB-Carlos-2026-02-11/config.yaml`. Labeled frames in `VIEB-Carlos-2026-02-11/labeled-data/<video_name>/`. Labeling queue (random order of all 3,846 videos) persisted in `VIEB-Carlos-2026-02-11/labeling_queue.txt`.
 
 ### Metadata
 
@@ -362,7 +362,7 @@ results/
       <stem>_labels.npy       # snapshot of per-video labels
       <stem>_probs.npy        # snapshot of per-video probabilities
   comparison/            # From compare.py --report and --summarize
-    summary_table.csv         # 222 rows: state fracs + metadata (fracs may not sum to 1)
+    summary_table.csv         # one row per video: state fracs + metadata (fracs may not sum to 1)
     transition_table.csv      # summary_table + flattened per-video transition matrices
     transition_by_context.png # side-by-side mean transition heatmaps per context
     state_by_day.png
