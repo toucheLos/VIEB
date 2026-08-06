@@ -5,11 +5,13 @@
 ```bash
 cd ~/vieb/vieb_v2/hpc
 
-# 1. one-time: CPU packages
+# 1. one-time: CPU packages, in the default venv (used by the `normal` jobs)
 source "${VENV:-~/vieb/venv}/bin/activate"
 pip install numpy pandas tables hdbscan
 
-# 2. one-time: GPU packages, on a GPU node so the right driver is queried
+# 2. one-time: GPU packages, on a GPU node so the right driver is queried.
+# This builds a *separate* python/3.11.4 venv at ~/vieb/venv-gpu -- the default
+# venv is 3.13, which RAPIDS has no wheels for. Every gpu-partition job uses it.
 srun --partition=gpu --gres=gpu:1 --pty bash
 ./install_gpu.sh
 exit
@@ -82,6 +84,19 @@ POSE_DIR=/scratch/$USER/pose sbatch full_pipeline.sbatch
 | `N_LANDMARKS` | 3000 | points the diffusion operator is built on |
 | `HDBSCAN_SAMPLE` | 300000 | fit on this many points, label the rest by `approximate_predict` |
 | `GPU` | `on` | `on` \| `auto` \| `off` |
+| `VENV` | `$HOME/vieb/venv-gpu` on `gpu`, `$HOME/vieb/venv` on `normal` | python env to activate |
+
+**Two venvs, on purpose.** `normal`-partition jobs (`01_align`, `latent`,
+`koopman`, `doctor`) use `~/vieb/venv` (Python 3.13, CPU-only). Every
+`gpu`-partition job (`full_pipeline`, `02_compare_latents`, `embed_cluster`)
+uses `~/vieb/venv-gpu` (Python 3.11.4 + RAPIDS), because RAPIDS publishes no
+3.13 wheels. `doctor` stays on the default venv deliberately — its job is to
+report what is installed there against what the driver wants.
+
+Getting this wrong is silent and expensive: a gpu job on the CPU venv finds no
+`cuml`, and `--gpu auto` will spend the whole allocation on one core without
+logging anything. That is why every gpu script defaults to `GPU=on`, which
+raises in the first second instead.
 
 Site-specific `#SBATCH --account` / `--qos` lines are present but commented out
 at the top of each script — uncomment if your cluster requires them.

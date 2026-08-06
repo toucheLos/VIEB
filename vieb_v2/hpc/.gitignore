@@ -3,4 +3,4 @@
 
 # Local state, written by the scripts and specific to this checkout/cluster
 .last_out_dir
-.gpu_venv
+.venv-gpu

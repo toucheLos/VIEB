@@ -852,3 +852,56 @@ see them.
 **Related:** `vieb_v2/representation/koopman.py`, `vieb_v2/cli.py`,
 `vieb_v2/hpc/koopman.sbatch`, `vieb_v2/hpc/latent.sbatch`,
 `vieb_v2/representation/checkpoints.py`, decisions #53, #55
+
+## 58 — The `.sbatch` rewrite dropped #53's GPU venv wiring; every gpu job silently ran on the CPU venv
+**Decision/finding:** Jobs 46982/46986 (`embed_cluster`, `--gres=gpu:1`) held
+two GPUs at 0% utilisation for 4.5h while one CPU core did HDBSCAN on
+28.6M×45 points. Root cause is a regression from #56: the `.slurm` → `.sbatch`
+port carried #53's *venv* forward but not the *wiring to it*. #53 established
+`$HOME/vieb/venv-gpu` (python/3.11.4 + RAPIDS) with the path recorded in
+`hpc/.gpu_venv` and "checked by `submit.sh` before queuing and by
+`02_compare_latents` on start". After the port, no script read the marker, the
+marker itself had been renamed to `.venv-gpu` (so `.gitignore` no longer
+matched it and it showed up untracked), and every gpu-partition script sourced
+`$HOME/vieb/venv`  — Python 3.13, CPU-only, no `cuml`. The `module load
+python/3.11.4` line #53 removed as "silently shadowed by the 3.13 venv
+activated on the next line" had also come back in all of them.
+
+`embed_cluster.sbatch` (added later, in e76c67c) compounded it by defaulting
+`GPU=auto` where #53 had ruled `on` for gpu-partition jobs. **`auto` is the one
+setting with no diagnostic at all**: #54 added `GPUFallbackWarning` for a
+*fit-time* cuml failure, but when `gpu.resolve()` simply never selects the GPU —
+because cuml was never importable — there is no warning anywhere. The 4.5h log
+is three lines, none of them about the GPU. This is the third time this failure
+class has appeared (#53 the capability probe, #54 fit-time, now import-time).
+
+**Fixed by** restoring #53's arrangement rather than reinventing it: `VENV`
+defaults to `$HOME/vieb/venv-gpu` in `full_pipeline`, `02_compare_latents` and
+`embed_cluster`, each failing with a pointed message if it is absent;
+`embed_cluster` now defaults `GPU=on`; `submit.sh` re-checks the venv before
+queuing anything, since stage 2 failing on start otherwise wastes stage 1's
+alignment. `install_gpu.sh` also targeted the default venv, which would have
+installed RAPIDS into the 3.13 env #53 specifically ruled out — it now targets
+and, if needed, builds `venv-gpu`. `doctor.sbatch` deliberately keeps the
+default venv, per #53's reasoning that it compares installed against
+recommended. `.gitignore` updated to the marker's actual name.
+
+Dropped the marker file as a source of truth: nothing read it, and a plain
+default plus an existence check gives the same protection without a second
+place for the path to drift. Kept it gitignored as local state.
+
+**Measured, for calibration:** CPU HDBSCAN fitted on 20k points at 45-D takes
+18.3s to `approximate_predict` one 25k batch; the full job is 1,144 batches.
+Progress inferred from RSS growth (`_predict_batched` fills `labels`/`probs`
+sequentially) put the 45-D arm at ~19h of prediction remaining against a 12h
+wall — it would have died with nothing written.
+**Why:** #53 and #54 both concluded "fail in the first second rather than spend
+the allocation," and both were correct; the guarantee was lost not in the logic
+but in a file rename and a default. A capability that is only enforced by a
+default in six separate scripts will be lost again, so the check now lives at
+submission time as well as job start.
+**Related:** `vieb_v2/hpc/embed_cluster.sbatch`,
+`vieb_v2/hpc/02_compare_latents.sbatch`, `vieb_v2/hpc/full_pipeline.sbatch`,
+`vieb_v2/hpc/install_gpu.sh`, `vieb_v2/hpc/submit.sh`,
+`vieb_v2/hpc/.gitignore`, `vieb_v2/hpc/README.md`, jobs 46982/46986, #53, #54,
+#56

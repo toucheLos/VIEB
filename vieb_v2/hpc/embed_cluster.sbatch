@@ -36,12 +36,25 @@ LAG_STRIDE="${LAG_STRIDE:-2}"
 FPS="${FPS:-30.0}"
 MIN_CLUSTER_SIZE="${MIN_CLUSTER_SIZE:-50}"
 HDBSCAN_SAMPLE="${HDBSCAN_SAMPLE:-300000}"
-GPU="${GPU:-auto}"
+# "on", not "auto": auto is the one setting that can spend a 12h GPU allocation
+# on a single CPU core without printing anything -- gpu.resolve() only warns on
+# a *fit-time* failure, never on "cuml was never importable" (#58). Every other
+# gpu-partition script here already defaults to on (#53). GPU=auto to override.
+GPU="${GPU:-on}"
 : "${OUT_DIR:?OUT_DIR must be set -- see the header of this file}"
 
 module purge
 module load python/3.11.4
-VENV="${VENV:-$HOME/vieb/venv}"
+# The RAPIDS stack lives in a dedicated python/3.11.4 venv (#53); the default
+# venv is 3.13 and CPU-only, so sourcing it turns this GPU allocation into a
+# single-core CPU run (#58). --gpu on catches that in the first second, but a
+# missing venv deserves a better message than an import error.
+VENV="${VENV:-$HOME/vieb/venv-gpu}"
+if [ ! -x "$VENV/bin/python" ]; then
+    echo "error: GPU venv not found: $VENV" >&2
+    echo "  build it on a GPU node -- see hpc/README.md 'Quick start' step 2" >&2
+    exit 2
+fi
 source "$VENV/bin/activate"
 
 cd "$REPO_DIR/vieb_v2"
