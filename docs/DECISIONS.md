@@ -584,3 +584,69 @@ cluster; the underlying logic was already headless, so a wrapper avoided
 re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
+
+## 53 — Koopman attractor-topology decomposition built and synthetically verified; its real-data half deferred on an unmet `flow-field` prerequisite
+**Decision/finding:** Added `vieb_v2/representation/koopman.py` (+
+`vieb_v2/tests/test_koopman.py`) on branch `koopman`: global SVD-based DMD,
+per-region affine Koopman operators, and topology extraction (fixed points,
+limit cycles, basins, separatrices) where a behavioral state is a **basin of
+attraction**, not a density peak — so the state count is an output, not a
+parameter. No clustering runs in this path.
+
+The prompt specifying this work gated it on the `flow-field` branch (Prompt A)
+having run on real Luna data with an acceptable `v_coherence` distribution.
+That gate is **unmet and cannot be evaluated here**: no `flow-field` branch
+exists locally or on `origin`, `v_coherence` appears nowhere in the tree or
+history, and `/home/carlos/vieb` (the Luna project in `projects.json`) is not
+present on this machine. `VUS-1` and `compare_methods.py`, named as the output
+format and comparison target, also do not exist. So the topology machinery plus
+its known-answer verification — which the prompt itself ordered first — was
+built, and the Luna run, the VUS-1 emit and the confound *report* were not.
+Basin labels use `-1` = near-separatrix, matching `metrics.NOISE_LABEL`, so
+`cluster_metrics` / `speed_diagnostics` already score them unchanged and
+`noise_speed_ratio` / `size_speed_rank_corr` need no new code when the gate
+clears. On-disk shape reuses `checkpoints.save` (`labels`/`probabilities`/
+`index`), identical to `labels.npz`; the `VUS-1` name is deferred until a spec
+exists.
+
+Four findings worth not rediscovering:
+1. **Local operators must be affine.** `p -> A p` cannot represent circulation
+   about any point but the origin, so a limit-cycle arc reports contraction
+   instead of rotation. Implemented by centering both snapshot matrices, which
+   makes the least-squares `A` the affine one and lets global and local fits
+   share one code path.
+2. **Region pairs are selected by origin frame, not both endpoints.** A local
+   operator is the flow map *on* a region; its image is not the region. On a
+   cycle the per-frame step routinely exceeds a cell's width, so the
+   both-endpoints rule produced *zero* pairs for precisely the fast regions
+   whose rotation matters, and the cycle went undetected.
+3. **Graph edges need an absolute count floor, not only a share floor.** A
+   sparse transient region owns a large Voronoi cell, so one stray frame can be
+   >2% of its outgoing mass. Unpruned, a single noise excursion welded both
+   basins into one recurrent set and every attractor vanished. Defaults are now
+   `min_edge_frac=0.05` **and** `min_edge_count=3`.
+4. **Eigenvalues cannot separate a freeze from a gait.** A stable spiral and a
+   stable limit cycle both have complex eigenvalues of modulus near 1, and a
+   `||v||` percentile threshold is no better because a fixed point sits inside
+   the population defining it. The discriminator is **direction coherence**
+   (mean cosine between consecutive step vectors): ~1 on a cycle, ~0 at a
+   noise-driven fixed point, and scale-free so it needs no calibration to the
+   latent's arbitrary units.
+
+**Why:** Extracting attractor topology from a flow that was never validated
+would read structure out of noise — the prompt's own stated reason for the
+gate. The synthetic half has no dependence on the flow field, so it was
+deliverable in full and is what makes the real-data half trustworthy later.
+The verification system deviates from the suggested "damped oscillator + Van
+der Pol in separate regions": two disjoint regions share no boundary, so the
+separatrix check would pass vacuously, and Van der Pol's period has no closed
+form outside `mu -> 0`. Used instead is
+`r' = -k r (r-a)(r-b), theta' = omega`, whose fixed point, separatrix (the
+unstable cycle at `r=a`), stable cycle (period exactly `2*pi/omega`) and basins
+are all known analytically. Verified over 6 seeds: 1 fixed point + 1 limit
+cycle every time, recovered period 1.004–1.030 s (eigenvalue) and 1.000 s
+(return time) against a true 1.000 s, basin accuracy 0.997–1.000.
+**Related:** `vieb_v2/representation/koopman.py`,
+`vieb_v2/tests/test_koopman.py`, `vieb_v2/representation/metrics.py`,
+`vieb_v2/representation/checkpoints.py`, `vieb_v2/representation/embed.py`
+(the boundary guard this mirrors)
