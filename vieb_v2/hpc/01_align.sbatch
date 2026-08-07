@@ -11,7 +11,7 @@
 # =============================================================================
 #SBATCH --job-name=vieb2-align
 #SBATCH --partition=normal
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --output=%x-%j.out

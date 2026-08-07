@@ -94,11 +94,26 @@ def _load_pose(args):
             f"  so DLC must run first:\n"
             f"      python setup_dlc_training.py --analyze"
         )
+
+    # Deduplicate before anything else. DLC exports the same recording as both
+    # .h5 and .csv, and treating those as two recordings double-counts them in
+    # every pooled statistic downstream -- most damagingly in the stationary
+    # measure of the transfer operator, which is literally an occupancy count.
+    n_found = len(paths)
+    paths, duplicates, ambiguous = recordings.dedupe(paths)
+    if duplicates:
+        _log(f"deduplicated {n_found} file(s) -> {len(paths)} recording(s) "
+             f"({sum(len(v) for v in duplicates.values())} duplicate export(s) "
+             f"dropped, .h5 preferred)")
+    if ambiguous:
+        _log(f"  WARNING: {len(ambiguous)} recording(s) had several files of "
+             f"the same format; kept one by sort order: {ambiguous[:3]}")
     if args.limit:
         paths = paths[: args.limit]
 
     _log(f"loading {len(paths)} pose file(s) from {args.pose}")
-    sessions, bodyparts, skipped = load_sessions(paths, max_gap=args.max_gap)
+    sessions, bodyparts, skipped, kept_paths = load_sessions(
+        paths, max_gap=args.max_gap, return_paths=True)
     for path, why in skipped:
         _log(f"  skipped {os.path.basename(path)}: {why}")
     if not sessions:
@@ -106,7 +121,28 @@ def _load_pose(args):
     _log(f"{len(sessions)} recording(s), "
          f"{sum(len(p) for p, _ in sessions):,} frames")
     _log(f"bodyparts: {bodyparts}")
-    return sessions, bodyparts
+    return sessions, bodyparts, kept_paths
+
+
+def _save_manifest(out_dir, kept_paths, lengths, n_found, n_skipped):
+    """Persist which recording each row came from, and what it decodes to.
+
+    Without this the only identifier a checkpoint carries is position in a
+    `sorted()` glob, which shifts the moment a file becomes unreadable and
+    cannot be reconstructed afterwards.
+    """
+    rows, report = recordings.build_manifest(kept_paths, count_frames=False)
+    recordings.attach_lengths(rows, lengths)
+    report.update({"n_files_found": n_found, "n_skipped_on_load": n_skipped,
+                   "n_frames_after_load": int(np.sum(lengths))})
+    recordings.save_manifest(out_dir, rows, report)
+    _log(f"manifest: {report['n_recordings']} recording(s), "
+         f"{report['n_parsed']} parsed from filename, "
+         f"{report['n_frames_after_load']:,} frames")
+    if report["n_unparsed"]:
+        _log(f"  {report['n_unparsed']} recording(s) did not match the "
+             f"filename pattern: {report['unparsed_ids'][:3]}")
+    return rows, report
 
 
 # ------------------------------------------------------------------ commands
@@ -181,7 +217,7 @@ def cmd_doctor(args):
 
 
 def cmd_align(args):
-    sessions, bodyparts = _load_pose(args)
+    sessions, bodyparts, kept_paths = _load_pose(args)
     kept = [b for b in bodyparts
             if str(b).strip().lower() not in keypoints.DROPPED_BODYPARTS]
     dropped = [b for b in bodyparts if b not in kept]
@@ -190,7 +226,8 @@ def cmd_align(args):
          f"rank ceiling {2 * len(kept) - 3}")
 
     t0 = time.time()
-    aligned, reference = align_all(selected)
+    full = align_all_full(selected)
+    aligned, reference = full["aligned"], full["reference"]
     flat = np.concatenate([a.reshape(a.shape[0], -1) for a in aligned])
     leak = null_leakage(flat)
     _log(f"aligned {len(aligned)} recording(s) in {time.time() - t0:.1f}s")
@@ -200,11 +237,27 @@ def cmd_align(args):
         _log("  WARNING: high leakage means the PCs are partly tracking "
              "likelihood noise rather than pose")
 
+    lengths = [len(a) for a in aligned]
     _save(os.path.join(args.out, ALIGNED),
           {**_pack([a.reshape(a.shape[0], -1) for a in aligned]),
            "reference": reference},
           {"bodyparts": kept, "dropped": dropped, "n_keypoints": len(kept),
            "expected_rank": 2 * len(kept) - 3, "null_leakage": leak})
+
+    # Arena position and heading, which the alignment removes. Saved beside the
+    # aligned pose rather than folded into it, so the pose-only arm stays
+    # exactly what it was and the two can be compared.
+    frame = [np.column_stack([c, t]).astype(np.float32)
+             for c, t in zip(full["centroid"], full["theta"])]
+    _save(os.path.join(args.out, POSE_FRAME), _pack(frame),
+          {"columns": ["centroid_x", "centroid_y", "theta"],
+           "units": ["pixels", "pixels", "radians"],
+           "note": "heading = -theta; theta is the rotation applied to the "
+                   "centred pose to bring it onto the reference"})
+    _log(f"saved arena position and heading for {len(frame)} recording(s)")
+
+    _save_manifest(args.out, kept_paths, lengths, len(kept_paths),
+                   len(kept_paths) - len(aligned))
     return OK
 
 
