@@ -584,3 +584,59 @@ cluster; the underlying logic was already headless, so a wrapper avoided
 re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
+
+## 54 — `transfer-operator`: Ulam/Perron–Frobenius decomposition dies at the §3 implied-timescale gate on Luna
+**Decision/finding:** Built `vieb_v2/representation/transfer_operator.py` (Ulam
+estimator, reversibilization, ARPACK spectrum, implied timescales,
+Chapman–Kolmogorov test, chi-based recursive metastable decomposition) plus
+`vieb_v2/transfer/` stage scripts. Branched off **v2, not main** as the brief
+said: `representation/align.py`, which §2 targets, exists only on v2.
+
+**The gate failed and the branch stops there.** On 150 recordings / 868,976
+frames, `t_imp` for the slowest mode rises monotonically across the whole
+1800× τ sweep (1.34 s → 130.8 s at N=100; 1.48 → 140.6 at N=200) with overall
+`d log t / d log τ` ≈ 0.60–0.65 and no window spanning ≥3× in τ flat to within
+0.15. Chapman–Kolmogorov mean TV is 0.146 (N=100) and 0.268 (N=200) at n=2,
+rising with n; a genuine Markov chain scores <0.05. Robust across
+N ∈ {50,100,200,400}, 10 and 20 PCs, 150 and 250 recordings, two seeds. Per §9,
+Stages 3–4 (§5, §6) and the VUS-1 emit (§7) were not built.
+
+Four things worth not rediscovering:
+1. **The §4 synthetic gate passed 4/4 and is the reason the negative is
+   trustworthy.** Notably the duration control: a 20:1 dwell ratio is recovered
+   in `pi` as 20.9:1 while the rare fast state (1/40th the dwell) survives as
+   its own metastable set at `pi`=0.0198, purity 0.90. Occupancy and identity
+   *are* separable by this construction — so §3's failure is a fact about this
+   representation, not about the method.
+2. **A flatness search on a monotonically rising curve always finds
+   something.** The first `plateau_score` reported "PLATEAU FOUND" by selecting
+   τ = 0.033–0.1 s — the near-identity region §3 explicitly calls an artifact.
+   Fixed to exclude `lambda_2 > 0.95` and `t_imp < 2τ`, require a ≥3× window,
+   and require CK to pass too (a plateau is necessary, not sufficient).
+3. **`results/features/` mixes 51-D and 91-D files** (3526 / 320, two extraction
+   runs; `index.json` declares 51). Consumers index by column position, so a
+   naive glob either crashes or silently averages two feature spaces. The first
+   §2a run was contaminated (AUC 0.685 → 0.7065 once filtered).
+   `transfer/featureio.py` resolves the dimension from `index.json`.
+4. **§2c resolved: v1 uses 8 keypoints, v2 uses 7.** `index.json` has
+   `speed_kp0..7`; v2's `pipeline.py` drops `tail_tip`, the highest-amplitude
+   marker on the animal.
+
+§2a degeneracy came out at **AUC 0.7065, CI [0.661, 0.729]** — between the
+brief's two thresholds, so posture retains a real but insufficient locomotor
+signature. It is a **proxy**: no per-recording raw pose exists in this project,
+so both sides come from v1 features rather than the v2 aligned space.
+
+§8's MoSeq control was written (`transfer/stage8_moseq_control.py` +
+`hpc/stage8_moseq_control.sbatch`) but not run — `results.h5` needs h5py, absent
+and unavailable under PEP-668 on the dev box. It is now the highest-value next
+step: §3's failure says no Markovian coarse-graining exists *on this
+representation*, and §8 is what discriminates representation from behavior.
+Note the run shows 21 syllables, not the 48 the brief cites.
+**Why:** The brief made §3 a falsification gate with a decision rule fixed in
+advance and forbade tuning a failed stage. The gate failed on a robust, well-
+verified implementation, so that is the finding.
+**Related:** `vieb_v2/representation/transfer_operator.py`,
+`vieb_v2/tests/test_transfer_operator.py`, `vieb_v2/transfer/`,
+`vieb_v2/docs/TRANSFER_OPERATOR_FINDINGS.md`,
+`vieb_v2/hpc/stage8_moseq_control.sbatch`, #53
