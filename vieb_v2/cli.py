@@ -40,9 +40,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from representation import checkpoints, gpu, keypoints, koopman  # noqa: E402
-from representation import run_registry  # noqa: E402
+from representation import recordings, run_registry  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
-from representation.align import align_all, null_leakage  # noqa: E402
+from representation.align import align_all_full, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
 from representation.cluster import seed_stability  # noqa: E402
 from representation.embed import embed_all  # noqa: E402
@@ -54,6 +54,7 @@ ALIGNED = checkpoints.ALIGNED
 SCORES = checkpoints.SCORES
 EMBEDDED = checkpoints.EMBEDDED
 LABELS = checkpoints.LABELS
+POSE_FRAME = checkpoints.POSE_FRAME
 
 OK, NEEDS_ATTENTION, FAILED = 0, 1, 2
 
