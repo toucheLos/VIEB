@@ -2,7 +2,7 @@
 
 The 8-point Luna lab mouse model, as labelled in the DLC project:
 
-    left_ear, nose, right_ear, center, right_hip, left_hip, tail_base, tail_tip
+    left_ear, right_ear, nose, center, left_hip, right_hip, tail_base, tail_tip
 
 `tail_tip` is dropped from the v2 representation entirely -- not merely excluded
 from the alignment fit. It is the noisiest tracked point and carries little

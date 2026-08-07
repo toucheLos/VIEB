@@ -917,8 +917,13 @@ def save_topology(path, result):
     )
 
 
+# Public alias: the transfer operator needs Kosaraju to find the largest
+# communicating class of an Ulam count matrix, and reaching across modules for
+# a private name is the wrong precedent to set.
+sccs = _sccs
+
 __all__ = [
     "snapshot_pairs", "dmd", "classify_modes", "partition", "local_operators",
-    "region_graph", "attractors", "basins", "separatrices", "extract_topology",
-    "save_topology", "NOISE_LABEL",
+    "region_graph", "sccs", "attractors", "basins", "separatrices",
+    "extract_topology", "save_topology", "NOISE_LABEL",
 ]

@@ -149,14 +149,21 @@ def _longest_run(mask):
     return best
 
 
-def load_sessions(paths, max_gap=None, min_frames=2):
+def load_sessions(paths, max_gap=None, min_frames=2, return_paths=False):
     """Load several recordings, dropping any that are unusable.
 
     Returns (sessions, bodyparts, skipped) where sessions is the
     list-of-recordings the rest of the pipeline expects -- never concatenated,
     so delay embedding cannot cross a boundary.
+
+    With `return_paths=True` a fourth element is returned: the paths that
+    actually became sessions, in the same order. Without it the mapping from
+    a row of a saved checkpoint back to its source video is unrecoverable --
+    `skipped` shifts every subsequent index and is not persisted anywhere, so
+    re-deriving the order by re-globbing is only correct if no file has become
+    unreadable in the meantime.
     """
-    sessions, bodyparts, skipped = [], None, []
+    sessions, bodyparts, skipped, kept = [], None, [], []
     for path in paths:
         try:
             pose, conf, names = load_pose(path)
@@ -172,4 +179,7 @@ def load_sessions(paths, max_gap=None, min_frames=2):
             continue
         bodyparts = bodyparts or names
         sessions.append((pose, conf))
+        kept.append(path)
+    if return_paths:
+        return sessions, bodyparts, skipped, kept
     return sessions, bodyparts, skipped

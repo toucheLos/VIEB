@@ -746,7 +746,7 @@ def cmd_tune(args):
     if not os.path.exists(scores_path):
         _log("no scores checkpoint found; running align + pca first")
         cmd_align(args)
-        cmd_pca(args)
+        cmd_latent(args)
 
     data, _ = _load(scores_path)
     result = tune_mod.suggest(_unpack(data), fps=args.fps,

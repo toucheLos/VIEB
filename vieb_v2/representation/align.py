@@ -27,10 +27,35 @@ def _rot(theta):
     return np.array([[c, -s], [s, c]])
 
 
-def _weighted_centroid(pose, w):
-    """Weighted centroid per frame. pose (T,K,2), w (T,K) -> (T,2)."""
+def weighted_centroid(pose, w):
+    """Weighted centroid per frame. pose (T,K,2), w (T,K) -> (T,2).
+
+    Public because it is the *only* record of where the animal was in the
+    arena: `align_session` subtracts it and never returns it, so anything
+    wanting locomotion has to recompute it from the raw pose.
+    """
     wsum = w.sum(axis=1, keepdims=True)
     return (w[:, :, None] * pose).sum(axis=1) / np.maximum(wsum, 1e-12)
+
+
+# Kept so existing callers and tests that reach for the private name still work.
+_weighted_centroid = weighted_centroid
+
+
+def frame_weights(conf, shape):
+    """Per-frame keypoint weights, matching `align_session`'s convention.
+
+    Factored out so a caller reconstructing the centroid uses *exactly* the
+    weights the alignment used -- a mismatch here would silently offset the
+    locomotor channels from the pose they are concatenated with.
+    """
+    if conf is None:
+        return np.ones(shape, dtype=np.float64)
+    w = np.asarray(conf, dtype=np.float64)
+    if w.shape != shape:
+        raise ValueError(f"conf must be (T, K)={shape}, got {w.shape}")
+    # Non-positive likelihoods would make the weighted centroid undefined.
+    return np.clip(w, 1e-6, None)
 
 
 def solve_rotation(centered, reference, w):
@@ -77,16 +102,9 @@ def align_session(pose, conf=None, reference=None, n_iter=5, tol=1e-9):
         raise ValueError(f"pose must be (T, K, 2), got {pose.shape}")
     T, K, _ = pose.shape
 
-    if conf is None:
-        w = np.ones((T, K), dtype=np.float64)
-    else:
-        w = np.asarray(conf, dtype=np.float64)
-        if w.shape != (T, K):
-            raise ValueError(f"conf must be (T, K)={T, K}, got {w.shape}")
-        # Non-positive likelihoods would make the weighted centroid undefined.
-        w = np.clip(w, 1e-6, None)
+    w = frame_weights(conf, (T, K))
 
-    centered = pose - _weighted_centroid(pose, w)[:, None, :]
+    centered = pose - weighted_centroid(pose, w)[:, None, :]
 
     if reference is None:
         # Generalized Procrustes: align to the current mean, recompute, repeat.
@@ -138,6 +156,50 @@ def align_all(sessions, n_iter=5):
     aligned = [align_session(p, c, reference=reference)[0]
                for p, c in zip(poses, confs)]
     return aligned, reference
+
+
+def align_all_full(sessions, n_iter=5):
+    """`align_all`, but keeping the SE(2) nuisance instead of destroying it.
+
+    `align_all` returns element [0] of `align_session` and drops the rest, so
+    arena position and heading -- the two quantities that distinguish freezing
+    from steady locomotion -- are computed and then thrown away. Everything
+    downstream of that point sees a purely postural space in which a frozen
+    mouse and a walking one are degenerate.
+
+    Delay embedding cannot recover them: it recovers derivatives of what was
+    *measured*, and these were subtracted before measurement. So they have to
+    be carried out of this function or not at all.
+
+    `centroid` is in raw pose units (pixels), `theta` in radians, both indexed
+    by frame with no offset, so they concatenate onto `aligned`/`scores`
+    row-for-row.
+
+    sessions : list of (pose, conf) tuples, conf may be None
+    Returns {"aligned": [...], "reference": (K,2), "theta": [...],
+             "centroid": [...]}.
+    """
+    if not sessions:
+        raise ValueError("no sessions given")
+
+    poses = [np.asarray(p, dtype=np.float64) for p, _ in sessions]
+    confs = [c for _, c in sessions]
+    pooled_pose = np.concatenate(poses, axis=0)
+    pooled_conf = (
+        None if any(c is None for c in confs)
+        else np.concatenate([np.asarray(c, dtype=np.float64) for c in confs], axis=0)
+    )
+    _, _, reference = align_session(pooled_pose, pooled_conf, n_iter=n_iter)
+
+    aligned, thetas, centroids = [], [], []
+    for pose, conf in zip(poses, confs):
+        a, theta, _ = align_session(pose, conf, reference=reference)
+        w = frame_weights(conf, pose.shape[:2])
+        aligned.append(a)
+        thetas.append(theta)
+        centroids.append(weighted_centroid(pose, w))
+    return {"aligned": aligned, "reference": reference,
+            "theta": thetas, "centroid": centroids}
 
 
 def null_leakage(aligned_flat):

@@ -905,3 +905,66 @@ submission time as well as job start.
 `vieb_v2/hpc/install_gpu.sh`, `vieb_v2/hpc/submit.sh`,
 `vieb_v2/hpc/.gitignore`, `vieb_v2/hpc/README.md`, jobs 46982/46986, #53, #54,
 #56
+
+## 59 — `transfer-operator` branches off `koopman`, not `main`, and four of Prompt C's premises were wrong
+
+**Decision:** the `transfer-operator` branch is cut from `koopman`, not from
+`main` as the brief specified. `main` contains **zero** `vieb_v2/` files — no
+`representation/`, no `koopman.py`, no `.sbatch` suite. `koopman` is 56 commits
+ahead of `main` and 0 behind, so it strictly contains it. Branching off `main`
+would have discarded the very module the brief's §6 says to repurpose.
+
+**Findings that changed the plan**, each verified on disk before any code:
+
+- **No k-means microstate assignments exist.** The brief says "you already have
+  them, do not rebuild." `koopman.partition()` computes `region_ids` and
+  `save_topology` (`koopman.py:896`) writes only `labels`/`probabilities`/
+  `index` — the assignments never reach disk. They must be rebuilt.
+- **MoSeq produced 42 distinct syllables** (39 above the frequency floor), not
+  the 48 the brief cites. 48 is `N_REGIONS` in `koopman.sbatch:37`; the two
+  numbers were conflated.
+- **`compare_methods.py` and any VUS-1 consumer do not exist**, so "so
+  `compare_methods.py` works unchanged" is unachievable. ExBias is the only
+  producer and its one run has `n_states: 0`.
+- **`behavior_metrics.py`'s pooled-index bug is already fixed**
+  (`behavior_metrics.py:269-288` masks by `recording_id`). A residual defect
+  remains and is *not* fixed here: `load_pose_aligned` omits the
+  confidence-weighted smoothing `exbias.prepare` applies, so `C_shape`/`C_pred`
+  are measured on a different signal than the bounds were derived from.
+- **§0c is already resolved**: K=7, `tail_tip` dropped at `keypoints.py:32`.
+  Only the docstring at `keypoints.py:5` was wrong — it listed a keypoint order
+  contradicting `DEFAULT_BODYPARTS` at L19. Fixed.
+
+**Why:** the brief is a structural argument from prior measurements, and it says
+so (§10: "none of this has been tested on this data"). Checking its premises
+against the repo before building on them cost an hour and removed four
+dependencies on things that were not true.
+**Related:** `vieb_v2/representation/{align,checkpoints,keypoints,pose_loader,
+koopman}.py`, `vieb_v2/cli.py`, #55, #57
+
+## 60 — Alignment discarded arena position and heading; `align_all_full` keeps them
+
+**Decision/finding:** `align_all` (`align.py:114`) returns `align_session(...)[0]`
+and drops `theta`; the weighted centroid is computed at L89 and never surfaced.
+The v2 aligned space is therefore purely postural — translation and heading are
+gone by construction, so freezing and steady locomotion are degenerate in it.
+v1's `PoseFeatureExtractor` computed `centroid_speed` and `angular_velocity` in
+Layer 1; the v2 path dropped both.
+
+Delay embedding cannot repair this. It recovers derivatives of what was
+*measured*, and these were subtracted before measurement.
+
+Added `align_all_full()` returning `{aligned, reference, theta, centroid}`
+alongside the unchanged `align_all`, plus public `weighted_centroid()` and
+`frame_weights()` so a caller reconstructing the centroid uses exactly the
+weights the alignment used. **Verified against a synthetic rigid body under a
+known time-varying rotation: `heading = -theta` to 6.2e-15**, and the centroid
+reproduces arena position exactly under uniform weights.
+
+**Why:** additive rather than a change to `align_all`, so `cmd_align` and
+`test_align.py` are untouched and the 206-test suite stays green. The locomotor
+channels land in a new `latent_plus.npz` beside `scores.npz` rather than
+replacing it, which is what makes "did restoring them change the answer?"
+answerable instead of assumed.
+**Related:** `vieb_v2/representation/align.py`, `checkpoints.py` `EXTRA_FILES`,
+#59
