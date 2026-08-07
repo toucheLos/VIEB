@@ -1029,3 +1029,73 @@ than halved. Now computed from W+ and W- directly, and pinned by a test.
 **Related:** `vieb_v2/scripts/moseq_control.py`,
 `vieb_v2/tests/test_moseq_control.py`,
 `/home/tul26194/vieb2-results/transfer_operator/moseq_control/`, #59
+
+## 62 — The transfer operator clears its synthetic gate, and the gate corrected two of its own defaults
+
+**Decision/finding:** `representation/transfer_operator.py` passes five synthetic
+systems with analytically known answers, in 8 s. No real data goes near it until
+they pass. Three of the five caught something.
+
+**The duration control — the branch's central claim — holds.** A 3-state chain
+with geometric dwells: A and B entered essentially equally often (measured 607
+against 605, a 0.3% difference) while A occupies **19.4x** the time, plus a rare
+fast state C at 313 frames in 360,000. `pi` recovers the occupancy to within 1%
+and C survives the connected set at its correct measure. This is the confound
+dissolved rather than relabelled: a density-based clusterer cannot separate
+"where the animal spends time" from "what the animal is doing", because for it
+those are the same number.
+
+**Two defaults were wrong and the gate is what found them:**
+
+- `lag_margin` was 5.0, on the reasoning that a timescale only a few lags long
+  is fitted from a handful of eigenvalue digits. The Ornstein-Uhlenbeck system
+  measured that: OU's timescale is flat within 5% of its analytic 1/theta across
+  a **thirtyfold** lag range, and a 5x margin rejected all but the two shortest
+  lags of it — excluding exactly the regime where the estimate is best. Now 1.0,
+  the standard `y = tau` line.
+- `min_spectral_gap` was 1.2. OU's eigenvalues are exp(-n·theta·t), so its
+  consecutive timescale ratios are exactly (n+1):n and **t2/t3 = 2.00**. A gap
+  threshold at or below 2 cannot distinguish one-dimensional relaxation from
+  metastability at any tuning. Raised to 2.0, and — more importantly — the
+  verdict now requires eigenvector **sign structure** as a separate condition,
+  since that is the criterion that actually separates the two. OU passes plateau
+  and gap and is rejected only by sign structure, which is asserted directly.
+
+**Three test premises were wrong, not the code:**
+
+- *Limit cycle.* Aliasing lives in the eigenvalues, not the timescales. At half
+  an orbit the reversible operator is a shift by B/2, giving 12 two-cycles and
+  eigenvalues of exactly ±1 — the period-2 mode makes `t_imp` NaN *by design*,
+  since clipping a negative eigenvalue would report a fast process where there
+  is a rhythmic one. At a full orbit P is literally the identity (diagonal
+  fraction 1.000, 24 singleton components) and `operator_at_lag` correctly
+  refuses to report anything.
+- *i.i.d. noise.* Timescales **grow linearly** in tau on noise — lambda_2 sits at
+  the sampling floor and does not move, so t = -tau·dt/log(lambda_2) is
+  proportional to tau by construction. That linear growth is the null signature
+  the brief names as the falsification condition; asserting flatness would have
+  been asserting the opposite of the truth.
+- *Double well.* Read at tau=5 the second timescale is 171 s against an empirical
+  111 s; it converges downward through 119, 98, 90 to 87 as the lag grows. The
+  short-lag inflation is the near-identity artifact — with velocity hidden, a
+  particle that has barely moved looks like it stayed. Measured at a converged
+  lag the agreement is 0.81–0.85 across all three temperatures and the Arrhenius
+  slope comes out at -0.995 against a true barrier of -1.0.
+
+**One limit recorded rather than fixed:** at 60 microstates, k-means gives state
+C no centre at all — 313 points absorbed into a neighbour, the state gone before
+any operator is built. 120 resolves it. This is a discretization limit on rare
+states that the operator cannot repair and that nothing announces on real data.
+Pinned by its own test so the k choice reads as a measured requirement.
+
+**And one thing the operator cannot do, stated plainly:** a near-decomposable
+pooled chain *is* metastable, mathematically. Two sub-populations never observed
+moving between each other produce a real slow eigenvalue and a convincing
+plateau, and no pooled diagnostic distinguishes "states are behaviors" from
+"states are animals". The test demonstrates a pooled t2 more than 50x anything
+present within either group. Refitting within strata is the only thing that
+detects it, which is why `--stratify` is mandatory in the gate rather than
+advisory.
+
+**Related:** `vieb_v2/representation/transfer_operator.py`,
+`vieb_v2/tests/test_transfer_operator.py` (34 tests), #59, #61
