@@ -968,3 +968,64 @@ replacing it, which is what makes "did restoring them change the answer?"
 answerable instead of assumed.
 **Related:** `vieb_v2/representation/align.py`, `checkpoints.py` `EXTRA_FILES`,
 #59
+
+## 61 — The positive control passes emphatically: MoSeq already separates Context A after conditioning
+
+**Finding:** Prompt C's §8 asked whether any Keypoint-MoSeq syllable shifts in
+Context A post-shock, on the grounds that it is free and bounds how broken the
+representation is. It does, overwhelmingly.
+
+Syllable 1, across the whole design (mean occupancy, 298 animals, every animal
+in every phase, all recordings truncated to a common 5,381 frames):
+
+| phase | occupancy |
+|---|---|
+| CFC d0 Context A — conditioning | 0.095 |
+| CFC d1 Context A No Shock — **retrieval** | **0.463** |
+| CFC d2 Context C — novel context | 0.170 |
+| CFD d3–d7 Context A | 0.429 → 0.552 → 0.597 → 0.602 → 0.597 |
+| CFD d3–d7 Context B | 0.351 → 0.435 → 0.419 → 0.414 → 0.398 |
+
+Paired Wilcoxon per syllable on per-animal means, BH FDR: **33/35 syllables at
+q < 0.05** for retrieval vs conditioning; syllable 1 at q = 8.4e-47, rank-biserial
++0.98. The A−B discrimination gap widens monotonically across the CFD days
+(+0.078, +0.117, +0.178, +0.188, +0.199).
+
+The profile is what freezing should look like: near-absent while the animal is
+naive, quadrupled on re-exposure to the conditioned context, only mildly raised
+by a *novel* context, and increasingly context-selective as discrimination is
+learned. We have not confirmed the label against the grid movies, so it is a
+candidate, not an identification.
+
+**Two controls, both required before believing it:**
+- *Session length.* Context A sessions run ~6,302 frames against ~5,392 for
+  Context B/C — the shock protocol needs the time — so a syllable whose rate
+  drifts within a session would separate the arms for free. Truncating every
+  recording to a common 5,381 frames *increases* the effect (0.119→0.463
+  becomes 0.095→0.463). Not a length artifact.
+- *Sign-flip null.* Swapping an animal's two arms negates its difference vector,
+  which is the exact randomization null for a paired signed-rank test. Over 100
+  repeats: median 0 significant, mean 0.15, **97% of repeats found none**, and
+  **0% reached the observed 33**. The occasional burst to 13 is compositional
+  dependence — occupancies sum to 1, so the 35 tests are strongly dependent and
+  the rejection count is overdispersed — which is why the whole distribution is
+  reported rather than a mean.
+
+**What this does and does not change.** The brief anticipated that a passing
+control would weaken §2's degeneracy claim. It does not, because it is not a
+test of the v2 representation: MoSeq runs its own egocentric alignment and fits
+an AR-HMM to pose *dynamics*, with centroid and heading jointly inferred rather
+than discarded. What it establishes is that the effect is present in this pose
+data and is findable — which converts every later negative result from ambiguous
+into interpretable. If the transfer operator cannot recover a state like this,
+the loss happened in the representation or the operator, not in the animals.
+§0a remains the decisive test of the aligned space.
+
+**Also fixed here:** the rank-biserial effect size was derived from scipy's
+two-sided `statistic`, which is `min(W+, W-)` and therefore signless — every
+syllable reported a positive effect, including ones whose occupancy had more
+than halved. Now computed from W+ and W- directly, and pinned by a test.
+
+**Related:** `vieb_v2/scripts/moseq_control.py`,
+`vieb_v2/tests/test_moseq_control.py`,
+`/home/tul26194/vieb2-results/transfer_operator/moseq_control/`, #59
