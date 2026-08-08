@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import textwrap
 
 import matplotlib
 matplotlib.use("Agg")
@@ -150,7 +151,8 @@ def main():
         panel(axes[0][j], res, args.processes,
               f"{label}\n{n} microstates, {res.get('n_recordings')} recordings")
         verdict = res.get("gate", {}).get("verdict", "")
-        ck_panel(axes[1][j], res, f"Chapman-Kolmogorov\n{verdict}")
+        ck_panel(axes[1][j], res,
+                 "Chapman-Kolmogorov\n" + textwrap.fill(verdict, 52))
 
     fig.suptitle("Implied timescales of the transfer operator\n"
                  "reversibilized, so these are an upper bound "

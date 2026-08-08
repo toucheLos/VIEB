@@ -1144,3 +1144,56 @@ session count is not.
 
 **Related:** `vieb_v2/representation/observations.py`,
 `vieb_v2/tests/test_observations.py` (27 tests), #60, Prompt C §2
+
+---
+
+## 64 — The §3 gate fails: no plateau at any lag, in both arms. The branch stops here.
+
+Prompt C §3 pre-registered the death condition: *"t_imp grows linearly in tau
+from the start, no plateau at any tau -> there is no Markovian coarse-graining
+at any resolution on this data. The branch dies here. Report it, stop, do not
+tune."* Measured on all 3,846 recordings at 500 Voronoi microstates, over lags
+from 0.033 s to 36 s, **there is no plateau** for t2, t3 or t4 — in either arm.
+
+| arm | dim | t2 at 0.033s | t2 at 36s | d log t2 / d log tau | verdict |
+|---|---|---|---|---|---|
+| pose PCs + restored channels | 11D | 0.611 s | 65.4 s | 0.670 | no plateau |
+| pose PCs only (control) | 9D | 0.546 s | 71.9 s | 0.707 | no plateau |
+
+**Neither artifact region the brief warns about explains it.** t2/tau >= 1.82
+everywhere, so this is not the small-lag near-identity region; lambda2 is still
+0.575 and declining at tau=36 s on 18.2M pairs, so it is not the large-lag noise
+region. **And the estimate is not broken**: at every one of the 26 lags all 500
+microstates are retained, `dropped_frame_frac` is 0, there is exactly one
+connected component, `leak_frac` is 0, `near_reducible` is False, and every lag
+carries 18.2–22.4M transition pairs.
+
+**How it fails is worth more than the fact that it fails.** The growth is
+scale-free rather than linear — the local exponent drifts monotonically from
+0.529 to 0.847, strictly between a plateau (0) and the trivial large-tau
+artifact (1). The leading eigenvalue violates the semigroup property in one
+consistent direction, **lambda2(2 tau) > lambda2(tau)^2 at every lag** (excess
++0.028 to +0.061, growing). Correlations decay more slowly than any single
+exponential at every scale from 33 ms to 36 s: long memory, no timescale
+separation.
+
+**Three confounds ruled out.** Reversibilization is not the cause — the
+counts-symmetrized estimator agrees within 2.2% (exponent 0.667 vs 0.670). The
+restored channels are not the cause and do not repair it — the pose-only control
+is marginally worse. Smoothing is not the cause — the control applies none and
+behaves identically.
+
+**The concern with the gate, recorded rather than acted on.** This is precisely
+what Costa et al. (the branch's own reference, §11) predict at K=1: the
+instantaneous observable is not the full state, implied timescales therefore
+grow with tau, and delay embedding to K* is their remedy — which is what §5a
+exists to do. §3 was specified to run *before* any delay embedding, so the gate
+as written may be falsifying K=1 rather than the branch. Per §3 and §9 the work
+stopped and nothing was tuned; whether to run §5a is the user's call.
+
+**Untested, and named as such:** one partition resolution (N=500). Coarse
+partitions bias timescales low, so a finer one raises the curve, but a power law
+does not become a plateau by rescaling.
+
+**Related:** `docs/TRANSFER_OPERATOR_FINDINGS.md`,
+`vieb_v2/hpc/to_02_timescales.sbatch`, job 47423, #60, #62, #63

@@ -16,7 +16,7 @@ one substantive concern about whether that gate tests what it was meant to.
 | §8 positive control (MoSeq) | **passes emphatically** — 33/35 syllables shift at retrieval, null 0/100 |
 | §2a representation degeneracy | **AUC 0.693 linear / 0.790 boosted** — partial, neither anticipated outcome |
 | §4 synthetic verification | **all pass** (30 tests), and corrected two of my own defaults |
-| §3 falsification gate | **no plateau at any lag** — the pre-registered death condition |
+| §3 falsification gate | **no plateau at any lag, in both arms** — the pre-registered death condition |
 
 ---
 
@@ -200,6 +200,37 @@ tau 0.167->0.333s   observed 0.8526  markov 0.7915  excess +0.0611
 **Correlations decay more slowly than any single exponential, at every scale
 from 33 ms to 36 s.** This is long-memory, multi-scale behaviour with no
 timescale separation — a stronger and more specific statement than "no plateau."
+
+### Not an artifact of reversibilization
+
+The reversibilized operator and the independent counts-symmetrized estimator
+agree to within **2.2%** across the whole sweep and give the same scaling:
+
+| estimator | global d log t₂ / d log τ |
+|---|---|
+| reversibilized `P_r(τ)` | 0.670 |
+| counts-symmetrized | 0.667 |
+
+So the symmetrization step that produces the upper bound is not what produces
+the growth.
+
+### Not an artifact of the restored channels, or of smoothing
+
+Both arms were run. They are the same result:
+
+| arm | dim | t₂ at 0.033 s | t₂ at 36 s | global exponent | min t₂/τ | verdict |
+|---|---|---|---|---|---|---|
+| pose PCs + channels | 11D | 0.611 s | 65.4 s | 0.670 | 1.82 | no plateau |
+| pose PCs only (control) | 9D | 0.546 s | 71.9 s | 0.707 | 2.00 | no plateau |
+
+Local exponents track each other closely (0.529→0.812 vs 0.530→0.839), and both
+arms keep all 500 states in one connected component at every lag.
+
+This rules out two confounds at once. The restored channels neither cause the
+failure nor repair it — the control is marginally *worse* (0.707 vs 0.670). And
+the channels are smoothed over 9 frames, which adds temporal correlation by
+construction; the control applies **no smoothing at all** and behaves
+identically, so smoothing is not the source of the memory.
 
 ---
 
