@@ -90,6 +90,21 @@ def panel(ax, res, n_processes, title):
     ax.legend(fontsize=6.5, loc="upper left", framealpha=0.9, ncol=2)
 
 
+def has_ck(res):
+    """Is there anything to draw in a CK panel for this arm?
+
+    When the gate finds no plateau there is no tau*, so no CK test was run and
+    the panel would be an empty box. Asked before the figure is laid out, so
+    the row can be dropped rather than reserved and left blank.
+    """
+    for key, field in (("ck", "err"), ("holdout_ck", "err_holdout")):
+        block = res.get(key)
+        if block and block.get("ok"):
+            if any(r.get("ok") and field in r for r in block["rows"]):
+                return True
+    return False
+
+
 def ck_panel(ax, res, title):
     ck, held = res.get("ck"), res.get("holdout_ck")
     drew = False
@@ -142,17 +157,26 @@ def main():
     if not found:
         raise SystemExit("no timescales_*.json found")
 
-    fig, axes = plt.subplots(2, len(found), figsize=(6.0 * len(found), 8.4),
+    # Drop the CK row entirely when no arm has a tau*. A row of empty boxes
+    # spends half the figure saying nothing, and the verdict it would have
+    # carried belongs on the curve that produced it.
+    ck_row = any(has_ck(res) for _, res in found)
+    nrows = 2 if ck_row else 1
+    fig, axes = plt.subplots(nrows, len(found),
+                             figsize=(6.0 * len(found), 4.2 * nrows),
                              squeeze=False)
     for j, (tag, res) in enumerate(found):
         label = ("pose PCs + restored channels" if tag == "channels"
                  else "pose PCs only (control)" if tag == "pose_only" else tag)
         n = res.get("n_states")
-        panel(axes[0][j], res, args.processes,
-              f"{label}\n{n} microstates, {res.get('n_recordings')} recordings")
         verdict = res.get("gate", {}).get("verdict", "")
-        ck_panel(axes[1][j], res,
-                 "Chapman-Kolmogorov\n" + textwrap.fill(verdict, 52))
+        title = f"{label}\n{n} microstates, {res.get('n_recordings')} recordings"
+        if not ck_row and verdict:
+            title += "\n" + textwrap.fill(verdict, 52)
+        panel(axes[0][j], res, args.processes, title)
+        if ck_row:
+            ck_panel(axes[1][j], res,
+                     "Chapman-Kolmogorov\n" + textwrap.fill(verdict, 52))
 
     fig.suptitle("Implied timescales of the transfer operator\n"
                  "reversibilized, so these are an upper bound "
