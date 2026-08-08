@@ -395,3 +395,97 @@ def test_compare_koopman_declares_no_winner(project, capsys):
     assert "joined on (recording, frame), not position" in printed
     # The two -1s share a value, not a meaning -- the table must say so.
     assert "share a value, not a meaning" in printed
+
+
+# ------------------------------------------------- transfer-operator stages
+
+def _to_project(tmp_path, n_rec=6, t=1200, seed=0):
+    """Align a synthetic project, so the stage-0/1 commands have real inputs."""
+    pose = str(_write_pose(str(tmp_path / "pose"), n_videos=n_rec,
+                           n_frames=t, seed=seed))
+    out = str(tmp_path / "out")
+    assert cli.main(["align", "--pose", pose, "--out", out, "--gpu", "off"]) \
+        == cli.OK
+    return out
+
+
+def test_align_writes_position_and_heading_beside_the_aligned_pose(tmp_path):
+    """The Stage 0 repair: alignment removes these, so it must also keep them."""
+    out = _to_project(tmp_path)
+    assert os.path.exists(os.path.join(out, cli.POSE_FRAME))
+    data, meta = cli._load(os.path.join(out, cli.POSE_FRAME))
+    frame = cli._unpack(data)
+    aligned = cli._unpack(cli._load(os.path.join(out, cli.ALIGNED))[0])
+    assert len(frame) == len(aligned)
+    assert all(f.shape[1] == 3 for f in frame)
+    assert all(len(f) == len(a) for f, a in zip(frame, aligned))
+    assert list(meta["columns"]) == ["centroid_x", "centroid_y", "theta"]
+
+
+def test_align_writes_a_recording_manifest(tmp_path):
+    out = _to_project(tmp_path)
+    path = os.path.join(out, "recordings.csv")
+    assert os.path.exists(path)
+    with open(path) as fh:
+        header = fh.readline()
+    # recording_id is the join key against MoSeq; without it the only
+    # identifier a checkpoint carries is position in a sorted glob.
+    assert "recording_id" in header and "n_frames" in header
+
+
+def test_degeneracy_reports_an_auc_and_a_verdict(tmp_path):
+    import json
+    out = _to_project(tmp_path)
+    assert cli.main(["degeneracy", "--out", out, "--n-boot", "5",
+                     "--subsample", "20000", "--model", "logistic"]) == cli.OK
+    with open(os.path.join(out, "degeneracy.json")) as fh:
+        res = json.load(fh)
+    assert 0.0 <= res["models"]["logistic"]["auc"] <= 1.0
+    assert res["verdict"] in ("degenerate", "partial", "postural signature")
+
+
+def test_timescales_caps_the_lag_at_the_recording_horizon(tmp_path, capsys):
+    """A 3-minute recording cannot report a 60 s timescale.
+
+    The requested sweep is capped at a fraction of the median recording, and
+    the cap has to be visible in the log -- silently sweeping past the horizon
+    produces linear growth that reads exactly like the branch's null result.
+    """
+    import json
+    out = _to_project(tmp_path, n_rec=6, t=1200)
+    code = cli.main(["timescales", "--out", out, "--n-states", "20",
+                     "--n-boot", "0", "--n-tau", "10", "--tau-max-s", "600"])
+    assert code in (cli.OK, cli.NEEDS_ATTENTION)
+    text = capsys.readouterr().out
+    assert "capped from the requested" in text
+
+    with open(os.path.join(out, "timescales.json")) as fh:
+        res = json.load(fh)
+    # 1200 frames at 30 fps = 40 s; horizon is 0.2 x that = 8 s.
+    assert res["horizon_s"] == pytest.approx(8.0)
+    assert max(res["taus_s"]) <= res["horizon_s"] + 1e-9
+    assert res["n_states"] <= 20
+
+
+def test_timescales_pose_only_arm_drops_the_channels(tmp_path):
+    import json
+    out = _to_project(tmp_path)
+    assert cli.main(["timescales", "--out", out, "--n-states", "20",
+                     "--n-boot", "0", "--n-tau", "8", "--pose-only",
+                     "--tag", "pose_only"]) in (cli.OK, cli.NEEDS_ATTENTION)
+    with open(os.path.join(out, "timescales_pose_only.json")) as fh:
+        res = json.load(fh)
+    assert res["pose_only"] is True
+    assert res["build"]["observations"]["channels_included"] is False
+    names = res["build"]["observations"]["names"]
+    assert "centroid_speed" not in names
+
+
+def test_timescales_tags_keep_arms_in_one_directory(tmp_path):
+    out = _to_project(tmp_path)
+    for tag in ("channels", "pose_only"):
+        extra = ["--pose-only"] if tag == "pose_only" else []
+        cli.main(["timescales", "--out", out, "--n-states", "15",
+                  "--n-boot", "0", "--n-tau", "6", "--tag", tag] + extra)
+    assert os.path.exists(os.path.join(out, "timescales_channels.json"))
+    assert os.path.exists(os.path.join(out, "timescales_pose_only.json"))
