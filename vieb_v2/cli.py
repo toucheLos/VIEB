@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from representation import checkpoints, gpu, keypoints, koopman  # noqa: E402
 from representation import observations, recordings, run_registry  # noqa: E402
+from representation import transfer_operator as top  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
 from representation.align import align_all_full, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
@@ -337,6 +338,188 @@ def cmd_degeneracy(args):
         json.dump(out, fh, indent=2)
     _log(f"wrote {path}")
     return OK
+
+
+def _microstates(args, aligned, frame):
+    """Observation space, then a Voronoi partition of it.
+
+    Density-based clustering is deliberately absent. The measured diagnosis for
+    this dataset is that density in frame space is confounded with duration --
+    frames arrive at uniform time intervals, so sampling density along a
+    trajectory goes as 1/|v|. A Voronoi partition makes no density claim: it is
+    a bookkeeping device for counting transitions, and the occupancy it implies
+    is reported separately as pi rather than being used to define states.
+    """
+    latent = make_latent("pca", args.var_threshold, args.n_components,
+                         1.0, None, 1, 3000).fit(aligned)
+    scores = latent.transform_all(aligned)
+    report = latent.spectrum_report()
+    _log(f"pooled PCA: q={report['n_components']} components, "
+         f"{report['explained_variance']:.1%} of variance")
+
+    obs, obs_report = observations.build(
+        scores, frame, fps=args.fps, smooth_s=args.smooth_s,
+        include=not args.pose_only)
+    _log(f"observations: {obs_report['n_observations']}D "
+         f"({'pose only' if args.pose_only else 'pose + restored channels'})")
+    if not args.pose_only:
+        _log(f"  channel scales before standardising: " + ", ".join(
+            f"{k}={v:.3g}" for k, v in obs_report["channel_scale"].items()))
+        _log(f"  largest channel/PC scale ratio "
+             f"{obs_report['scale_ratio_before_standardising']:.1f}x -- "
+             f"neutralised by per-block standardisation")
+
+    t0 = time.time()
+    ids, centers = koopman.partition(obs, n_regions=args.n_states, seed=args.seed)
+    n_used = int(centers.shape[0])
+    occupancy = np.bincount(np.concatenate(ids), minlength=n_used)
+    _log(f"partitioned into {n_used} microstates in {time.time() - t0:.1f}s; "
+         f"smallest holds {occupancy.min():,} frames, largest "
+         f"{occupancy.max():,} ({occupancy.max() / occupancy.sum():.2%})")
+    return ids, n_used, {"latent": report, "observations": obs_report,
+                         "occupancy_min": int(occupancy.min()),
+                         "occupancy_max": int(occupancy.max())}
+
+
+def cmd_timescales(args):
+    """Stage 1: the falsification gate. Does a Markovian coarse-graining exist?
+
+    Builds the Ulam matrix on a Voronoi partition and sweeps the lag. The
+    decision rule is fixed before the run: a plateau in the implied timescales
+    over some lag window means timescale separation exists and the branch
+    continues; linear growth in tau from the start, with no plateau anywhere,
+    means there is no Markovian coarse-graining at any resolution on this data
+    and the branch dies here.
+
+    Two regions of the curve are artifacts and are excluded by construction
+    rather than by eye: at very small tau the matrix is near-identity and every
+    eigenvalue degenerates toward 1, and at very large tau the rows become noisy
+    copies of pi and every timescale grows linearly.
+    """
+    aligned = _unpack(_load(os.path.join(args.out, ALIGNED))[0])
+    frame = _unpack(_load(os.path.join(args.out, POSE_FRAME))[0])
+    if len(frame) != len(aligned):
+        raise _Attention(
+            f"{len(frame)} frame array(s) but {len(aligned)} aligned -- "
+            f"pose_frame.npz is from a different run than aligned.npz")
+
+    ids, n_states, build_report = _microstates(args, aligned, frame)
+    lengths = np.array([len(a) for a in aligned])
+    del aligned, frame
+
+    # The lag ceiling is set by the recordings, not by taste. A 3-minute
+    # recording cannot report a 60 s timescale: the estimate needs several
+    # relaxations inside one recording, and beyond that the operator is
+    # measuring the recording length.
+    horizon_s = float(args.horizon_frac * np.median(lengths) / args.fps)
+    tau_max_s = min(args.tau_max_s, horizon_s * args.tau_max_frac)
+    taus = top.make_taus(args.fps, tau_max_s, n_tau=args.n_tau)
+    _log(f"recordings: median {np.median(lengths):,.0f} frames "
+         f"({np.median(lengths) / args.fps:.0f}s), shortest {lengths.min():,} "
+         f"({lengths.min() / args.fps:.0f}s)")
+    _log(f"lag sweep {taus.min() / args.fps:.3g}s -> {taus.max() / args.fps:.3g}s "
+         f"in {taus.size} steps; horizon {horizon_s:.0f}s "
+         f"(={args.horizon_frac:g} x median recording)")
+    if args.tau_max_s > tau_max_s:
+        _log(f"  capped from the requested {args.tau_max_s:g}s: beyond the "
+             f"horizon the curve measures recording length, not dynamics")
+
+    t0 = time.time()
+    sweep = top.its_sweep(ids, n_states, taus, args.fps, k=args.k,
+                          horizon_s=horizon_s)
+    _log(f"implied timescales in {time.time() - t0:.1f}s "
+         f"({int(sweep['ok'].sum())}/{taus.size} lags estimable)")
+
+    gate = top.plateau_gate(sweep)
+    for p, e in sorted(gate["processes"].items()):
+        if e["has_plateau"]:
+            pl = e["plateau"]
+            _log(f"  t{p + 1}: plateau {pl['tau_lo_s']:.3g}-{pl['tau_hi_s']:.3g}s "
+                 f"at {pl['plateau_s']:.3g}s "
+                 f"(spanning {pl['tau_ratio']:.1f}x in lag, "
+                 f"flatness {pl['flatness']:.3f}), gap to next "
+                 f"{e.get('timescale_ratio_to_next') or float('nan'):.2f}")
+        else:
+            _log(f"  t{p + 1}: no plateau")
+    _log(f"  => {gate['verdict']}")
+
+    out = {"n_states": n_states, "fps": float(args.fps), "gate": gate,
+           "taus_s": sweep["taus_s"].tolist(),
+           "its_s": np.where(np.isfinite(sweep["its"]), sweep["its"],
+                             None).tolist(),
+           "diagnostics": sweep["diagnostics"], "horizon_s": horizon_s,
+           "build": build_report,
+           "n_recordings": len(ids),
+           "median_recording_s": float(np.median(lengths) / args.fps),
+           "pose_only": bool(args.pose_only)}
+
+    # Only worth the cost once something survived the gate.
+    if gate["any_plateau"]:
+        tau_star = int(round(max(
+            e["plateau"]["tau_lo_s"] for e in gate["processes"].values()
+            if e["has_plateau"]) * args.fps))
+        out["tau_star"] = tau_star
+        out["tau_star_s"] = tau_star / args.fps
+        _log(f"tau* = {tau_star} frames ({tau_star / args.fps:.3g}s)")
+
+        t0 = time.time()
+        ck = top.ck_test(ids, n_states, tau_star, args.fps, n_max=args.ck_n)
+        out["ck"] = ck
+        if ck.get("ok"):
+            for r in ck["rows"]:
+                if r["ok"]:
+                    _log(f"  CK n={r['n']}: err {r['err']:.4f} "
+                         f"(worst row {r['err_max_row']:.3f}, "
+                         f"{r['n_pairs']:,} pairs)")
+                else:
+                    _log(f"  CK n={r['n']}: {r['reason']}")
+        _log(f"  Chapman-Kolmogorov in {time.time() - t0:.1f}s")
+
+        t0 = time.time()
+        held = top.holdout_ck(ids, n_states, tau_star, args.fps,
+                              n_max=args.ck_n, seed=args.seed)
+        out["holdout_ck"] = held
+        if held.get("ok"):
+            _log(f"  held-out CK ({held['n_shared_states']} shared states): " +
+                 ", ".join(f"n={r['n']} {r['err_holdout']:.4f}"
+                           for r in held["rows"] if r["ok"]))
+        _log(f"  held-out Chapman-Kolmogorov in {time.time() - t0:.1f}s")
+
+        if args.n_boot:
+            t0 = time.time()
+            # Bootstrap a subset of the lag grid. Each replicate is a weighted
+            # bincount over every pair in the dataset -- 22M of them here -- so
+            # the full 28-lag grid at 200 resamples is 5,600 passes for a curve
+            # whose CIs are read at a handful of lags. Log-spaced so the
+            # plateau, and both artifact regions bracketing it, are all covered.
+            pick = np.unique(np.linspace(0, taus.size - 1,
+                                         min(args.boot_n_tau, taus.size)
+                                         ).astype(int))
+            boot_taus = taus[pick]
+            _log(f"  bootstrapping {boot_taus.size} of {taus.size} lags "
+                 f"({args.n_boot} resamples each)")
+            boot = top.bootstrap_its(ids, n_states, boot_taus, args.fps,
+                                     n_boot=args.n_boot, seed=args.seed,
+                                     k=min(args.k, 6))
+            out["bootstrap"] = {
+                "taus_s": boot["taus_s"].tolist(),
+                "lo": np.where(np.isfinite(boot["lo"]), boot["lo"], None).tolist(),
+                "hi": np.where(np.isfinite(boot["hi"]), boot["hi"], None).tolist(),
+                "mode_stability": np.where(np.isfinite(boot["mode_stability"]),
+                                           boot["mode_stability"], None).tolist(),
+                "same_support_frac": np.where(
+                    np.isfinite(boot["same_support_frac"]),
+                    boot["same_support_frac"], None).tolist(),
+                "n_boot": args.n_boot}
+            _log(f"  block bootstrap ({args.n_boot} resamples over recordings) "
+                 f"in {time.time() - t0:.1f}s")
+
+    name = f"timescales_{args.tag}.json" if args.tag else "timescales.json"
+    path = os.path.join(args.out, name)
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2, default=float)
+    _log(f"wrote {path}")
+    return OK if gate["any_plateau"] else NEEDS_ATTENTION
 
 
 def cmd_latent(args):
@@ -1071,6 +1254,43 @@ def build_parser():
                     help="logistic measures the linearly decodable signature "
                          "only; the two differ by ~0.1 AUC on this data")
     sp.set_defaults(func=cmd_degeneracy)
+
+    sp = sub.add_parser("timescales",
+                        help="stage 1: implied timescales -- the falsification "
+                             "gate for the whole branch")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--smooth-s", type=float,
+                    default=observations.DEFAULT_SMOOTH_S)
+    sp.add_argument("--pose-only", action="store_true",
+                    help="drop the restored channels -- the control arm")
+    sp.add_argument("--n-states", type=int, default=500,
+                    help="Voronoi microstates (not behaviours; deliberately "
+                         "many more than there will be macrostates)")
+    sp.add_argument("--var-threshold", type=float, default=0.95)
+    sp.add_argument("--n-components", type=int, default=None)
+    sp.add_argument("--k", type=int, default=15,
+                    help="leading eigenvalues to track")
+    sp.add_argument("--n-tau", type=int, default=28)
+    sp.add_argument("--tau-max-s", type=float, default=60.0,
+                    help="requested longest lag in SECONDS; capped by the "
+                         "recording length")
+    sp.add_argument("--horizon-frac", type=float, default=0.2,
+                    help="longest trustworthy timescale, as a fraction of the "
+                         "median recording")
+    sp.add_argument("--tau-max-frac", type=float, default=1.0,
+                    help="longest lag as a fraction of the horizon")
+    sp.add_argument("--ck-n", type=int, default=5)
+    sp.add_argument("--n-boot", type=int, default=200,
+                    help="block bootstrap resamples over recordings; 0 skips")
+    sp.add_argument("--boot-n-tau", type=int, default=10,
+                    help="lags to bootstrap, spread across the sweep; each "
+                         "replicate is a pass over every pair in the dataset")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--tag", default=None,
+                    help="suffix for the output json, so arms of the same "
+                         "sweep can share an --out directory")
+    sp.set_defaults(func=cmd_timescales)
 
     for name, helptext in (("latent", "pooled PCA or diffusion maps"),
                            ("pca", "alias for `latent` (backwards compatible)")):
