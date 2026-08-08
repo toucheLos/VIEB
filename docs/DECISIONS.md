@@ -920,9 +920,14 @@ would have discarded the very module the brief's §6 says to repurpose.
   them, do not rebuild." `koopman.partition()` computes `region_ids` and
   `save_topology` (`koopman.py:896`) writes only `labels`/`probabilities`/
   `index` — the assignments never reach disk. They must be rebuilt.
-- **MoSeq produced 42 distinct syllables** (39 above the frequency floor), not
-  the 48 the brief cites. 48 is `N_REGIONS` in `koopman.sbatch:37`; the two
-  numbers were conflated.
+- ~~**MoSeq produced 42 distinct syllables** (39 above the frequency floor), not
+  the 48 the brief cites.~~ **Wrong — retracted.** Counted over all 3,846 result
+  CSVs, MoSeq emits exactly **48** distinct syllables, of which 28 clear a 0.1%
+  frequency floor. The brief's 48 was correct and this entry's correction of it
+  was not. (`N_REGIONS=48` in `koopman.sbatch:37` is a coincidence, not the
+  source.) The same count confirms something more useful: MoSeq's total is
+  **22,355,989 frames**, identical to the deduplicated alignment, which is an
+  independent check on the h5/csv dedup from a tool that never saw it.
 - **`compare_methods.py` and any VUS-1 consumer do not exist**, so "so
   `compare_methods.py` works unchanged" is unachievable. ExBias is the only
   producer and its one run has `n_states: 0`.
