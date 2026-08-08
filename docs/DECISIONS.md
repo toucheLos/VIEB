@@ -1099,3 +1099,43 @@ advisory.
 
 **Related:** `vieb_v2/representation/transfer_operator.py`,
 `vieb_v2/tests/test_transfer_operator.py` (34 tests), #59, #61
+
+---
+
+## 63 — Alignment costs real locomotor information, but does not destroy it: AUC 0.79, not 0.5
+
+Prompt C §2a set up a two-way read: AUC ~0.5 means alignment destroyed the
+freeze/locomote distinction, AUC >~0.8 means it left a postural signature and
+restoring the channels is a refinement rather than a rescue. Measured on all
+3,846 recordings, the answer is **neither**, and the gap between the two models
+is the finding.
+
+| model | AUC | 95% CI (bootstrap over recordings) |
+|---|---|---|
+| logistic regression | 0.693 | [0.687, 0.698] |
+| gradient boosting | **0.790** | [0.784, 0.795] |
+| restored channels (circular) | 1.000 | wiring check only |
+
+Read off the logistic number alone, this looks like a strong degeneracy claim.
+It is not: **+0.097 of the signature is present but not linearly decodable**, and
+the boosted CI stops just short of 0.8 — close enough that the linear number
+alone would have overstated the case. `--model both` is therefore the default;
+a linear probe on its own cannot separate "the information is absent" from "the
+information is curved", and that distinction is the whole question here.
+
+The magnitude worth carrying into the writeup: the slow and fast terciles differ
+by **55x** in real speed (median 0.8 vs 43.8 px/s), and posture still recovers
+that only at 0.79. A 55-fold kinematic difference is not fully visible in the
+aligned representation, which is why §0b restores the channels rather than
+trusting delay embedding to reconstruct them — delay embedding recovers
+derivatives of what was measured, and centroid translation was subtracted
+before measurement.
+
+**Two protocol choices that carry the number.** The held-out split is **by
+recording**, not by frame: adjacent frames are near-copies, so a random frame
+split reports autocorrelation rather than generalization. The CI is a bootstrap
+over **recordings** for the same reason — the frame count is arbitrary, the
+session count is not.
+
+**Related:** `vieb_v2/representation/observations.py`,
+`vieb_v2/tests/test_observations.py` (27 tests), #60, Prompt C §2

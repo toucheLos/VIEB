@@ -40,7 +40,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from representation import checkpoints, gpu, keypoints, koopman  # noqa: E402
-from representation import recordings, run_registry  # noqa: E402
+from representation import observations, recordings, run_registry  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
 from representation.align import align_all_full, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
@@ -259,6 +259,83 @@ def cmd_align(args):
 
     _save_manifest(args.out, kept_paths, lengths, len(kept_paths),
                    len(kept_paths) - len(aligned))
+    return OK
+
+
+def cmd_degeneracy(args):
+    """Stage 0a: can aligned pose alone tell a fast frame from a slow one?
+
+    The blocking question for this branch. `align_session` subtracts the
+    per-frame centroid and rotation, so if the answer is chance, freezing and
+    steady locomotion are degenerate in the v2 input and nothing built on top of
+    it can separate them -- delay embedding recovers derivatives of what was
+    measured, not of what was removed before measurement.
+
+    Run on the aligned pose directly rather than on PC scores: "aligned pose
+    only" is the claim being tested, and interposing a PCA would leave the
+    result depending on a component count nobody chose for this purpose.
+    """
+    aligned = _unpack(_load(os.path.join(args.out, ALIGNED))[0])
+    frame = _unpack(_load(os.path.join(args.out, POSE_FRAME))[0])
+    if len(frame) != len(aligned):
+        raise _Attention(
+            f"{len(frame)} frame array(s) but {len(aligned)} aligned -- "
+            f"pose_frame.npz is from a different run than aligned.npz")
+
+    models = (["logistic", "boosted"] if args.model == "both"
+              else [args.model])
+    out = {"n_recordings_total": len(aligned), "fps": float(args.fps),
+           "models": {}}
+
+    for name in models:
+        t0 = time.time()
+        res = observations.degeneracy(
+            aligned, frame, fps=args.fps, smooth_s=args.smooth_s,
+            n_folds=args.folds, seed=args.seed, n_boot=args.n_boot,
+            subsample=args.subsample, model=name)
+        out["models"][name] = res
+        lo, hi = res["ci95"]
+        _log(f"[{name}] tercile separability from aligned pose alone, "
+             f"{time.time() - t0:.1f}s")
+        _log(f"  AUC {res['auc']:.3f}  95% CI [{lo:.3f}, {hi:.3f}]  "
+             f"({res['n_boot_ok']} bootstrap resamples over recordings)")
+        _log(f"  {res['n_frames_scored']:,} frames from {res['n_recordings']} "
+             f"recording(s), held out by recording in {res['n_folds']} folds")
+        _log(f"  slow tercile median {res['median_speed_slow']:.1f} px/s, "
+             f"fast {res['median_speed_fast']:.1f} px/s "
+             f"(edges {res['speed_tercile_edges'][0]:.1f} / "
+             f"{res['speed_tercile_edges'][1]:.1f})")
+
+    # Read the verdict off the strongest model: the question is whether the
+    # information survives alignment, not whether one classifier finds it.
+    best = max(out["models"].values(), key=lambda r: r["auc"])
+    lo, hi = best["ci95"]
+    out["verdict_model"] = best["model"]
+    if hi < 0.6:
+        out["verdict"] = "degenerate"
+        _log("=> alignment destroys the freeze/locomote distinction. "
+             "Restoring the channels is a rescue, not an improvement.")
+    elif lo > 0.8:
+        out["verdict"] = "postural signature"
+        _log("=> locomotion leaves a strong postural signature. Restoring "
+             "the channels is an improvement rather than a rescue.")
+    else:
+        out["verdict"] = "partial"
+        _log(f"=> partial signature ({best['model']}, AUC {best['auc']:.3f}): "
+             f"well above chance, short of the 0.8 that would make the "
+             f"channels redundant.")
+
+    if len(out["models"]) > 1:
+        lin = out["models"]["logistic"]["auc"]
+        nl = out["models"]["boosted"]["auc"]
+        out["nonlinear_gain"] = float(nl - lin)
+        _log(f"   nonlinear gain {nl - lin:+.3f} -- the part of the signature "
+             f"that is present but not linearly decodable")
+
+    path = os.path.join(args.out, "degeneracy.json")
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2)
+    _log(f"wrote {path}")
     return OK
 
 
@@ -976,6 +1053,24 @@ def build_parser():
     sp = sub.add_parser("align", help="drop noisy keypoints, align pose")
     pose_args(sp), out_args(sp), gpu_args(sp)
     sp.set_defaults(func=cmd_align)
+
+    sp = sub.add_parser("degeneracy",
+                        help="stage 0a: is speed recoverable from aligned pose?")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--smooth-s", type=float,
+                    default=observations.DEFAULT_SMOOTH_S,
+                    help="centroid smoothing before differentiating, SECONDS")
+    sp.add_argument("--folds", type=int, default=5)
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--n-boot", type=int, default=200)
+    sp.add_argument("--subsample", type=int, default=400_000,
+                    help="frames fed to the regression; 0 uses all")
+    sp.add_argument("--model", choices=("logistic", "boosted", "both"),
+                    default="both",
+                    help="logistic measures the linearly decodable signature "
+                         "only; the two differ by ~0.1 AUC on this data")
+    sp.set_defaults(func=cmd_degeneracy)
 
     for name, helptext in (("latent", "pooled PCA or diffusion maps"),
                            ("pca", "alias for `latent` (backwards compatible)")):
