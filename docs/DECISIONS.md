@@ -1197,3 +1197,94 @@ does not become a plateau by rescaling.
 
 **Related:** `docs/TRANSFER_OPERATOR_FINDINGS.md`,
 `vieb_v2/hpc/to_02_timescales.sbatch`, job 47423, #60, #62, #63
+
+## 65 — The four arms scored on the MoSeq control's axis: the v2 default detects nothing, and `diffusion-Koopman` is the only arm within 2x of MoSeq
+
+**Decision/finding:** added `vieb_v2/results_analysis/` (collect, discriminate,
+rank, plots, report_html) on branch `v2_results`. The four arms in
+`koopman_comparison.json` had only ever been compared on **partition geometry**
+— state count, entropy, noise fraction — which describes a partition and says
+nothing about whether it tracks behavior. `discriminate.py` runs
+`scripts/moseq_control.py`'s statistics **verbatim** (per-animal means, paired
+Wilcoxon, BH-FDR, the same sign-flip null and frequency floor) on
+`labels.npz` / `koopman_labels.npz`. Only the labels change, so the numbers are
+commensurable with the §8 positive control.
+
+The ranking this produces contradicts the geometric one:
+
+| arm | states | max abs median shift at retrieval | truncated to 5,381 |
+|---|---|---|---|
+| MoSeq (reference) | 48 | **0.3605** | — |
+| diffusion-Koopman | 16 | **0.1867** | **0.2107**, 16/16 sig |
+| pca-Koopman | 43 | 0.0364 | 0.0391 |
+| diffusion-HDBSCAN | 37 | 0.0199 | 0.0193 |
+| pca-HDBSCAN | 6 | **0.0000** | **0/4 sig, null >= obs = 1.00** |
+
+Four findings worth not rediscovering:
+
+1. **`pca-HDBSCAN` — the v2 default `compare.py --cluster` path — is a null
+   detector on this data.** Its largest median paired difference across every
+   state is *exactly* 0.0; truncated, it finds nothing its own sign-flip null
+   does not reproduce 100% of the time. 99.2% of its clustered frames are one
+   state. Anything downstream consuming these labels is consuming noise.
+2. **`n_significant` is a power metric, not an effect metric, and at n=298
+   paired the two come apart completely.** `diffusion-HDBSCAN` scores 35/37
+   significant — a higher hit rate than MoSeq's 33/35 — on a top state moving
+   0.951 -> 0.971. Ranking by significant-state count puts it first and puts the
+   arm with a 0.55 -> 0.39 shift third. `rank.py` therefore weights `effect`
+   (0.35) above `coverage` (0.15), and that single choice is the whole
+   difference between the two rankings.
+3. **`noise_speed_ratio` predicts the behavioral result from geometry alone.**
+   Both HDBSCAN arms discard frames moving 9.7x and 19.0x faster than what they
+   keep; both Koopman arms sit at 1.34 and 0.60. The two arms that throw away
+   the fast frames are the two arms with no effect. This is the cheapest
+   available screen for a dead clustering.
+4. **The Koopman state count is a parameter in PCA space and partly an output
+   in diffusion space.** Sweeping `--n-regions` 12->192: pca gives
+   n ∝ r^1.04 (one attractor per region, so #55/#57's "the state count is an
+   output" fails outright), diffusion gives n ∝ r^0.71. 0 limit cycles at every
+   resolution in both arms.
+
+**The index was reconstructible, contrary to `recordings.py:1`.** That module
+states the map from `index[:,0]` back to a file "is not merely absent, it is not
+reconstructible after the fact", because `load_sessions` drops unreadable files
+into a never-persisted skip list. True in general; **verifiably false for this
+run** — `find_pose_files` returns 4,925 paths, `aligned.npz["lengths"]` has
+4,925 entries, and `frame_count(paths[i]) == lengths[i]` for all 4,925 exactly.
+A skipped file would break that correspondence, so an exact match is a positive
+check that the skip list was empty. `verify_index` performs it and **raises**:
+a silent off-by-one would attribute every recording's behavior to a neighbouring
+animal and still produce plausible p-values. This is what made the whole
+comparison possible.
+
+**Two corrections applied to the scoring, not to the fits.** The `koopman_*`
+runs predate the h5/csv dedup (#59), so 1,079 duplicate rows are collapsed
+before per-animal averaging. And every contrast was re-run truncated to MoSeq's
+common 5,381 frames, because session length is confounded with arm (Context A
+~6,302 frames vs ~5,392 for B/C). Truncation **strengthens**
+`diffusion-Koopman` and **erases** `pca-HDBSCAN` — the models themselves were
+still fit on double-counted data, and re-running the winning arm on the
+deduplicated alignment is the top next step.
+
+**Hypothesis for why `diffusion-Koopman` wins**, offered as a hypothesis:
+diffusion-map coordinates approximate the slowest-relaxing directions of a
+diffusion on the pose manifold — they are ordered by *timescale*, where PCA's
+are ordered by variance — so a basin decomposition computed in them is more
+likely to align with sustained behavioral regimes. Three independent signals
+agree: sublinear state scaling (r^0.71), a low transition fraction (13.9% vs
+pca's 47.7%), and a noise-speed ratio below 1 (0.60).
+
+**Does not settle why MoSeq wins.** MoSeq differs from every VIEB arm in
+representation *and* algorithm at once — it never subtracts the locomotor
+channels, and its stickiness prior makes syllables bouts by construction. The
+clean separation is to run Koopman on the 11-D observation space (#60's restored
+channels) and, separately, to add v1's HMM smoothing to the v2 path.
+
+**Why:** four algorithms had been run and compared only on quantities that
+cannot distinguish a decomposition that tracks behavior from one that does not.
+The §8 control already established the axis and the statistics; reusing them
+unmodified was cheaper than inventing a metric and made the reference arm
+directly comparable.
+**Related:** `docs/V2_MODEL_COMPARISON.md`, `docs/V2_RESULTS_CONTEXT.md`,
+`vieb_v2/results_analysis/`, `vieb_v2/tests/test_results_analysis.py`,
+#55, #57, #59, #60, #61, #64
