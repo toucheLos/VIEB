@@ -37,7 +37,17 @@ GPU="${GPU:-on}"
 
 module purge
 module load python/3.11.4
-source "$HOME/vieb/venv/bin/activate"
+# The RAPIDS stack lives in a dedicated python/3.11.4 venv (#53); the default
+# venv is 3.13 and CPU-only, so sourcing it turns this GPU allocation into a
+# single-core CPU run (#58). --gpu on catches that in the first second, but a
+# missing venv deserves a better message than an import error.
+VENV="${VENV:-$HOME/vieb/venv-gpu}"
+if [ ! -x "$VENV/bin/python" ]; then
+    echo "error: GPU venv not found: $VENV" >&2
+    echo "  build it on a GPU node -- see hpc/README.md 'Quick start' step 2" >&2
+    exit 2
+fi
+source "$VENV/bin/activate"
 
 cd "$REPO_DIR/vieb_v2"
 

@@ -5,11 +5,13 @@
 ```bash
 cd ~/vieb/vieb_v2/hpc
 
-# 1. one-time: CPU packages
-source ~/vieb/venv/bin/activate
+# 1. one-time: CPU packages, in the default venv (used by the `normal` jobs)
+source "${VENV:-~/vieb/venv}/bin/activate"
 pip install numpy pandas tables hdbscan
 
-# 2. one-time: GPU packages, on a GPU node so the right driver is queried
+# 2. one-time: GPU packages, on a GPU node so the right driver is queried.
+# This builds a *separate* python/3.11.4 venv at ~/vieb/venv-gpu -- the default
+# venv is 3.13, which RAPIDS has no wheels for. Every gpu-partition job uses it.
 srun --partition=gpu --gres=gpu:1 --pty bash
 ./install_gpu.sh
 exit
@@ -30,6 +32,10 @@ sbatch full_pipeline.sbatch
 | `01_align.sbatch` | `normal` | stage 1 only: alignment (no GPU benefit) |
 | `02_compare_latents.sbatch` | `gpu` | stage 2 only: both latents + HDBSCAN |
 | `submit.sh` | — | chains 01 → 02 with `--dependency=afterok` |
+| `latent.sbatch` | `normal` | one latent, **checkpointed** to `scores.npz` (`compare-latents` never writes it) |
+| `embed_cluster.sbatch` | `gpu` | delay embed + HDBSCAN, **checkpointed** to `labels.npz` (`compare-latents` never writes it either) |
+| `koopman.sbatch` | `normal` | attractor topology: states as basins, no clustering |
+| `compare_koopman.sbatch` | `normal` | HDBSCAN states vs Koopman basins, all four arms, joined on `index` |
 | `install_gpu.sh` | — | installs the RAPIDS stack matching this driver |
 
 **`full_pipeline.sbatch`** is the simplest: one job, one log, everything done.
@@ -80,6 +86,19 @@ POSE_DIR=/scratch/$USER/pose sbatch full_pipeline.sbatch
 | `N_LANDMARKS` | 3000 | points the diffusion operator is built on |
 | `HDBSCAN_SAMPLE` | 300000 | fit on this many points, label the rest by `approximate_predict` |
 | `GPU` | `on` | `on` \| `auto` \| `off` |
+| `VENV` | `$HOME/vieb/venv-gpu` on `gpu`, `$HOME/vieb/venv` on `normal` | python env to activate |
+
+**Two venvs, on purpose.** `normal`-partition jobs (`01_align`, `latent`,
+`koopman`, `doctor`) use `~/vieb/venv` (Python 3.13, CPU-only). Every
+`gpu`-partition job (`full_pipeline`, `02_compare_latents`, `embed_cluster`)
+uses `~/vieb/venv-gpu` (Python 3.11.4 + RAPIDS), because RAPIDS publishes no
+3.13 wheels. `doctor` stays on the default venv deliberately — its job is to
+report what is installed there against what the driver wants.
+
+Getting this wrong is silent and expensive: a gpu job on the CPU venv finds no
+`cuml`, and `--gpu auto` will spend the whole allocation on one core without
+logging anything. That is why every gpu script defaults to `GPU=on`, which
+raises in the first second instead.
 
 Site-specific `#SBATCH --account` / `--qos` lines are present but commented out
 at the top of each script — uncomment if your cluster requires them.
@@ -92,9 +111,19 @@ $OUT_DIR/
   scores.npz               latent coordinates
   embedded.npz             delay embedding
   labels.npz               cluster labels (-1 = noise, never force-assigned)
+  koopman_labels.npz       basin labels (-1 = near a separatrix, NOT noise)
+  koopman_report_r<N>.json attractor topology at --n-regions N
   runs.json                run registry -- also read by the GUI
   latent_comparison.json   PCA vs diffusion, side by side
 ```
+
+`koopman_labels.npz` carries the same three arrays as `labels.npz`, so it
+drops into the same slot. It is **not** positionally comparable with it:
+Koopman labels every frame of `scores.npz`, while HDBSCAN labels the
+delay-embedded frames, which are fewer by one window per recording. Join the
+two on the `index` array (`recording`, `frame`) that both checkpoints carry.
+Its `-1` means *near a separatrix* -- a transition -- not HDBSCAN noise; the
+meaning is recorded in the checkpoint's `noise_label_means`.
 
 The comparison is also printed in the job log. It reports `n_states`,
 `noise_frac`, `largest_state_frac`, `state_entropy` and `noise_speed_ratio`
@@ -126,6 +155,19 @@ To sweep the clustering parameter against one existing embedding:
 
 ```bash
 python -m cli sweep --out <existing run> --min-cluster-sizes 25,50,100,200 --gpu on
+```
+
+To test the Koopman arm end to end against an existing `scores.npz`, sweep
+`--n-regions` into separate out-dirs (the state count is only an output if the
+parameter that could fake it has been varied — #55, #57), then compare:
+
+```bash
+for n in 12 24 48 96 192; do
+    d=~/vieb2-results/koopman_pca_r$n
+    mkdir -p "$d" && ln -sf ~/vieb2-results/koopman_pca/scores.npz "$d/"
+    sbatch --export=ALL,OUT_DIR=$d,N_REGIONS=$n koopman.sbatch
+done
+sbatch --export=ALL compare_koopman.sbatch   # needs labels.npz in both base dirs
 ```
 
 Runs launched here also appear in the GUI's Cluster Runs and Overview pages —

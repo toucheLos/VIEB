@@ -11,7 +11,7 @@
 # =============================================================================
 #SBATCH --job-name=vieb2-align
 #SBATCH --partition=normal
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --output=%x-%j.out
@@ -26,7 +26,8 @@ POSE_DIR="${POSE_DIR:-$HOME/dlc-training/raw_videos}"
 
 module purge
 module load python/3.11.4
-source "$HOME/vieb/venv/bin/activate"
+VENV="${VENV:-$HOME/vieb/venv}"
+source "$VENV/bin/activate"
 
 cd "$REPO_DIR/vieb_v2"
 mkdir -p "$OUT_DIR"

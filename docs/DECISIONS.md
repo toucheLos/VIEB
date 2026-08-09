@@ -585,58 +585,706 @@ re-implementing it.
 **Related:** `onboard.py`, `project_manager.py`, `metadata_generator.py`,
 `user_interface.py` (`Stage0ReadinessPanel`)
 
-## 54 — `transfer-operator`: Ulam/Perron–Frobenius decomposition dies at the §3 implied-timescale gate on Luna
-**Decision/finding:** Built `vieb_v2/representation/transfer_operator.py` (Ulam
-estimator, reversibilization, ARPACK spectrum, implied timescales,
-Chapman–Kolmogorov test, chi-based recursive metastable decomposition) plus
-`vieb_v2/transfer/` stage scripts. Branched off **v2, not main** as the brief
-said: `representation/align.py`, which §2 targets, exists only on v2.
+## 53 — v2 HPC GPU pipeline: driver-matched RAPIDS stack + a dedicated python/3.11.4 GPU venv
+**Decision/finding:** Ported v1's `_utils.py:90-177` driver→stack table into
+`vieb_v2/representation/gpu.py` (`GPU_STACKS`, `detect_nvidia_driver`,
+`select_gpu_stack`, `stack_message`), dropping the WSL2 half as irrelevant on a
+Linux cluster. `gpu.report()` now carries both halves of the question — what is
+installed (the existing run-it-don't-import-it probes) and what *should* be
+(driver-matched recommendation) — since an idle GPU can mean "nothing
+installed" or "wrong RAPIDS pin", which need different fixes. `doctor` prints
+the recommendation and gains `--print-packages`, which emits only the pinned
+pip arguments on stdout (reason goes to stderr, exit 1 when no stack matches),
+so `install_gpu.slurm` consumes the table without duplicating it in bash;
+it needs only the stdlib, so it answers before cuml/cupy exist.
 
-**The gate failed and the branch stops there.** On 150 recordings / 868,976
-frames, `t_imp` for the slowest mode rises monotonically across the whole
-1800× τ sweep (1.34 s → 130.8 s at N=100; 1.48 → 140.6 at N=200) with overall
-`d log t / d log τ` ≈ 0.60–0.65 and no window spanning ≥3× in τ flat to within
-0.15. Chapman–Kolmogorov mean TV is 0.146 (N=100) and 0.268 (N=200) at n=2,
-rising with n; a genuine Markov chain scores <0.05. Robust across
-N ∈ {50,100,200,400}, 10 and 20 PCs, 150 and 250 recordings, two seeds. Per §9,
-Stages 3–4 (§5, §6) and the VUS-1 emit (§7) were not built.
+The long-open "wheels on the existing 3.13 venv vs. rebuild on 3.11.4"
+question is resolved, and the reason it was stuck is that it had no fixed
+answer: `~/vieb/venv` is Python 3.13.12 (already outside `pyproject.toml`'s
+own `requires-python = ">=3.10,<3.13"`), and per PyPI, RAPIDS 24.12 /
+cupy 12.2.0 publishes **no** 3.13 wheels at all (`cuml-cu12==24.12.0` is a
+source tarball only) while RAPIDS 26.4 / cupy 14.1.1 does (abi3 + cp313). So
+`--only-binary=:all:` would have succeeded or failed depending on which stack
+the driver resolved to. Chosen resolution: GPU installs always build a
+dedicated `python/3.11.4` venv (`hpc/install_gpu.slurm`, `$HOME/vieb/venv-gpu`),
+which both stacks have wheels for; the default 3.13 venv stays CPU-only and
+untouched. The venv path is recorded in `hpc/.gpu_venv`, checked by
+`submit.sh` before queuing and by `02_compare_latents.slurm` on start.
 
-Four things worth not rediscovering:
-1. **The §4 synthetic gate passed 4/4 and is the reason the negative is
-   trustworthy.** Notably the duration control: a 20:1 dwell ratio is recovered
-   in `pi` as 20.9:1 while the rare fast state (1/40th the dwell) survives as
-   its own metastable set at `pi`=0.0198, purity 0.90. Occupancy and identity
-   *are* separable by this construction — so §3's failure is a fact about this
-   representation, not about the method.
-2. **A flatness search on a monotonically rising curve always finds
-   something.** The first `plateau_score` reported "PLATEAU FOUND" by selecting
-   τ = 0.033–0.1 s — the near-identity region §3 explicitly calls an artifact.
-   Fixed to exclude `lambda_2 > 0.95` and `t_imp < 2τ`, require a ≥3× window,
-   and require CK to pass too (a plateau is necessary, not sufficient).
-3. **`results/features/` mixes 51-D and 91-D files** (3526 / 320, two extraction
-   runs; `index.json` declares 51). Consumers index by column position, so a
-   naive glob either crashes or silently averages two feature spaces. The first
-   §2a run was contaminated (AUC 0.685 → 0.7065 once filtered).
-   `transfer/featureio.py` resolves the dimension from `index.json`.
-4. **§2c resolved: v1 uses 8 keypoints, v2 uses 7.** `index.json` has
-   `speed_kp0..7`; v2's `pipeline.py` drops `tail_tip`, the highest-amplitude
-   marker on the animal.
+`install_gpu.slurm` is a one-time preflight, deliberately **not** chained into
+`submit.sh` — it would put a gpu-partition job on the critical path of every
+submission to redo work that only changes when the driver does. `doctor.slurm`
+moved to `partition=gpu` because `nvidia-smi` does not exist on a login node
+(verified), so a driver recommendation is impossible anywhere else; it keeps
+using the default venv on purpose, since its job is to compare installed
+against recommended. `02_compare_latents.slurm` moved to `partition=gpu
+--gres=gpu:1` with `--gpu on` (not `auto`): a silent CPU fallback would spend
+the whole 36h GPU allocation, and `gpu.resolve()` already raises in the first
+second instead. `01_align.slurm` stays CPU on `normal` — `gpu.py`'s own
+reasoning is that the pooled PCA is a 14×14 eigenproblem; only HDBSCAN, which
+labels all 28.6M frames of the current project, is worth a device. Also
+removed the vestigial `module load python/3.11.4` from `01_align.slurm` and
+`doctor.slurm`, where it was silently shadowed by the 3.13 venv activated on
+the next line.
+**Why:** GPU support was half-decided: the CLI had `--gpu auto|on|off` and
+capability probes, but the HPC scripts ran `--gpu off` on `partition=normal`
+and `doctor` could only report what was already installed, never what to
+install — leaving no path from "GPU is idle" to "GPU is working."
+**Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/cli.py`,
+`vieb_v2/hpc/install_gpu.slurm` (new), `vieb_v2/hpc/doctor.slurm`,
+`vieb_v2/hpc/02_compare_latents.slurm`, `vieb_v2/hpc/submit.sh`,
+`vieb_v2/hpc/01_align.slurm`, `vieb_v2/tests/test_gpu.py`,
+`vieb_v2/tests/test_cli.py`, `_utils.py:90-177`, #3, #32, #52
 
-§2a degeneracy came out at **AUC 0.7065, CI [0.661, 0.729]** — between the
-brief's two thresholds, so posture retains a real but insufficient locomotor
-signature. It is a **proxy**: no per-recording raw pose exists in this project,
-so both sides come from v1 features rather than the v2 aligned space.
+## 54 — Diffusion maps: isolated landmarks must be pruned, and every λ=1 eigenvector dropped
+**Decision/finding:** Root-caused the v2 GPU job that ran 18h on CPU with a
+silent log (job 46264, `--gpu on`). Two independent defects, one data-shaped
+and one control-flow-shaped, compounded:
 
-§8's MoSeq control was written (`transfer/stage8_moseq_control.py` +
-`hpc/stage8_moseq_control.sbatch`) but not run — `results.h5` needs h5py, absent
-and unavailable under PEP-668 on the dev box. It is now the highest-value next
-step: §3's failure says no Markovian coarse-graining exists *on this
-representation*, and §8 is what discriminates representation from behavior.
-Note the run shows 21 syllables, not the 48 the brief cites.
-**Why:** The brief made §3 a falsification gate with a decision rule fixed in
-advance and forbade tuning a failed stage. The gate failed on a robust, well-
-verified implementation, so that is the finding.
+*The embedding.* `DiffusionMap.fit` built its operator on 3000 landmarks
+sampled evenly in time. On the 28.6M-frame project ~142 of those are outlier
+poses that no neighbourhood reaches, so each forms its own connected component.
+A disconnected component contributes an eigenvalue of **exactly 1.0**, and
+since 1.0 is the largest eigenvalue the operator admits, those spikes sort to
+the *top* of the spectrum and evict every genuine mode from the retained set —
+measured participation ratio ≈ 1 (each "coordinate" was a spike on one
+landmark). The embedding degenerated into component indicators: **20k frames
+collapsed onto 29 distinct points**. Fixed by `_prune_isolated`, which drops
+landmarks whose off-diagonal kernel mass is below `MIN_NEIGHBOR_MASS = 1.0`
+("one effective neighbour"), iteratively, re-resolving epsilon each round.
+Measured on the real checkpoint: 142/3000 pruned (4.7%), epsilon essentially
+unchanged (478.6 vs 501.4), spectrum decays properly (λ₁ 0.988 → λ₈ 0.935),
+exactly one trivial eigenvector, **49,869/50,000 distinct embedded points**.
+
+Rejected: connecting the same graph by *raising* epsilon instead. Binary search
+puts the smallest connecting bandwidth at the 90.3rd percentile of pairwise
+distances — 12.7× the default — which is deep in the short-circuit regime
+`EPSILON_PERCENTILE` was tuned to avoid (the module's own measurements put p50
+at rank-corr 0.09). Dropping a handful of unreachable outlier poses is both
+cheaper and more honest than over-smoothing the whole manifold to accommodate
+them.
+
+*The eigenvector mask.* `_non_trivial` looked for the first λ=1 eigenvector
+that was *constant* and `break`ed. On a connected operator λ=1 has multiplicity
+1 and is constant, so that read correctly. On a disconnected one the
+multiplicity equals the component count and `eigh` returns an arbitrary basis
+of that eigenspace — component indicators, not constants — so the constancy
+test recognised none of them and let all but one through. Now keyed on the
+eigenvalue alone, with `n_trivial_eigenvectors > 1` warning loudly
+(`DegenerateOperatorWarning`) since that is the signature of an operator that
+is still fragmented.
+
+*The silent fallback.* `representation/cluster.py:cluster()` caught every
+`_fit_gpu` exception with a bare `except Exception: result = None` and no log,
+so cuML dying on the degenerate embedding was invisible and CPU HDBSCAN
+inherited 28.6M points. `--gpu on` now re-raises with the original exception
+chained (`gpu.explicitly_requested()` shares `resolve()`'s spelling tuple, so
+there is one source of truth for what counts as a demand for GPU); `auto`
+still falls back, but via `GPUFallbackWarning` rather than silence. This is
+the same principle as #53 — fail in the first second rather than spend the
+allocation — extended from capability-probe time to fit time, which is where
+it actually bit.
+**Why:** `--gpu on` existed precisely so a GPU job could not quietly become a
+CPU job, but the guarantee stopped at the capability probe; a runtime failure
+walked straight past it. And the degenerate embedding would have produced
+meaningless states even if the clustering had finished.
+**Related:** `vieb_v2/representation/diffusion.py`,
+`vieb_v2/representation/cluster.py`, `vieb_v2/representation/gpu.py`,
+`vieb_v2/cli.py` (`_report_operator_health`),
+`vieb_v2/tests/test_diffusion.py`, `vieb_v2/tests/test_cluster.py` (new), #53,
+#34
+
+## 55 — Koopman attractor-topology decomposition built and synthetically verified; its real-data half deferred on an unmet `flow-field` prerequisite
+**Decision/finding:** Added `vieb_v2/representation/koopman.py` (+
+`vieb_v2/tests/test_koopman.py`) on branch `koopman`: global SVD-based DMD,
+per-region affine Koopman operators, and topology extraction (fixed points,
+limit cycles, basins, separatrices) where a behavioral state is a **basin of
+attraction**, not a density peak — so the state count is an output, not a
+parameter. No clustering runs in this path.
+
+The prompt specifying this work gated it on the `flow-field` branch (Prompt A)
+having run on real Luna data with an acceptable `v_coherence` distribution.
+That gate is **unmet and cannot be evaluated here**: no `flow-field` branch
+exists locally or on `origin`, `v_coherence` appears nowhere in the tree or
+history, and `/home/carlos/vieb` (the Luna project in `projects.json`) is not
+present on this machine. `VUS-1` and `compare_methods.py`, named as the output
+format and comparison target, also do not exist. So the topology machinery plus
+its known-answer verification — which the prompt itself ordered first — was
+built, and the Luna run, the VUS-1 emit and the confound *report* were not.
+Basin labels use `-1` = near-separatrix, matching `metrics.NOISE_LABEL`, so
+`cluster_metrics` / `speed_diagnostics` already score them unchanged and
+`noise_speed_ratio` / `size_speed_rank_corr` need no new code when the gate
+clears. On-disk shape reuses `checkpoints.save` (`labels`/`probabilities`/
+`index`), identical to `labels.npz`; the `VUS-1` name is deferred until a spec
+exists.
+
+Four findings worth not rediscovering:
+1. **Local operators must be affine.** `p -> A p` cannot represent circulation
+   about any point but the origin, so a limit-cycle arc reports contraction
+   instead of rotation. Implemented by centering both snapshot matrices, which
+   makes the least-squares `A` the affine one and lets global and local fits
+   share one code path.
+2. **Region pairs are selected by origin frame, not both endpoints.** A local
+   operator is the flow map *on* a region; its image is not the region. On a
+   cycle the per-frame step routinely exceeds a cell's width, so the
+   both-endpoints rule produced *zero* pairs for precisely the fast regions
+   whose rotation matters, and the cycle went undetected.
+3. **Graph edges need an absolute count floor, not only a share floor.** A
+   sparse transient region owns a large Voronoi cell, so one stray frame can be
+   >2% of its outgoing mass. Unpruned, a single noise excursion welded both
+   basins into one recurrent set and every attractor vanished. Defaults are now
+   `min_edge_frac=0.05` **and** `min_edge_count=3`.
+4. **Eigenvalues cannot separate a freeze from a gait.** A stable spiral and a
+   stable limit cycle both have complex eigenvalues of modulus near 1, and a
+   `||v||` percentile threshold is no better because a fixed point sits inside
+   the population defining it. The discriminator is **direction coherence**
+   (mean cosine between consecutive step vectors): ~1 on a cycle, ~0 at a
+   noise-driven fixed point, and scale-free so it needs no calibration to the
+   latent's arbitrary units.
+
+**Why:** Extracting attractor topology from a flow that was never validated
+would read structure out of noise — the prompt's own stated reason for the
+gate. The synthetic half has no dependence on the flow field, so it was
+deliverable in full and is what makes the real-data half trustworthy later.
+The verification system deviates from the suggested "damped oscillator + Van
+der Pol in separate regions": two disjoint regions share no boundary, so the
+separatrix check would pass vacuously, and Van der Pol's period has no closed
+form outside `mu -> 0`. Used instead is
+`r' = -k r (r-a)(r-b), theta' = omega`, whose fixed point, separatrix (the
+unstable cycle at `r=a`), stable cycle (period exactly `2*pi/omega`) and basins
+are all known analytically. Verified over 6 seeds: 1 fixed point + 1 limit
+cycle every time, recovered period 1.004–1.030 s (eigenvalue) and 1.000 s
+(return time) against a true 1.000 s, basin accuracy 0.997–1.000.
+**Related:** `vieb_v2/representation/koopman.py`,
+`vieb_v2/tests/test_koopman.py`, `vieb_v2/representation/metrics.py`,
+`vieb_v2/representation/checkpoints.py`, `vieb_v2/representation/embed.py`
+(the boundary guard this mirrors)
+
+## 56 — Merging `v2` into `koopman`: v2's GPU/driver stack wins wholesale, and the `.sbatch` suite replaces the `.slurm` one
+
+**Decision:** `v2` and `koopman` solved the same GPU-preflight problem in
+parallel from a shared base (`dd67c6d`). The merge resolves toward `v2` in
+every overlapping file rather than splicing the two:
+
+1. **`representation/gpu.py` and `representation/diffusion.py` take `v2`
+   wholesale.** `v2`'s driver detection (`GPU_STACKS` / `detect_nvidia_driver`
+   / `select_gpu_stack` / `stack_message`) is a strict superset of koopman's
+   `RAPIDS_STACKS` path, and its `diffusion.py` carries the lookup-table-collapse
+   and Nyström-NaN fixes that koopman's copy predates. `use_gpu` defaults to
+   `False`, so koopman-side callers that dropped the kwarg still work.
+2. **`cmd_doctor` keeps only `v2`'s body.** The automatic merge appended
+   koopman's tail block to `v2`'s, and that block reads `install_command`,
+   `recommended_stack` and `python_version` — keys `v2`'s `report()` does not
+   emit, so `doctor` raised `KeyError` on every invocation. The block was
+   deleted rather than aliased into `report()`: `v2`'s lines above it already
+   print the recommended stack, the `stack_message`, and the 3.11-vs-3.13 venv
+   caveat, so aliasing would only have duplicated the advice.
+3. **`hpc/submit.sh` and the `.sbatch` suite are koopman's**; the four
+   re-added `.slurm` files (`01_align`, `02_compare_latents`, `doctor`,
+   `install_gpu`) were deleted. `hpc/README.md` documents the `.sbatch` suite,
+   and `install_gpu` is a plain `./install_gpu.sh`, not a batch job — the three
+   stale `hpc/install_gpu.slurm` references in `cli.py` were repointed.
+
+**Also:** every `.sbatch` (and `install_gpu.sh`) hardcoded
+`source "$HOME/vieb/venv/bin/activate"`. That venv is Python 3.13, which
+`install_gpu.sh` itself warns cannot host RAPIDS; the GPU stack lives in a
+separate 3.11 venv. All five now use `VENV="${VENV:-$HOME/vieb/venv}"`, so the
+venv is selectable per-submission without editing tracked files. This
+generalizes the local path hack that was sitting in `git stash`, which is
+therefore obsolete — it patches files this merge deleted.
+
+**Why:** Two parallel solutions to one problem cannot both survive without a
+rule for which wins; picking per-file by supersededness keeps one driver-
+detection code path instead of two that drift. The `KeyError` is the concrete
+cost of splicing instead of choosing.
+**Related:** `vieb_v2/representation/gpu.py`, `vieb_v2/representation/diffusion.py`,
+`vieb_v2/cli.py`, `vieb_v2/hpc/*.sbatch`, `vieb_v2/hpc/install_gpu.sh`,
+`vieb_v2/hpc/README.md`, decisions #53, #54, #55
+
+## 57 — Koopman wired to the CLI; the separatrix kNN is subsampled, and its `-1` is joined by index, never position
+
+**Decision:** `koopman.py` had no caller — no CLI subcommand, no sbatch, no
+importer (decision #55 deferred the real-data half). It is now reachable as
+`python -m cli koopman`, with three changes forced by the jump from
+verification scale (14k frames) to Luna (4925 sessions, 28,626,107 frames --
+12x the "~2.3M frames" `_knn_indices` was written against):
+
+1. **The separatrix neighbour index is fitted on a subsample.** A
+   fit-and-query over all pairs is what does not scale, not the query. Above
+   `--knn-sample` (default 1,000,000) frames the index is fitted on a seeded
+   subsample and *every* frame is queried against it, so every frame still gets
+   a label — only the pool of possible neighbours is sampled. This mirrors what
+   `--hdbscan-sample` already does for clustering. `knn_sample` and
+   `knn_subsampled` are written into the report so an approximate result is
+   visible rather than implied; `--knn-sample 0` forces the exact index.
+2. **`n_jobs=-1` on the neighbour query.** sklearn defaults to one core, and
+   the query is the whole cost at this scale: 28.6M frames against a 1M-point
+   index in 9-D measures ~150 min single-threaded.
+3. **The per-row `np.unique` loop is gone.** Counting distinct neighbour
+   labels row by row is fine at 14k rows and hopeless at 28.6M. It is now a
+   sort-and-count. The obvious sentinel implementation is a **bug** under
+   NumPy 2: `np.where(labels >= 0, labels, np.iinfo(np.int64).max)` on an
+   `int32` array silently wraps the sentinel to `-1` under weak promotion
+   rather than upcasting, so noise reads as a distinct state and frames are
+   over-flagged as transitions. Sorting alone separates the classes — every
+   negative sorts ahead of every valid label — so no sentinel is needed.
+
+**Index alignment.** `koopman_labels.npz` carries the same three arrays as
+`labels.npz` and drops into the same slot, but the two are **not** positionally
+comparable: Koopman labels every frame of `scores.npz` (28,626,107) while
+HDBSCAN labels the delay-embedded frames (28,586,707), fewer by one window per
+recording (4925 x 8 = 39,400). They must be joined on the `index` array
+(`recording`, `frame`) both checkpoints carry. Its `-1` is `metrics.NOISE_LABEL`
+by value but means *near a separatrix*, not HDBSCAN noise.
+
+**Also:** `compare-latents` computes latents in memory and never writes
+`scores.npz`; only `latent` does. Since Koopman reads `scores.npz`, a
+`latent.sbatch` was added to checkpoint one latent per `OUT_DIR`.
+`--n-regions` is the one free parameter that could manufacture the state
+count, so `koopman.sbatch` documents sweeping it into *separate* out-dirs —
+`koopman_labels.npz` has a fixed name and arms sharing an out-dir would
+overwrite each other's labels and registry.
+
+**Why:** The state count is supposed to be an output. That claim is only worth
+anything if the parameter that could fake it has been varied, and if the
+approximations taken to make the run feasible are recorded where a reader will
+see them.
+**Related:** `vieb_v2/representation/koopman.py`, `vieb_v2/cli.py`,
+`vieb_v2/hpc/koopman.sbatch`, `vieb_v2/hpc/latent.sbatch`,
+`vieb_v2/representation/checkpoints.py`, decisions #53, #55
+
+## 58 — The `.sbatch` rewrite dropped #53's GPU venv wiring; every gpu job silently ran on the CPU venv
+**Decision/finding:** Jobs 46982/46986 (`embed_cluster`, `--gres=gpu:1`) held
+two GPUs at 0% utilisation for 4.5h while one CPU core did HDBSCAN on
+28.6M×45 points. Root cause is a regression from #56: the `.slurm` → `.sbatch`
+port carried #53's *venv* forward but not the *wiring to it*. #53 established
+`$HOME/vieb/venv-gpu` (python/3.11.4 + RAPIDS) with the path recorded in
+`hpc/.gpu_venv` and "checked by `submit.sh` before queuing and by
+`02_compare_latents` on start". After the port, no script read the marker, the
+marker itself had been renamed to `.venv-gpu` (so `.gitignore` no longer
+matched it and it showed up untracked), and every gpu-partition script sourced
+`$HOME/vieb/venv`  — Python 3.13, CPU-only, no `cuml`. The `module load
+python/3.11.4` line #53 removed as "silently shadowed by the 3.13 venv
+activated on the next line" had also come back in all of them.
+
+`embed_cluster.sbatch` (added later, in e76c67c) compounded it by defaulting
+`GPU=auto` where #53 had ruled `on` for gpu-partition jobs. **`auto` is the one
+setting with no diagnostic at all**: #54 added `GPUFallbackWarning` for a
+*fit-time* cuml failure, but when `gpu.resolve()` simply never selects the GPU —
+because cuml was never importable — there is no warning anywhere. The 4.5h log
+is three lines, none of them about the GPU. This is the third time this failure
+class has appeared (#53 the capability probe, #54 fit-time, now import-time).
+
+**Fixed by** restoring #53's arrangement rather than reinventing it: `VENV`
+defaults to `$HOME/vieb/venv-gpu` in `full_pipeline`, `02_compare_latents` and
+`embed_cluster`, each failing with a pointed message if it is absent;
+`embed_cluster` now defaults `GPU=on`; `submit.sh` re-checks the venv before
+queuing anything, since stage 2 failing on start otherwise wastes stage 1's
+alignment. `install_gpu.sh` also targeted the default venv, which would have
+installed RAPIDS into the 3.13 env #53 specifically ruled out — it now targets
+and, if needed, builds `venv-gpu`. `doctor.sbatch` deliberately keeps the
+default venv, per #53's reasoning that it compares installed against
+recommended. `.gitignore` updated to the marker's actual name.
+
+Dropped the marker file as a source of truth: nothing read it, and a plain
+default plus an existence check gives the same protection without a second
+place for the path to drift. Kept it gitignored as local state.
+
+**Measured, for calibration:** CPU HDBSCAN fitted on 20k points at 45-D takes
+18.3s to `approximate_predict` one 25k batch; the full job is 1,144 batches.
+Progress inferred from RSS growth (`_predict_batched` fills `labels`/`probs`
+sequentially) put the 45-D arm at ~19h of prediction remaining against a 12h
+wall — it would have died with nothing written.
+**Why:** #53 and #54 both concluded "fail in the first second rather than spend
+the allocation," and both were correct; the guarantee was lost not in the logic
+but in a file rename and a default. A capability that is only enforced by a
+default in six separate scripts will be lost again, so the check now lives at
+submission time as well as job start.
+**Related:** `vieb_v2/hpc/embed_cluster.sbatch`,
+`vieb_v2/hpc/02_compare_latents.sbatch`, `vieb_v2/hpc/full_pipeline.sbatch`,
+`vieb_v2/hpc/install_gpu.sh`, `vieb_v2/hpc/submit.sh`,
+`vieb_v2/hpc/.gitignore`, `vieb_v2/hpc/README.md`, jobs 46982/46986, #53, #54,
+#56
+
+## 59 — `transfer-operator` branches off `koopman`, not `main`, and four of Prompt C's premises were wrong
+
+**Decision:** the `transfer-operator` branch is cut from `koopman`, not from
+`main` as the brief specified. `main` contains **zero** `vieb_v2/` files — no
+`representation/`, no `koopman.py`, no `.sbatch` suite. `koopman` is 56 commits
+ahead of `main` and 0 behind, so it strictly contains it. Branching off `main`
+would have discarded the very module the brief's §6 says to repurpose.
+
+**Findings that changed the plan**, each verified on disk before any code:
+
+- **No k-means microstate assignments exist.** The brief says "you already have
+  them, do not rebuild." `koopman.partition()` computes `region_ids` and
+  `save_topology` (`koopman.py:896`) writes only `labels`/`probabilities`/
+  `index` — the assignments never reach disk. They must be rebuilt.
+- ~~**MoSeq produced 42 distinct syllables** (39 above the frequency floor), not
+  the 48 the brief cites.~~ **Wrong — retracted.** Counted over all 3,846 result
+  CSVs, MoSeq emits exactly **48** distinct syllables, of which 28 clear a 0.1%
+  frequency floor. The brief's 48 was correct and this entry's correction of it
+  was not. (`N_REGIONS=48` in `koopman.sbatch:37` is a coincidence, not the
+  source.) The same count confirms something more useful: MoSeq's total is
+  **22,355,989 frames**, identical to the deduplicated alignment, which is an
+  independent check on the h5/csv dedup from a tool that never saw it.
+- **`compare_methods.py` and any VUS-1 consumer do not exist**, so "so
+  `compare_methods.py` works unchanged" is unachievable. ExBias is the only
+  producer and its one run has `n_states: 0`.
+- **`behavior_metrics.py`'s pooled-index bug is already fixed**
+  (`behavior_metrics.py:269-288` masks by `recording_id`). A residual defect
+  remains and is *not* fixed here: `load_pose_aligned` omits the
+  confidence-weighted smoothing `exbias.prepare` applies, so `C_shape`/`C_pred`
+  are measured on a different signal than the bounds were derived from.
+- **§0c is already resolved**: K=7, `tail_tip` dropped at `keypoints.py:32`.
+  Only the docstring at `keypoints.py:5` was wrong — it listed a keypoint order
+  contradicting `DEFAULT_BODYPARTS` at L19. Fixed.
+
+**Why:** the brief is a structural argument from prior measurements, and it says
+so (§10: "none of this has been tested on this data"). Checking its premises
+against the repo before building on them cost an hour and removed four
+dependencies on things that were not true.
+**Related:** `vieb_v2/representation/{align,checkpoints,keypoints,pose_loader,
+koopman}.py`, `vieb_v2/cli.py`, #55, #57
+
+## 60 — Alignment discarded arena position and heading; `align_all_full` keeps them
+
+**Decision/finding:** `align_all` (`align.py:114`) returns `align_session(...)[0]`
+and drops `theta`; the weighted centroid is computed at L89 and never surfaced.
+The v2 aligned space is therefore purely postural — translation and heading are
+gone by construction, so freezing and steady locomotion are degenerate in it.
+v1's `PoseFeatureExtractor` computed `centroid_speed` and `angular_velocity` in
+Layer 1; the v2 path dropped both.
+
+Delay embedding cannot repair this. It recovers derivatives of what was
+*measured*, and these were subtracted before measurement.
+
+Added `align_all_full()` returning `{aligned, reference, theta, centroid}`
+alongside the unchanged `align_all`, plus public `weighted_centroid()` and
+`frame_weights()` so a caller reconstructing the centroid uses exactly the
+weights the alignment used. **Verified against a synthetic rigid body under a
+known time-varying rotation: `heading = -theta` to 6.2e-15**, and the centroid
+reproduces arena position exactly under uniform weights.
+
+**Why:** additive rather than a change to `align_all`, so `cmd_align` and
+`test_align.py` are untouched and the 206-test suite stays green. The locomotor
+channels land in a new `latent_plus.npz` beside `scores.npz` rather than
+replacing it, which is what makes "did restoring them change the answer?"
+answerable instead of assumed.
+**Related:** `vieb_v2/representation/align.py`, `checkpoints.py` `EXTRA_FILES`,
+#59
+
+## 61 — The positive control passes emphatically: MoSeq already separates Context A after conditioning
+
+**Finding:** Prompt C's §8 asked whether any Keypoint-MoSeq syllable shifts in
+Context A post-shock, on the grounds that it is free and bounds how broken the
+representation is. It does, overwhelmingly.
+
+Syllable 1, across the whole design (mean occupancy, 298 animals, every animal
+in every phase, all recordings truncated to a common 5,381 frames):
+
+| phase | occupancy |
+|---|---|
+| CFC d0 Context A — conditioning | 0.095 |
+| CFC d1 Context A No Shock — **retrieval** | **0.463** |
+| CFC d2 Context C — novel context | 0.170 |
+| CFD d3–d7 Context A | 0.429 → 0.552 → 0.597 → 0.602 → 0.597 |
+| CFD d3–d7 Context B | 0.351 → 0.435 → 0.419 → 0.414 → 0.398 |
+
+Paired Wilcoxon per syllable on per-animal means, BH FDR: **33/35 syllables at
+q < 0.05** for retrieval vs conditioning; syllable 1 at q = 8.4e-47, rank-biserial
++0.98. The A−B discrimination gap widens monotonically across the CFD days
+(+0.078, +0.117, +0.178, +0.188, +0.199).
+
+The profile is what freezing should look like: near-absent while the animal is
+naive, quadrupled on re-exposure to the conditioned context, only mildly raised
+by a *novel* context, and increasingly context-selective as discrimination is
+learned. We have not confirmed the label against the grid movies, so it is a
+candidate, not an identification.
+
+**Two controls, both required before believing it:**
+- *Session length.* Context A sessions run ~6,302 frames against ~5,392 for
+  Context B/C — the shock protocol needs the time — so a syllable whose rate
+  drifts within a session would separate the arms for free. Truncating every
+  recording to a common 5,381 frames *increases* the effect (0.119→0.463
+  becomes 0.095→0.463). Not a length artifact.
+- *Sign-flip null.* Swapping an animal's two arms negates its difference vector,
+  which is the exact randomization null for a paired signed-rank test. Over 100
+  repeats: median 0 significant, mean 0.15, **97% of repeats found none**, and
+  **0% reached the observed 33**. The occasional burst to 13 is compositional
+  dependence — occupancies sum to 1, so the 35 tests are strongly dependent and
+  the rejection count is overdispersed — which is why the whole distribution is
+  reported rather than a mean.
+
+**What this does and does not change.** The brief anticipated that a passing
+control would weaken §2's degeneracy claim. It does not, because it is not a
+test of the v2 representation: MoSeq runs its own egocentric alignment and fits
+an AR-HMM to pose *dynamics*, with centroid and heading jointly inferred rather
+than discarded. What it establishes is that the effect is present in this pose
+data and is findable — which converts every later negative result from ambiguous
+into interpretable. If the transfer operator cannot recover a state like this,
+the loss happened in the representation or the operator, not in the animals.
+§0a remains the decisive test of the aligned space.
+
+**Also fixed here:** the rank-biserial effect size was derived from scipy's
+two-sided `statistic`, which is `min(W+, W-)` and therefore signless — every
+syllable reported a positive effect, including ones whose occupancy had more
+than halved. Now computed from W+ and W- directly, and pinned by a test.
+
+**Related:** `vieb_v2/scripts/moseq_control.py`,
+`vieb_v2/tests/test_moseq_control.py`,
+`/home/tul26194/vieb2-results/transfer_operator/moseq_control/`, #59
+
+## 62 — The transfer operator clears its synthetic gate, and the gate corrected two of its own defaults
+
+**Decision/finding:** `representation/transfer_operator.py` passes five synthetic
+systems with analytically known answers, in 8 s. No real data goes near it until
+they pass. Three of the five caught something.
+
+**The duration control — the branch's central claim — holds.** A 3-state chain
+with geometric dwells: A and B entered essentially equally often (measured 607
+against 605, a 0.3% difference) while A occupies **19.4x** the time, plus a rare
+fast state C at 313 frames in 360,000. `pi` recovers the occupancy to within 1%
+and C survives the connected set at its correct measure. This is the confound
+dissolved rather than relabelled: a density-based clusterer cannot separate
+"where the animal spends time" from "what the animal is doing", because for it
+those are the same number.
+
+**Two defaults were wrong and the gate is what found them:**
+
+- `lag_margin` was 5.0, on the reasoning that a timescale only a few lags long
+  is fitted from a handful of eigenvalue digits. The Ornstein-Uhlenbeck system
+  measured that: OU's timescale is flat within 5% of its analytic 1/theta across
+  a **thirtyfold** lag range, and a 5x margin rejected all but the two shortest
+  lags of it — excluding exactly the regime where the estimate is best. Now 1.0,
+  the standard `y = tau` line.
+- `min_spectral_gap` was 1.2. OU's eigenvalues are exp(-n·theta·t), so its
+  consecutive timescale ratios are exactly (n+1):n and **t2/t3 = 2.00**. A gap
+  threshold at or below 2 cannot distinguish one-dimensional relaxation from
+  metastability at any tuning. Raised to 2.0, and — more importantly — the
+  verdict now requires eigenvector **sign structure** as a separate condition,
+  since that is the criterion that actually separates the two. OU passes plateau
+  and gap and is rejected only by sign structure, which is asserted directly.
+
+**Three test premises were wrong, not the code:**
+
+- *Limit cycle.* Aliasing lives in the eigenvalues, not the timescales. At half
+  an orbit the reversible operator is a shift by B/2, giving 12 two-cycles and
+  eigenvalues of exactly ±1 — the period-2 mode makes `t_imp` NaN *by design*,
+  since clipping a negative eigenvalue would report a fast process where there
+  is a rhythmic one. At a full orbit P is literally the identity (diagonal
+  fraction 1.000, 24 singleton components) and `operator_at_lag` correctly
+  refuses to report anything.
+- *i.i.d. noise.* Timescales **grow linearly** in tau on noise — lambda_2 sits at
+  the sampling floor and does not move, so t = -tau·dt/log(lambda_2) is
+  proportional to tau by construction. That linear growth is the null signature
+  the brief names as the falsification condition; asserting flatness would have
+  been asserting the opposite of the truth.
+- *Double well.* Read at tau=5 the second timescale is 171 s against an empirical
+  111 s; it converges downward through 119, 98, 90 to 87 as the lag grows. The
+  short-lag inflation is the near-identity artifact — with velocity hidden, a
+  particle that has barely moved looks like it stayed. Measured at a converged
+  lag the agreement is 0.81–0.85 across all three temperatures and the Arrhenius
+  slope comes out at -0.995 against a true barrier of -1.0.
+
+**One limit recorded rather than fixed:** at 60 microstates, k-means gives state
+C no centre at all — 313 points absorbed into a neighbour, the state gone before
+any operator is built. 120 resolves it. This is a discretization limit on rare
+states that the operator cannot repair and that nothing announces on real data.
+Pinned by its own test so the k choice reads as a measured requirement.
+
+**And one thing the operator cannot do, stated plainly:** a near-decomposable
+pooled chain *is* metastable, mathematically. Two sub-populations never observed
+moving between each other produce a real slow eigenvalue and a convincing
+plateau, and no pooled diagnostic distinguishes "states are behaviors" from
+"states are animals". The test demonstrates a pooled t2 more than 50x anything
+present within either group. Refitting within strata is the only thing that
+detects it, which is why `--stratify` is mandatory in the gate rather than
+advisory.
+
 **Related:** `vieb_v2/representation/transfer_operator.py`,
-`vieb_v2/tests/test_transfer_operator.py`, `vieb_v2/transfer/`,
-`vieb_v2/docs/TRANSFER_OPERATOR_FINDINGS.md`,
-`vieb_v2/hpc/stage8_moseq_control.sbatch`, #53
+`vieb_v2/tests/test_transfer_operator.py` (34 tests), #59, #61
+
+---
+
+## 63 — Alignment costs real locomotor information, but does not destroy it: AUC 0.79, not 0.5
+
+Prompt C §2a set up a two-way read: AUC ~0.5 means alignment destroyed the
+freeze/locomote distinction, AUC >~0.8 means it left a postural signature and
+restoring the channels is a refinement rather than a rescue. Measured on all
+3,846 recordings, the answer is **neither**, and the gap between the two models
+is the finding.
+
+| model | AUC | 95% CI (bootstrap over recordings) |
+|---|---|---|
+| logistic regression | 0.693 | [0.687, 0.698] |
+| gradient boosting | **0.790** | [0.784, 0.795] |
+| restored channels (circular) | 1.000 | wiring check only |
+
+Read off the logistic number alone, this looks like a strong degeneracy claim.
+It is not: **+0.097 of the signature is present but not linearly decodable**, and
+the boosted CI stops just short of 0.8 — close enough that the linear number
+alone would have overstated the case. `--model both` is therefore the default;
+a linear probe on its own cannot separate "the information is absent" from "the
+information is curved", and that distinction is the whole question here.
+
+The magnitude worth carrying into the writeup: the slow and fast terciles differ
+by **55x** in real speed (median 0.8 vs 43.8 px/s), and posture still recovers
+that only at 0.79. A 55-fold kinematic difference is not fully visible in the
+aligned representation, which is why §0b restores the channels rather than
+trusting delay embedding to reconstruct them — delay embedding recovers
+derivatives of what was measured, and centroid translation was subtracted
+before measurement.
+
+**Two protocol choices that carry the number.** The held-out split is **by
+recording**, not by frame: adjacent frames are near-copies, so a random frame
+split reports autocorrelation rather than generalization. The CI is a bootstrap
+over **recordings** for the same reason — the frame count is arbitrary, the
+session count is not.
+
+**Related:** `vieb_v2/representation/observations.py`,
+`vieb_v2/tests/test_observations.py` (27 tests), #60, Prompt C §2
+
+---
+
+## 64 — The §3 gate fails: no plateau at any lag, in both arms. The branch stops here.
+
+Prompt C §3 pre-registered the death condition: *"t_imp grows linearly in tau
+from the start, no plateau at any tau -> there is no Markovian coarse-graining
+at any resolution on this data. The branch dies here. Report it, stop, do not
+tune."* Measured on all 3,846 recordings at 500 Voronoi microstates, over lags
+from 0.033 s to 36 s, **there is no plateau** for t2, t3 or t4 — in either arm.
+
+| arm | dim | t2 at 0.033s | t2 at 36s | d log t2 / d log tau | verdict |
+|---|---|---|---|---|---|
+| pose PCs + restored channels | 11D | 0.611 s | 65.4 s | 0.670 | no plateau |
+| pose PCs only (control) | 9D | 0.546 s | 71.9 s | 0.707 | no plateau |
+
+**Neither artifact region the brief warns about explains it.** t2/tau >= 1.82
+everywhere, so this is not the small-lag near-identity region; lambda2 is still
+0.575 and declining at tau=36 s on 18.2M pairs, so it is not the large-lag noise
+region. **And the estimate is not broken**: at every one of the 26 lags all 500
+microstates are retained, `dropped_frame_frac` is 0, there is exactly one
+connected component, `leak_frac` is 0, `near_reducible` is False, and every lag
+carries 18.2–22.4M transition pairs.
+
+**How it fails is worth more than the fact that it fails.** The growth is
+scale-free rather than linear — the local exponent drifts monotonically from
+0.529 to 0.847, strictly between a plateau (0) and the trivial large-tau
+artifact (1). The leading eigenvalue violates the semigroup property in one
+consistent direction, **lambda2(2 tau) > lambda2(tau)^2 at every lag** (excess
++0.028 to +0.061, growing). Correlations decay more slowly than any single
+exponential at every scale from 33 ms to 36 s: long memory, no timescale
+separation.
+
+**Three confounds ruled out.** Reversibilization is not the cause — the
+counts-symmetrized estimator agrees within 2.2% (exponent 0.667 vs 0.670). The
+restored channels are not the cause and do not repair it — the pose-only control
+is marginally worse. Smoothing is not the cause — the control applies none and
+behaves identically.
+
+**The concern with the gate, recorded rather than acted on.** This is precisely
+what Costa et al. (the branch's own reference, §11) predict at K=1: the
+instantaneous observable is not the full state, implied timescales therefore
+grow with tau, and delay embedding to K* is their remedy — which is what §5a
+exists to do. §3 was specified to run *before* any delay embedding, so the gate
+as written may be falsifying K=1 rather than the branch. Per §3 and §9 the work
+stopped and nothing was tuned; whether to run §5a is the user's call.
+
+**Untested, and named as such:** one partition resolution (N=500). Coarse
+partitions bias timescales low, so a finer one raises the curve, but a power law
+does not become a plateau by rescaling.
+
+**Related:** `docs/TRANSFER_OPERATOR_FINDINGS.md`,
+`vieb_v2/hpc/to_02_timescales.sbatch`, job 47423, #60, #62, #63
+
+## 65 — The four arms scored on the MoSeq control's axis: the v2 default detects nothing, and `diffusion-Koopman` is the only arm within 2x of MoSeq
+
+**Decision/finding:** added `vieb_v2/results_analysis/` (collect, discriminate,
+rank, plots, report_html) on branch `v2_results`. The four arms in
+`koopman_comparison.json` had only ever been compared on **partition geometry**
+— state count, entropy, noise fraction — which describes a partition and says
+nothing about whether it tracks behavior. `discriminate.py` runs
+`scripts/moseq_control.py`'s statistics **verbatim** (per-animal means, paired
+Wilcoxon, BH-FDR, the same sign-flip null and frequency floor) on
+`labels.npz` / `koopman_labels.npz`. Only the labels change, so the numbers are
+commensurable with the §8 positive control.
+
+The ranking this produces contradicts the geometric one:
+
+| arm | states | max abs median shift at retrieval | truncated to 5,381 |
+|---|---|---|---|
+| MoSeq (reference) | 48 | **0.3605** | — |
+| diffusion-Koopman | 16 | **0.1867** | **0.2107**, 16/16 sig |
+| pca-Koopman | 43 | 0.0364 | 0.0391 |
+| diffusion-HDBSCAN | 37 | 0.0199 | 0.0193 |
+| pca-HDBSCAN | 6 | **0.0000** | **0/4 sig, null >= obs = 1.00** |
+
+Four findings worth not rediscovering:
+
+1. **`pca-HDBSCAN` — the v2 default `compare.py --cluster` path — is a null
+   detector on this data.** Its largest median paired difference across every
+   state is *exactly* 0.0; truncated, it finds nothing its own sign-flip null
+   does not reproduce 100% of the time. 99.2% of its clustered frames are one
+   state. Anything downstream consuming these labels is consuming noise.
+2. **`n_significant` is a power metric, not an effect metric, and at n=298
+   paired the two come apart completely.** `diffusion-HDBSCAN` scores 35/37
+   significant — a higher hit rate than MoSeq's 33/35 — on a top state moving
+   0.951 -> 0.971. Ranking by significant-state count puts it first and puts the
+   arm with a 0.55 -> 0.39 shift third. `rank.py` therefore weights `effect`
+   (0.35) above `coverage` (0.15), and that single choice is the whole
+   difference between the two rankings.
+3. **`noise_speed_ratio` predicts the behavioral result from geometry alone.**
+   Both HDBSCAN arms discard frames moving 9.7x and 19.0x faster than what they
+   keep; both Koopman arms sit at 1.34 and 0.60. The two arms that throw away
+   the fast frames are the two arms with no effect. This is the cheapest
+   available screen for a dead clustering.
+4. **The Koopman state count is a parameter in PCA space and partly an output
+   in diffusion space.** Sweeping `--n-regions` 12->192: pca gives
+   n ∝ r^1.04 (one attractor per region, so #55/#57's "the state count is an
+   output" fails outright), diffusion gives n ∝ r^0.71. 0 limit cycles at every
+   resolution in both arms.
+
+**The index was reconstructible, contrary to `recordings.py:1`.** That module
+states the map from `index[:,0]` back to a file "is not merely absent, it is not
+reconstructible after the fact", because `load_sessions` drops unreadable files
+into a never-persisted skip list. True in general; **verifiably false for this
+run** — `find_pose_files` returns 4,925 paths, `aligned.npz["lengths"]` has
+4,925 entries, and `frame_count(paths[i]) == lengths[i]` for all 4,925 exactly.
+A skipped file would break that correspondence, so an exact match is a positive
+check that the skip list was empty. `verify_index` performs it and **raises**:
+a silent off-by-one would attribute every recording's behavior to a neighbouring
+animal and still produce plausible p-values. This is what made the whole
+comparison possible.
+
+**Two corrections applied to the scoring, not to the fits.** The `koopman_*`
+runs predate the h5/csv dedup (#59), so 1,079 duplicate rows are collapsed
+before per-animal averaging. And every contrast was re-run truncated to MoSeq's
+common 5,381 frames, because session length is confounded with arm (Context A
+~6,302 frames vs ~5,392 for B/C). Truncation **strengthens**
+`diffusion-Koopman` and **erases** `pca-HDBSCAN` — the models themselves were
+still fit on double-counted data, and re-running the winning arm on the
+deduplicated alignment is the top next step.
+
+**Hypothesis for why `diffusion-Koopman` wins**, offered as a hypothesis:
+diffusion-map coordinates approximate the slowest-relaxing directions of a
+diffusion on the pose manifold — they are ordered by *timescale*, where PCA's
+are ordered by variance — so a basin decomposition computed in them is more
+likely to align with sustained behavioral regimes. Three independent signals
+agree: sublinear state scaling (r^0.71), a low transition fraction (13.9% vs
+pca's 47.7%), and a noise-speed ratio below 1 (0.60).
+
+**Does not settle why MoSeq wins.** MoSeq differs from every VIEB arm in
+representation *and* algorithm at once — it never subtracts the locomotor
+channels, and its stickiness prior makes syllables bouts by construction. The
+clean separation is to run Koopman on the 11-D observation space (#60's restored
+channels) and, separately, to add v1's HMM smoothing to the v2 path.
+
+**Why:** four algorithms had been run and compared only on quantities that
+cannot distinguish a decomposition that tracks behavior from one that does not.
+The §8 control already established the axis and the statistics; reusing them
+unmodified was cheaper than inventing a metric and made the reference arm
+directly comparable.
+**Related:** `docs/V2_MODEL_COMPARISON.md`, `docs/V2_RESULTS_CONTEXT.md`,
+`vieb_v2/results_analysis/`, `vieb_v2/tests/test_results_analysis.py`,
+#55, #57, #59, #60, #61, #64

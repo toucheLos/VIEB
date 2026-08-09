@@ -18,7 +18,19 @@ REPO_DIR="${REPO_DIR:-$HOME/vieb}"
 
 module purge
 module load python/3.11.4
-source "$HOME/vieb/venv/bin/activate"
+# Installs into the dedicated GPU venv, never the default one: per #53 the
+# default venv is Python 3.13, which RAPIDS 24.12 publishes no wheels for at
+# all, so targeting it would fail or silently resolve to a source tarball.
+VENV="${VENV:-$HOME/vieb/venv-gpu}"
+if [ ! -x "$VENV/bin/python" ]; then
+    echo "creating GPU venv: $VENV"
+    python -m venv "$VENV"
+    source "$VENV/bin/activate"
+    pip install --upgrade pip
+    pip install numpy pandas tables hdbscan
+else
+    source "$VENV/bin/activate"
+fi
 
 cd "$REPO_DIR/vieb_v2"
 
@@ -34,9 +46,9 @@ case "$py_version" in
         echo "python/3.11.4' does not change an existing venv. To rebuild:"
         echo
         echo "    module purge && module load python/3.11.4"
-        echo "    rm -rf $HOME/vieb/venv"
-        echo "    python -m venv $HOME/vieb/venv"
-        echo "    source $HOME/vieb/venv/bin/activate"
+        echo "    rm -rf $VENV"
+        echo "    python -m venv $VENV"
+        echo "    source $VENV/bin/activate"
         echo "    pip install numpy pandas tables hdbscan"
         echo
         read -r -p "Continue anyway? [y/N] " reply

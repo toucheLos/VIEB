@@ -36,6 +36,18 @@ if [ ! -d "$POSE_DIR" ]; then
     exit 2
 fi
 
+# Stage 2 is a gpu-partition job with GPU=on, so a missing GPU venv makes it
+# fail on start -- after stage 1 has already burned an alignment. Check before
+# queuing anything (#53). Deliberately not exported: stage 1 is a CPU job and
+# must keep using the default venv.
+GPU_VENV="${VENV:-$HOME/vieb/venv-gpu}"
+if [ "$GPU" != "off" ] && [ ! -x "$GPU_VENV/bin/python" ]; then
+    echo "error: GPU venv not found: $GPU_VENV" >&2
+    echo "  build it on a GPU node -- see hpc/README.md 'Quick start' step 2" >&2
+    echo "  or submit CPU-only: GPU=off ./submit.sh" >&2
+    exit 2
+fi
+
 n_pose=$(find "$POSE_DIR" -maxdepth 2 \( -name '*.h5' -o -name '*.csv' \) 2>/dev/null | wc -l)
 mkdir -p "$OUT_DIR"
 

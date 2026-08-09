@@ -17,6 +17,9 @@ redo alignment and PCA over millions of frames.
 GPU (--gpu auto|on|off) applies to HDBSCAN only. The pooled PCA is a 14x14
 eigenproblem and gains nothing from a device. "on" fails immediately if the GPU
 backend is unusable rather than silently spending a batch allocation on CPU.
+`doctor` reports whether a GPU works here and, from the driver version, which
+pinned RAPIDS stack to install; `doctor --print-packages` emits that stack as
+pip arguments, which is how hpc/install_gpu.sh builds its venv.
 
 Exit codes:
     0  completed
@@ -36,9 +39,11 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from representation import checkpoints, gpu, keypoints, run_registry  # noqa: E402
+from representation import checkpoints, gpu, keypoints, koopman  # noqa: E402
+from representation import observations, recordings, run_registry  # noqa: E402
+from representation import transfer_operator as top  # noqa: E402
 from representation import tune as tune_mod  # noqa: E402
-from representation.align import align_all, null_leakage  # noqa: E402
+from representation.align import align_all_full, null_leakage  # noqa: E402
 from representation.cluster import cluster as run_cluster  # noqa: E402
 from representation.cluster import seed_stability  # noqa: E402
 from representation.embed import embed_all  # noqa: E402
@@ -50,6 +55,7 @@ ALIGNED = checkpoints.ALIGNED
 SCORES = checkpoints.SCORES
 EMBEDDED = checkpoints.EMBEDDED
 LABELS = checkpoints.LABELS
+POSE_FRAME = checkpoints.POSE_FRAME
 
 OK, NEEDS_ATTENTION, FAILED = 0, 1, 2
 
@@ -90,11 +96,26 @@ def _load_pose(args):
             f"  so DLC must run first:\n"
             f"      python setup_dlc_training.py --analyze"
         )
+
+    # Deduplicate before anything else. DLC exports the same recording as both
+    # .h5 and .csv, and treating those as two recordings double-counts them in
+    # every pooled statistic downstream -- most damagingly in the stationary
+    # measure of the transfer operator, which is literally an occupancy count.
+    n_found = len(paths)
+    paths, duplicates, ambiguous = recordings.dedupe(paths)
+    if duplicates:
+        _log(f"deduplicated {n_found} file(s) -> {len(paths)} recording(s) "
+             f"({sum(len(v) for v in duplicates.values())} duplicate export(s) "
+             f"dropped, .h5 preferred)")
+    if ambiguous:
+        _log(f"  WARNING: {len(ambiguous)} recording(s) had several files of "
+             f"the same format; kept one by sort order: {ambiguous[:3]}")
     if args.limit:
         paths = paths[: args.limit]
 
     _log(f"loading {len(paths)} pose file(s) from {args.pose}")
-    sessions, bodyparts, skipped = load_sessions(paths, max_gap=args.max_gap)
+    sessions, bodyparts, skipped, kept_paths = load_sessions(
+        paths, max_gap=args.max_gap, return_paths=True)
     for path, why in skipped:
         _log(f"  skipped {os.path.basename(path)}: {why}")
     if not sessions:
@@ -102,7 +123,28 @@ def _load_pose(args):
     _log(f"{len(sessions)} recording(s), "
          f"{sum(len(p) for p, _ in sessions):,} frames")
     _log(f"bodyparts: {bodyparts}")
-    return sessions, bodyparts
+    return sessions, bodyparts, kept_paths
+
+
+def _save_manifest(out_dir, kept_paths, lengths, n_found, n_skipped):
+    """Persist which recording each row came from, and what it decodes to.
+
+    Without this the only identifier a checkpoint carries is position in a
+    `sorted()` glob, which shifts the moment a file becomes unreadable and
+    cannot be reconstructed afterwards.
+    """
+    rows, report = recordings.build_manifest(kept_paths, count_frames=False)
+    recordings.attach_lengths(rows, lengths)
+    report.update({"n_files_found": n_found, "n_skipped_on_load": n_skipped,
+                   "n_frames_after_load": int(np.sum(lengths))})
+    recordings.save_manifest(out_dir, rows, report)
+    _log(f"manifest: {report['n_recordings']} recording(s), "
+         f"{report['n_parsed']} parsed from filename, "
+         f"{report['n_frames_after_load']:,} frames")
+    if report["n_unparsed"]:
+        _log(f"  {report['n_unparsed']} recording(s) did not match the "
+             f"filename pattern: {report['unparsed_ids'][:3]}")
+    return rows, report
 
 
 # ------------------------------------------------------------------ commands
@@ -110,6 +152,17 @@ def _load_pose(args):
 def cmd_doctor(args):
     """Preflight, so a batch job is not queued against a broken environment."""
     report = gpu.report()
+
+    if args.print_packages:
+        # Machine-readable: hpc/install_gpu.sh pipes this into pip, which is
+        # why nothing else may touch stdout here. Needs only the stdlib, so it
+        # still answers before cuml/cupy exist -- no chicken-and-egg.
+        packages = report["recommended_stack_packages"]
+        if not packages:
+            print(f"[vieb2] {report['stack_message']}", file=sys.stderr)
+            return NEEDS_ATTENTION
+        print("\n".join(packages))
+        return OK
 
     _log(f"python           {sys.version.split()[0]}")
     _log(f"numpy            {np.__version__}")
@@ -122,7 +175,6 @@ def cmd_doctor(args):
     _log()
 
     _log(f"GPU device       {report['device'] or 'none visible'}")
-    _log(f"driver           {report['driver'] or 'not detected'}")
     _log(f"HDBSCAN on GPU   {report['hdbscan_gpu']}"
          + (f"  ({report['hdbscan_gpu_reason']})"
             if report["hdbscan_gpu_reason"] else ""))
@@ -133,6 +185,20 @@ def cmd_doctor(args):
         _log("VIEB_FORCE_CPU is set -- all GPU paths disabled")
     _log()
 
+    _log(f"NVIDIA driver     {report['driver'] or 'not detected'}"
+         + (f"  (CUDA {report['driver_cuda']})" if report["driver_cuda"] else ""))
+    if report["driver_gpu_name"]:
+        _log(f"driver GPU name   {report['driver_gpu_name']}")
+    if report["driver_error"] and not report["driver_ok"]:
+        _log(f"nvidia-smi        {report['driver_error'].splitlines()[0][:80]}")
+    _log(f"recommended stack {report['recommended_stack_label'] or 'none'}")
+    _log(report["stack_message"])
+    if report["recommended_stack_packages"] and not report["hdbscan_gpu"]:
+        _log("to build a venv for this stack:  ./hpc/install_gpu.sh")
+        _log("  (a separate python/3.11.4 venv -- the RAPIDS pins do not all")
+        _log("   publish wheels for the 3.13 the default venv is built on)")
+    _log()
+
     _log("GPU is used for HDBSCAN only. The pooled PCA is a 14x14")
     _log("eigenproblem, so cupy is not needed by the pipeline; it is")
     _log("reported because a broken cupy signals a misconfigured CUDA env.")
@@ -141,20 +207,6 @@ def cmd_doctor(args):
     _log("(adjusted Rand index 1.0000) but number the clusters differently,")
     _log("so a state id is only meaningful within one run. Untested at the")
     _log("~2.3M-frame scale of a full project. The backend used is recorded.")
-
-    if report["install_command"]:
-        _log()
-        _log(f"GPU clustering is unavailable. Driver {report['driver']} "
-             f"supports {report['recommended_stack']}.")
-        _log(f"Install it into this venv (Python {report['python_version']}):")
-        _log(f"    {report['install_command']}")
-        _log("--only-binary=:all: is deliberate: without it a missing wheel")
-        _log("becomes a source build that fails on a missing CUDA header.")
-        if report["python_version"] not in ("3.10", "3.11", "3.12"):
-            _log(f"NOTE: RAPIDS wheels may not exist for Python "
-                 f"{report['python_version']}. A venv is bound to the Python "
-                 f"that built it, so `module load python/3.11.4` alone will "
-                 f"not change it -- the venv must be recreated.")
 
     if report["loader_hint"]:
         _log()
@@ -167,7 +219,7 @@ def cmd_doctor(args):
 
 
 def cmd_align(args):
-    sessions, bodyparts = _load_pose(args)
+    sessions, bodyparts, kept_paths = _load_pose(args)
     kept = [b for b in bodyparts
             if str(b).strip().lower() not in keypoints.DROPPED_BODYPARTS]
     dropped = [b for b in bodyparts if b not in kept]
@@ -176,7 +228,8 @@ def cmd_align(args):
          f"rank ceiling {2 * len(kept) - 3}")
 
     t0 = time.time()
-    aligned, reference = align_all(selected)
+    full = align_all_full(selected)
+    aligned, reference = full["aligned"], full["reference"]
     flat = np.concatenate([a.reshape(a.shape[0], -1) for a in aligned])
     leak = null_leakage(flat)
     _log(f"aligned {len(aligned)} recording(s) in {time.time() - t0:.1f}s")
@@ -186,12 +239,287 @@ def cmd_align(args):
         _log("  WARNING: high leakage means the PCs are partly tracking "
              "likelihood noise rather than pose")
 
+    lengths = [len(a) for a in aligned]
     _save(os.path.join(args.out, ALIGNED),
           {**_pack([a.reshape(a.shape[0], -1) for a in aligned]),
            "reference": reference},
           {"bodyparts": kept, "dropped": dropped, "n_keypoints": len(kept),
            "expected_rank": 2 * len(kept) - 3, "null_leakage": leak})
+
+    # Arena position and heading, which the alignment removes. Saved beside the
+    # aligned pose rather than folded into it, so the pose-only arm stays
+    # exactly what it was and the two can be compared.
+    frame = [np.column_stack([c, t]).astype(np.float32)
+             for c, t in zip(full["centroid"], full["theta"])]
+    _save(os.path.join(args.out, POSE_FRAME), _pack(frame),
+          {"columns": ["centroid_x", "centroid_y", "theta"],
+           "units": ["pixels", "pixels", "radians"],
+           "note": "heading = -theta; theta is the rotation applied to the "
+                   "centred pose to bring it onto the reference"})
+    _log(f"saved arena position and heading for {len(frame)} recording(s)")
+
+    _save_manifest(args.out, kept_paths, lengths, len(kept_paths),
+                   len(kept_paths) - len(aligned))
     return OK
+
+
+def cmd_degeneracy(args):
+    """Stage 0a: can aligned pose alone tell a fast frame from a slow one?
+
+    The blocking question for this branch. `align_session` subtracts the
+    per-frame centroid and rotation, so if the answer is chance, freezing and
+    steady locomotion are degenerate in the v2 input and nothing built on top of
+    it can separate them -- delay embedding recovers derivatives of what was
+    measured, not of what was removed before measurement.
+
+    Run on the aligned pose directly rather than on PC scores: "aligned pose
+    only" is the claim being tested, and interposing a PCA would leave the
+    result depending on a component count nobody chose for this purpose.
+    """
+    aligned = _unpack(_load(os.path.join(args.out, ALIGNED))[0])
+    frame = _unpack(_load(os.path.join(args.out, POSE_FRAME))[0])
+    if len(frame) != len(aligned):
+        raise _Attention(
+            f"{len(frame)} frame array(s) but {len(aligned)} aligned -- "
+            f"pose_frame.npz is from a different run than aligned.npz")
+
+    models = (["logistic", "boosted"] if args.model == "both"
+              else [args.model])
+    out = {"n_recordings_total": len(aligned), "fps": float(args.fps),
+           "models": {}}
+
+    for name in models:
+        t0 = time.time()
+        res = observations.degeneracy(
+            aligned, frame, fps=args.fps, smooth_s=args.smooth_s,
+            n_folds=args.folds, seed=args.seed, n_boot=args.n_boot,
+            subsample=args.subsample, model=name)
+        out["models"][name] = res
+        lo, hi = res["ci95"]
+        _log(f"[{name}] tercile separability from aligned pose alone, "
+             f"{time.time() - t0:.1f}s")
+        _log(f"  AUC {res['auc']:.3f}  95% CI [{lo:.3f}, {hi:.3f}]  "
+             f"({res['n_boot_ok']} bootstrap resamples over recordings)")
+        _log(f"  {res['n_frames_scored']:,} frames from {res['n_recordings']} "
+             f"recording(s), held out by recording in {res['n_folds']} folds")
+        _log(f"  slow tercile median {res['median_speed_slow']:.1f} px/s, "
+             f"fast {res['median_speed_fast']:.1f} px/s "
+             f"(edges {res['speed_tercile_edges'][0]:.1f} / "
+             f"{res['speed_tercile_edges'][1]:.1f})")
+
+    # Read the verdict off the strongest model: the question is whether the
+    # information survives alignment, not whether one classifier finds it.
+    best = max(out["models"].values(), key=lambda r: r["auc"])
+    lo, hi = best["ci95"]
+    out["verdict_model"] = best["model"]
+    if hi < 0.6:
+        out["verdict"] = "degenerate"
+        _log("=> alignment destroys the freeze/locomote distinction. "
+             "Restoring the channels is a rescue, not an improvement.")
+    elif lo > 0.8:
+        out["verdict"] = "postural signature"
+        _log("=> locomotion leaves a strong postural signature. Restoring "
+             "the channels is an improvement rather than a rescue.")
+    else:
+        out["verdict"] = "partial"
+        _log(f"=> partial signature ({best['model']}, AUC {best['auc']:.3f}): "
+             f"well above chance, short of the 0.8 that would make the "
+             f"channels redundant.")
+
+    if len(out["models"]) > 1:
+        lin = out["models"]["logistic"]["auc"]
+        nl = out["models"]["boosted"]["auc"]
+        out["nonlinear_gain"] = float(nl - lin)
+        _log(f"   nonlinear gain {nl - lin:+.3f} -- the part of the signature "
+             f"that is present but not linearly decodable")
+
+    path = os.path.join(args.out, "degeneracy.json")
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2)
+    _log(f"wrote {path}")
+    return OK
+
+
+def _microstates(args, aligned, frame):
+    """Observation space, then a Voronoi partition of it.
+
+    Density-based clustering is deliberately absent. The measured diagnosis for
+    this dataset is that density in frame space is confounded with duration --
+    frames arrive at uniform time intervals, so sampling density along a
+    trajectory goes as 1/|v|. A Voronoi partition makes no density claim: it is
+    a bookkeeping device for counting transitions, and the occupancy it implies
+    is reported separately as pi rather than being used to define states.
+    """
+    latent = make_latent("pca", args.var_threshold, args.n_components,
+                         1.0, None, 1, 3000).fit(aligned)
+    scores = latent.transform_all(aligned)
+    report = latent.spectrum_report()
+    _log(f"pooled PCA: q={report['n_components']} components, "
+         f"{report['explained_variance']:.1%} of variance")
+
+    obs, obs_report = observations.build(
+        scores, frame, fps=args.fps, smooth_s=args.smooth_s,
+        include=not args.pose_only)
+    _log(f"observations: {obs_report['n_observations']}D "
+         f"({'pose only' if args.pose_only else 'pose + restored channels'})")
+    if not args.pose_only:
+        _log(f"  channel scales before standardising: " + ", ".join(
+            f"{k}={v:.3g}" for k, v in obs_report["channel_scale"].items()))
+        _log(f"  largest channel/PC scale ratio "
+             f"{obs_report['scale_ratio_before_standardising']:.1f}x -- "
+             f"neutralised by per-block standardisation")
+
+    t0 = time.time()
+    ids, centers = koopman.partition(obs, n_regions=args.n_states, seed=args.seed)
+    n_used = int(centers.shape[0])
+    occupancy = np.bincount(np.concatenate(ids), minlength=n_used)
+    _log(f"partitioned into {n_used} microstates in {time.time() - t0:.1f}s; "
+         f"smallest holds {occupancy.min():,} frames, largest "
+         f"{occupancy.max():,} ({occupancy.max() / occupancy.sum():.2%})")
+    return ids, n_used, {"latent": report, "observations": obs_report,
+                         "occupancy_min": int(occupancy.min()),
+                         "occupancy_max": int(occupancy.max())}
+
+
+def cmd_timescales(args):
+    """Stage 1: the falsification gate. Does a Markovian coarse-graining exist?
+
+    Builds the Ulam matrix on a Voronoi partition and sweeps the lag. The
+    decision rule is fixed before the run: a plateau in the implied timescales
+    over some lag window means timescale separation exists and the branch
+    continues; linear growth in tau from the start, with no plateau anywhere,
+    means there is no Markovian coarse-graining at any resolution on this data
+    and the branch dies here.
+
+    Two regions of the curve are artifacts and are excluded by construction
+    rather than by eye: at very small tau the matrix is near-identity and every
+    eigenvalue degenerates toward 1, and at very large tau the rows become noisy
+    copies of pi and every timescale grows linearly.
+    """
+    aligned = _unpack(_load(os.path.join(args.out, ALIGNED))[0])
+    frame = _unpack(_load(os.path.join(args.out, POSE_FRAME))[0])
+    if len(frame) != len(aligned):
+        raise _Attention(
+            f"{len(frame)} frame array(s) but {len(aligned)} aligned -- "
+            f"pose_frame.npz is from a different run than aligned.npz")
+
+    ids, n_states, build_report = _microstates(args, aligned, frame)
+    lengths = np.array([len(a) for a in aligned])
+    del aligned, frame
+
+    # The lag ceiling is set by the recordings, not by taste. A 3-minute
+    # recording cannot report a 60 s timescale: the estimate needs several
+    # relaxations inside one recording, and beyond that the operator is
+    # measuring the recording length.
+    horizon_s = float(args.horizon_frac * np.median(lengths) / args.fps)
+    tau_max_s = min(args.tau_max_s, horizon_s * args.tau_max_frac)
+    taus = top.make_taus(args.fps, tau_max_s, n_tau=args.n_tau)
+    _log(f"recordings: median {np.median(lengths):,.0f} frames "
+         f"({np.median(lengths) / args.fps:.0f}s), shortest {lengths.min():,} "
+         f"({lengths.min() / args.fps:.0f}s)")
+    _log(f"lag sweep {taus.min() / args.fps:.3g}s -> {taus.max() / args.fps:.3g}s "
+         f"in {taus.size} steps; horizon {horizon_s:.0f}s "
+         f"(={args.horizon_frac:g} x median recording)")
+    if args.tau_max_s > tau_max_s:
+        _log(f"  capped from the requested {args.tau_max_s:g}s: beyond the "
+             f"horizon the curve measures recording length, not dynamics")
+
+    t0 = time.time()
+    sweep = top.its_sweep(ids, n_states, taus, args.fps, k=args.k,
+                          horizon_s=horizon_s)
+    _log(f"implied timescales in {time.time() - t0:.1f}s "
+         f"({int(sweep['ok'].sum())}/{taus.size} lags estimable)")
+
+    gate = top.plateau_gate(sweep)
+    for p, e in sorted(gate["processes"].items()):
+        if e["has_plateau"]:
+            pl = e["plateau"]
+            _log(f"  t{p + 1}: plateau {pl['tau_lo_s']:.3g}-{pl['tau_hi_s']:.3g}s "
+                 f"at {pl['plateau_s']:.3g}s "
+                 f"(spanning {pl['tau_ratio']:.1f}x in lag, "
+                 f"flatness {pl['flatness']:.3f}), gap to next "
+                 f"{e.get('timescale_ratio_to_next') or float('nan'):.2f}")
+        else:
+            _log(f"  t{p + 1}: no plateau")
+    _log(f"  => {gate['verdict']}")
+
+    out = {"n_states": n_states, "fps": float(args.fps), "gate": gate,
+           "taus_s": sweep["taus_s"].tolist(),
+           "its_s": np.where(np.isfinite(sweep["its"]), sweep["its"],
+                             None).tolist(),
+           "diagnostics": sweep["diagnostics"], "horizon_s": horizon_s,
+           "build": build_report,
+           "n_recordings": len(ids),
+           "median_recording_s": float(np.median(lengths) / args.fps),
+           "pose_only": bool(args.pose_only)}
+
+    # Only worth the cost once something survived the gate.
+    if gate["any_plateau"]:
+        tau_star = int(round(max(
+            e["plateau"]["tau_lo_s"] for e in gate["processes"].values()
+            if e["has_plateau"]) * args.fps))
+        out["tau_star"] = tau_star
+        out["tau_star_s"] = tau_star / args.fps
+        _log(f"tau* = {tau_star} frames ({tau_star / args.fps:.3g}s)")
+
+        t0 = time.time()
+        ck = top.ck_test(ids, n_states, tau_star, args.fps, n_max=args.ck_n)
+        out["ck"] = ck
+        if ck.get("ok"):
+            for r in ck["rows"]:
+                if r["ok"]:
+                    _log(f"  CK n={r['n']}: err {r['err']:.4f} "
+                         f"(worst row {r['err_max_row']:.3f}, "
+                         f"{r['n_pairs']:,} pairs)")
+                else:
+                    _log(f"  CK n={r['n']}: {r['reason']}")
+        _log(f"  Chapman-Kolmogorov in {time.time() - t0:.1f}s")
+
+        t0 = time.time()
+        held = top.holdout_ck(ids, n_states, tau_star, args.fps,
+                              n_max=args.ck_n, seed=args.seed)
+        out["holdout_ck"] = held
+        if held.get("ok"):
+            _log(f"  held-out CK ({held['n_shared_states']} shared states): " +
+                 ", ".join(f"n={r['n']} {r['err_holdout']:.4f}"
+                           for r in held["rows"] if r["ok"]))
+        _log(f"  held-out Chapman-Kolmogorov in {time.time() - t0:.1f}s")
+
+        if args.n_boot:
+            t0 = time.time()
+            # Bootstrap a subset of the lag grid. Each replicate is a weighted
+            # bincount over every pair in the dataset -- 22M of them here -- so
+            # the full 28-lag grid at 200 resamples is 5,600 passes for a curve
+            # whose CIs are read at a handful of lags. Log-spaced so the
+            # plateau, and both artifact regions bracketing it, are all covered.
+            pick = np.unique(np.linspace(0, taus.size - 1,
+                                         min(args.boot_n_tau, taus.size)
+                                         ).astype(int))
+            boot_taus = taus[pick]
+            _log(f"  bootstrapping {boot_taus.size} of {taus.size} lags "
+                 f"({args.n_boot} resamples each)")
+            boot = top.bootstrap_its(ids, n_states, boot_taus, args.fps,
+                                     n_boot=args.n_boot, seed=args.seed,
+                                     k=min(args.k, 6))
+            out["bootstrap"] = {
+                "taus_s": boot["taus_s"].tolist(),
+                "lo": np.where(np.isfinite(boot["lo"]), boot["lo"], None).tolist(),
+                "hi": np.where(np.isfinite(boot["hi"]), boot["hi"], None).tolist(),
+                "mode_stability": np.where(np.isfinite(boot["mode_stability"]),
+                                           boot["mode_stability"], None).tolist(),
+                "same_support_frac": np.where(
+                    np.isfinite(boot["same_support_frac"]),
+                    boot["same_support_frac"], None).tolist(),
+                "n_boot": args.n_boot}
+            _log(f"  block bootstrap ({args.n_boot} resamples over recordings) "
+                 f"in {time.time() - t0:.1f}s")
+
+    name = f"timescales_{args.tag}.json" if args.tag else "timescales.json"
+    path = os.path.join(args.out, name)
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2, default=float)
+    _log(f"wrote {path}")
+    return OK if gate["any_plateau"] else NEEDS_ATTENTION
 
 
 def cmd_latent(args):
@@ -228,6 +556,8 @@ def cmd_latent(args):
         if report["alpha"] < 1.0:
             _log("  alpha<1 lets sampling density distort the embedding: "
                  "densely sampled (slow) regions get compressed")
+        _report_operator_health(report)
+        _report_degenerate_extensions(report)
 
     _save(os.path.join(args.out, SCORES),
           {**_pack(scores)},
@@ -248,6 +578,48 @@ def _report_rank(report, meta):
             _log(f"  WARNING: q={report['n_components']} exceeds the rank "
                  f"ceiling -- lower --var-threshold so noise directions are "
                  f"not retained")
+
+
+def _report_operator_health(report):
+    """Report landmark pruning and the stationary-eigenvector count.
+
+    These are the two numbers that distinguish a diffusion map from an
+    expensive lookup table. n_trivial_eigenvectors > 1 means the operator was
+    disconnected and the coordinates encode component membership rather than
+    geometry -- the failure that once sent a 36h GPU job down the CPU path with
+    nothing in the log to say so.
+    """
+    pruned = report.get("n_landmarks_pruned", 0)
+    kept = report.get("n_landmarks", 0)
+    if pruned:
+        _log(f"  pruned {pruned:,} isolated landmark(s), {kept:,} kept "
+             f"(epsilon {report.get('epsilon', float('nan')):.1f})")
+
+    trivial = report.get("n_trivial_eigenvectors", 1)
+    if trivial > 1:
+        _log(f"  WARNING: {trivial} eigenvalues equal 1.0 where a connected "
+             f"operator has exactly 1 -- the embedding reflects which "
+             f"disconnected piece a frame landed in, not the manifold. Raise "
+             f"--epsilon or --n-landmarks before trusting these states.")
+
+
+def _report_degenerate_extensions(report):
+    """Warn when Nystrom extended a frame from an empty landmark neighborhood.
+
+    n_degenerate_extensions > 0 usually means a single mistracked keypoint put
+    a frame far outside epsilon_'s neighborhood, not that the animal jumped --
+    see representation/diffusion.py's module docstring. Those frames get a
+    defined (zero) embedding rather than crashing, but a high fraction is
+    worth knowing about.
+    """
+    n = report.get("n_degenerate_extensions", 0)
+    if not n:
+        return
+    frac = report.get("degenerate_extension_frac", 0.0)
+    _log(f"  WARNING: {n:,} frame(s) ({frac:.4%}) fell outside every "
+         f"landmark's neighborhood and got a zero embedding -- likely "
+         f"single mistracked keypoints, not real jumps. Raise --epsilon "
+         f"or check upstream tracking/alignment if this fraction is large.")
 
 
 def cmd_embed(args):
@@ -337,6 +709,94 @@ def cmd_cluster(args):
     return OK
 
 
+def cmd_koopman(args):
+    """Behavioral states as basins of attraction -- no clustering is run.
+
+    Reads `scores.npz`, not `embedded.npz`: the Koopman operator is fitted on
+    consecutive frames of the latent itself, so the delay embedding HDBSCAN
+    needs would be a second, redundant history. That is also why the label
+    array is longer than HDBSCAN's -- no boundary window is dropped -- and why
+    the two must be joined on `index`, never positionally.
+
+    The state count is an output here, not a parameter. `--n-regions` is the
+    one free knob that could manufacture it, so sweep it before believing it.
+    """
+    data, meta = _load(os.path.join(args.out, SCORES))
+    scores = _unpack(data)
+
+    t0 = time.time()
+    result = koopman.extract_topology(
+        scores, fps=args.fps, n_regions=args.n_regions,
+        v_percentile=args.v_percentile, knn=args.knn, seed=args.seed,
+        min_edge_frac=args.min_edge_frac, min_edge_count=args.min_edge_count,
+        coherence_tol=args.coherence_tol, knn_sample=args.knn_sample,
+    )
+    report = result["report"]
+    labels = result["labels"]
+    _log(f"koopman topology over {labels.size:,} frames from "
+         f"{len(scores)} recording(s) in {time.time() - t0:.1f}s")
+    _report_topology(report)
+
+    metrics = cluster_metrics(labels)
+    speed = speed_diagnostics(labels, np.concatenate(scores, axis=0))
+    _report_metrics(metrics, speed)
+
+    path = koopman.save_topology(
+        os.path.join(args.out, checkpoints.KOOPMAN_LABELS), result)
+    _log(f"wrote {path}")
+
+    run_registry.record(
+        args.out,
+        latent_method=meta.get("latent_method", "pca"),
+        params={"n_regions": report["n_regions"], "fps": args.fps,
+                "v_percentile": args.v_percentile,
+                "coherence_tol": args.coherence_tol,
+                "min_edge_frac": args.min_edge_frac,
+                "min_edge_count": args.min_edge_count,
+                "knn": args.knn, "knn_sample": args.knn_sample,
+                "method": "koopman"},
+        metrics=metrics,
+        report=report,
+        source="cli",
+    )
+
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(_jsonable({"report": report, "metrics": metrics,
+                                 "speed": speed}), fh, indent=2)
+        _log(f"wrote {args.json}")
+
+    if report["n_attractors"] < 2:
+        _log("fewer than two attractors -- the flow did not decompose; try a "
+             "larger --n-regions or a lower --min-edge-frac")
+        return NEEDS_ATTENTION
+    return OK
+
+
+def _report_topology(report):
+    _log(f"  {report['n_attractors']} attractor(s): "
+         f"{report['n_fixed_points']} fixed point(s), "
+         f"{report['n_limit_cycles']} limit cycle(s)")
+    _log(f"  over {report['n_regions']} regions -- the state count is an "
+         f"output, but sweep --n-regions before trusting it")
+    for period, ok in zip(report["limit_cycle_period_s"],
+                          report["limit_cycle_plausible"]):
+        if period:
+            _log(f"    cycle period {period:.3f}s = {1.0 / period:.2f} Hz"
+                 f"  plausible={ok}")
+    frac = report["transition_fraction"]
+    _log(f"  transition_fraction {frac:.4f} (frames near a separatrix)")
+    if frac >= 0.5:
+        _log("    WARNING: a majority of frames sit near a separatrix, so the "
+             "partition is doing the talking, not the animal")
+    if report["knn_subsampled"]:
+        _log(f"  separatrix kNN index fitted on a {report['knn_sample']:,}-frame "
+             f"subsample; every frame was still queried against it")
+    _log(f"  global DMD rank {report['global_rank']}, "
+         f"residual {report['global_residual']:.4g}, "
+         f"{report['n_growing_modes']} growing mode(s)")
+
+
 def cmd_run(args):
     for step in (cmd_align, cmd_latent, cmd_embed, cmd_cluster):
         code = step(args)
@@ -366,6 +826,11 @@ def cmd_compare_latents(args):
                              args.alpha, args.epsilon, args.diffusion_time,
                              args.n_landmarks).fit(aligned)
         scores = latent.transform_all(aligned)
+        latent_report = latent.spectrum_report()
+        if method != "pca":
+            _report_operator_health(latent_report)
+            _report_degenerate_extensions(latent_report)
+
         embedded, _ = embed_all(scores, args.n_lags, args.lag_stride)
         if embedded.shape[0] == 0:
             raise _Attention(f"{method}: no frames survived delay embedding")
@@ -376,7 +841,7 @@ def cmd_compare_latents(args):
         results[method] = {
             "metrics": cluster_metrics(labels),
             "speed": speed_diagnostics(labels, embedded),
-            "latent": latent.spectrum_report(),
+            "latent": latent_report,
             "backend": backend,
             "seconds": time.time() - t0,
         }
@@ -429,12 +894,173 @@ def _print_latent_comparison(results, args):
     print("=" * 72)
 
 
+def cmd_compare_koopman(args):
+    """HDBSCAN states beside Koopman basins, for both latents.
+
+    Four arms from two out-dirs. Every arm is scored with the *same* metrics --
+    Koopman's `-1` is already `metrics.NOISE_LABEL` -- so nothing here is
+    special-cased for the method that produced the labels.
+    """
+    arms, joins = {}, {}
+    for latent, out in (("pca", args.pca_out), ("diffusion", args.diffusion_out)):
+        if not out:
+            continue
+        hdb = _score_labels(out, LABELS, EMBEDDED, "embedded")
+        koop = _score_labels(out, checkpoints.KOOPMAN_LABELS, SCORES, None)
+        if hdb:
+            arms[f"{latent}-HDBSCAN"] = hdb
+        if koop:
+            arms[f"{latent}-Koopman"] = koop
+        if hdb and koop:
+            joins[latent] = _join_on_index(hdb, koop)
+
+    if not arms:
+        raise _Attention(
+            f"no labels found under {args.pca_out!r} or {args.diffusion_out!r}"
+            f" -- run `cluster` and `koopman` first")
+
+    _print_koopman_comparison(arms, joins)
+
+    if args.json:
+        payload = {
+            "arms": {k: {"metrics": v["metrics"], "speed": v["speed"],
+                         "report": v["report"]} for k, v in arms.items()},
+            "index_join": joins,
+        }
+        with open(args.json, "w") as fh:
+            json.dump(_jsonable(payload), fh, indent=2)
+        _log(f"wrote {args.json}")
+    return OK
+
+
+def _score_labels(out, labels_name, points_name, points_key):
+    """Load one arm's labels and score them against the space they live in."""
+    path = os.path.join(out, labels_name)
+    if not os.path.exists(path):
+        _log(f"skipping {path} -- not found")
+        return None
+
+    data, meta = checkpoints.load(path)
+    labels, index = data["labels"], data["index"]
+
+    pdata, _ = checkpoints.load(os.path.join(out, points_name))
+    points = (pdata[points_key] if points_key
+              else np.concatenate(_unpack(pdata), axis=0))
+
+    return {"labels": labels, "index": index, "n_frames": int(labels.size),
+            "metrics": cluster_metrics(labels),
+            "speed": speed_diagnostics(labels, points),
+            "report": {k: v for k, v in meta.items()
+                       if k in ("n_attractors", "n_fixed_points",
+                                "n_limit_cycles", "n_regions",
+                                "transition_fraction", "knn_subsampled",
+                                "knn_sample", "limit_cycle_period_s",
+                                "limit_cycle_plausible", "min_cluster_size",
+                                "hdbscan_backend", "hdbscan_sample")}}
+
+
+def _join_on_index(hdb, koop):
+    """Align two label arrays on (recording, frame) -- never positionally.
+
+    Koopman labels every frame of `scores.npz`; HDBSCAN labels the delay-
+    embedded frames, which are fewer by one window per recording. Comparing
+    them row by row would silently offset every recording after the first.
+    """
+    def key(index):
+        # One int64 per frame. Frame counts are ~10^4, so a 10^6 stride keeps
+        # recordings from colliding while staying far inside int64.
+        return index[:, 0].astype(np.int64) * 1_000_000 + index[:, 1]
+
+    hk, kk = key(hdb["index"]), key(koop["index"])
+    order = np.argsort(kk)
+    pos = np.searchsorted(kk[order], hk)
+    pos[pos >= kk.size] = 0
+    matched = kk[order][pos] == hk
+
+    hl = hdb["labels"][matched]
+    kl = koop["labels"][order][pos[matched]]
+
+    both = (hl >= 0) & (kl >= 0)
+    agree_noise = float(((hl < 0) == (kl < 0)).mean()) if hl.size else None
+    return {
+        "n_hdbscan_frames": int(hdb["n_frames"]),
+        "n_koopman_frames": int(koop["n_frames"]),
+        "n_joined": int(matched.sum()),
+        "n_dropped_by_delay_window": int(koop["n_frames"] - matched.sum()),
+        "both_assigned_frac": float(both.mean()) if hl.size else None,
+        "noise_agreement_frac": agree_noise,
+        "adjusted_rand": _adjusted_rand(hl[both], kl[both]),
+    }
+
+
+def _adjusted_rand(a, b):
+    """ARI between two partitions, on the frames both assigned."""
+    if a.size == 0:
+        return None
+    try:
+        from sklearn.metrics import adjusted_rand_score
+    except ImportError:
+        return None
+    return float(adjusted_rand_score(a, b))
+
+
+def _print_koopman_comparison(arms, joins):
+    names = list(arms)
+    print()
+    print("=" * 78)
+    print("HDBSCAN states vs Koopman basins -- same alignment, same latents")
+    print("=" * 78)
+    header = f"{'metric':<26}" + "".join(f"{n:>26}" for n in names)
+    print(header)
+    print("-" * len(header))
+
+    def fmt(v):
+        return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float)
+                                        else str(v))
+
+    def row(label, fn):
+        print(f"{label:<26}" + "".join(f"{fmt(fn(arms[n])):>26}" for n in names))
+
+    row("n_states", lambda r: r["metrics"]["n_states"])
+    row("n_frames", lambda r: r["n_frames"])
+    row("noise_frac", lambda r: r["metrics"]["noise_frac"])
+    row("largest_state_frac",
+        lambda r: r["metrics"]["clustered_only"]["largest_state_frac"])
+    row("state_entropy",
+        lambda r: r["metrics"]["clustered_only"]["state_entropy"])
+    row("noise_speed_ratio", lambda r: r["speed"].get("noise_speed_ratio"))
+    row("size_speed_rank_corr", lambda r: r["speed"].get("size_speed_rank_corr"))
+    row("n_fixed_points", lambda r: r["report"].get("n_fixed_points"))
+    row("n_limit_cycles", lambda r: r["report"].get("n_limit_cycles"))
+    row("n_regions", lambda r: r["report"].get("n_regions"))
+
+    for latent, j in joins.items():
+        print()
+        print(f"{latent}: joined on (recording, frame), not position")
+        print(f"  {j['n_koopman_frames']:,} koopman frames, "
+              f"{j['n_hdbscan_frames']:,} hdbscan frames, "
+              f"{j['n_joined']:,} joined")
+        print(f"  {j['n_dropped_by_delay_window']:,} frames exist only in "
+              f"koopman -- the delay window hdbscan drops per recording")
+        print(f"  both assigned {fmt(j['both_assigned_frac'])}   "
+              f"noise agreement {fmt(j['noise_agreement_frac'])}   "
+              f"ARI {fmt(j['adjusted_rand'])}")
+
+    print()
+    print("noise means different things per column: HDBSCAN's -1 is a frame")
+    print("that failed to cluster, Koopman's is a frame near a separatrix.")
+    print("They share a value, not a meaning. The Koopman flow field is")
+    print("unvalidated on this data (no v_coherence run), so these basins are")
+    print("exploratory. No winner is declared.")
+    print("=" * 78)
+
+
 def cmd_tune(args):
     scores_path = os.path.join(args.out, SCORES)
     if not os.path.exists(scores_path):
         _log("no scores checkpoint found; running align + pca first")
         cmd_align(args)
-        cmd_pca(args)
+        cmd_latent(args)
 
     data, _ = _load(scores_path)
     result = tune_mod.suggest(_unpack(data), fps=args.fps,
@@ -602,11 +1228,69 @@ def build_parser():
 
     sp = sub.add_parser("doctor", help="environment and GPU preflight")
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("--print-packages", action="store_true",
+                    help="print only the pinned packages of the RAPIDS stack "
+                         "matching the detected driver, one per line, for pip")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("align", help="drop noisy keypoints, align pose")
     pose_args(sp), out_args(sp), gpu_args(sp)
     sp.set_defaults(func=cmd_align)
+
+    sp = sub.add_parser("degeneracy",
+                        help="stage 0a: is speed recoverable from aligned pose?")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--smooth-s", type=float,
+                    default=observations.DEFAULT_SMOOTH_S,
+                    help="centroid smoothing before differentiating, SECONDS")
+    sp.add_argument("--folds", type=int, default=5)
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--n-boot", type=int, default=200)
+    sp.add_argument("--subsample", type=int, default=400_000,
+                    help="frames fed to the regression; 0 uses all")
+    sp.add_argument("--model", choices=("logistic", "boosted", "both"),
+                    default="both",
+                    help="logistic measures the linearly decodable signature "
+                         "only; the two differ by ~0.1 AUC on this data")
+    sp.set_defaults(func=cmd_degeneracy)
+
+    sp = sub.add_parser("timescales",
+                        help="stage 1: implied timescales -- the falsification "
+                             "gate for the whole branch")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--smooth-s", type=float,
+                    default=observations.DEFAULT_SMOOTH_S)
+    sp.add_argument("--pose-only", action="store_true",
+                    help="drop the restored channels -- the control arm")
+    sp.add_argument("--n-states", type=int, default=500,
+                    help="Voronoi microstates (not behaviours; deliberately "
+                         "many more than there will be macrostates)")
+    sp.add_argument("--var-threshold", type=float, default=0.95)
+    sp.add_argument("--n-components", type=int, default=None)
+    sp.add_argument("--k", type=int, default=15,
+                    help="leading eigenvalues to track")
+    sp.add_argument("--n-tau", type=int, default=28)
+    sp.add_argument("--tau-max-s", type=float, default=60.0,
+                    help="requested longest lag in SECONDS; capped by the "
+                         "recording length")
+    sp.add_argument("--horizon-frac", type=float, default=0.2,
+                    help="longest trustworthy timescale, as a fraction of the "
+                         "median recording")
+    sp.add_argument("--tau-max-frac", type=float, default=1.0,
+                    help="longest lag as a fraction of the horizon")
+    sp.add_argument("--ck-n", type=int, default=5)
+    sp.add_argument("--n-boot", type=int, default=200,
+                    help="block bootstrap resamples over recordings; 0 skips")
+    sp.add_argument("--boot-n-tau", type=int, default=10,
+                    help="lags to bootstrap, spread across the sweep; each "
+                         "replicate is a pass over every pair in the dataset")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--tag", default=None,
+                    help="suffix for the output json, so arms of the same "
+                         "sweep can share an --out directory")
+    sp.set_defaults(func=cmd_timescales)
 
     for name, helptext in (("latent", "pooled PCA or diffusion maps"),
                            ("pca", "alias for `latent` (backwards compatible)")):
@@ -621,6 +1305,44 @@ def build_parser():
     sp = sub.add_parser("cluster", help="HDBSCAN on the embedding")
     out_args(sp), gpu_args(sp), cluster_args(sp)
     sp.set_defaults(func=cmd_cluster)
+
+    # No gpu_args: this path is pure numpy/sklearn. The GPU accelerates
+    # HDBSCAN only, and no clustering is run here.
+    sp = sub.add_parser("koopman",
+                        help="basins of attraction as states (no clustering)")
+    out_args(sp)
+    sp.add_argument("--fps", type=float, default=30.0)
+    sp.add_argument("--n-regions", type=int, default=48,
+                    help="Voronoi cells the flow is partitioned into; the one "
+                         "free parameter that could manufacture the state "
+                         "count, so sweep it (default: %(default)s)")
+    sp.add_argument("--v-percentile", type=float, default=25.0,
+                    help="||v|| percentile below which a region counts as slow")
+    sp.add_argument("--coherence-tol", type=float, default=0.5,
+                    help="direction coherence separating a cycle from a freeze")
+    sp.add_argument("--min-edge-frac", type=float, default=0.05,
+                    help="share of outgoing mass an edge needs to survive")
+    sp.add_argument("--min-edge-count", type=int, default=3,
+                    help="absolute frame count an edge needs to survive; a "
+                         "sparse region's stray frame can clear the share floor")
+    sp.add_argument("--knn", type=int, default=12,
+                    help="neighbours voting on whether a frame is a transition")
+    sp.add_argument("--knn-sample", type=int, default=1_000_000, metavar="N",
+                    help="fit the separatrix neighbour index on at most N "
+                         "frames, then query all of them against it; 0 forces "
+                         "the exact all-frames index (default: %(default)s)")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--json", default=None, help="write the report as JSON")
+    sp.set_defaults(func=cmd_koopman)
+
+    sp = sub.add_parser("compare-koopman",
+                        help="HDBSCAN states vs Koopman basins, both latents")
+    sp.add_argument("--pca-out", default=None,
+                    help="out-dir holding the PCA arm's checkpoints")
+    sp.add_argument("--diffusion-out", default=None,
+                    help="out-dir holding the diffusion arm's checkpoints")
+    sp.add_argument("--json", default=None, help="write the comparison as JSON")
+    sp.set_defaults(func=cmd_compare_koopman)
 
     sp = sub.add_parser("run", help="align + latent + embed + cluster")
     pose_args(sp), out_args(sp), gpu_args(sp), embed_args(sp)

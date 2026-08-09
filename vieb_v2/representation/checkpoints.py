@@ -21,8 +21,27 @@ ALIGNED = "aligned.npz"
 SCORES = "scores.npz"
 EMBEDDED = "embedded.npz"
 LABELS = "labels.npz"
+# Basin labels sit beside HDBSCAN's rather than overwriting them: the two are
+# built from different frame sets (no delay window is dropped here), so both
+# must survive for the comparison to be possible at all.
+KOOPMAN_LABELS = "koopman_labels.npz"
 
 STAGE_FILES = (ALIGNED, SCORES, EMBEDDED, LABELS)
+
+# Arena position and heading, dropped by `align_all` and restored by
+# `align_all_full`: (T_r, 3) float32 [cx, cy, theta] per recording.
+POSE_FRAME = "pose_frame.npz"
+# Pose PCs with the locomotor channels concatenated -- a second arm beside
+# SCORES, never a replacement for it.
+LATENT_PLUS = "latent_plus.npz"
+# Ulam microstate assignments, and the operator spectrum built from them.
+MICROSTATES = "microstates.npz"
+TRANSFER = "transfer_operator.npz"
+
+# Deliberately NOT in STAGE_FILES: `completed_stages` is what the GUI Pipeline
+# page reads, so adding these would make every run that predates them render as
+# incomplete.
+EXTRA_FILES = (POSE_FRAME, LATENT_PLUS, MICROSTATES, TRANSFER)
 
 
 def pack(sessions):
