@@ -1,4 +1,4 @@
-# VIEB — Video Interpreter for Experimental Behavior
+# VIEB — Video Interpreter Excluding Bias
 
 > **Discover behavioral states you didn't know to look for.**
 
