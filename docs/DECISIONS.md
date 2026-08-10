@@ -1288,3 +1288,42 @@ directly comparable.
 **Related:** `docs/V2_MODEL_COMPARISON.md`, `docs/V2_RESULTS_CONTEXT.md`,
 `vieb_v2/results_analysis/`, `vieb_v2/tests/test_results_analysis.py`,
 #55, #57, #59, #60, #61, #64
+
+## 66 — Branch triage: `main` absorbs `v2_results`, 20 branches archived by tag, two real salvages found
+
+Every branch is tagged `archive/<name>` before deletion, so `git branch -a`
+becomes readable without anything becoming unrecoverable. `main` was
+fast-forwarded to `v2_results` (`1deb112`) first, since everything else is
+judged relative to it. Full disposition table in `docs/BRANCH_TRIAGE.md`.
+
+Four of the six local `claude/*` branches and `luna` were already merged.
+`experimental`, `koopman`, `transfer-operator`, and `v2` are fully contained in
+`v2_results` — the branch graph was far more linear than the plan assumed, and
+all 6 local branches needed no salvage at all.
+
+**Two dispositions contradict the plan's expectations, both verified not assumed:**
+
+`backup-local-pc` was predicted to be "a backup, not a branch." It is not: it
+carries the `vieb_v2/transfer/` stage package, absent from `main`, containing
+the implied-timescale and degeneracy machinery that `ulam-msm` (§4a/§4d) needs.
+It is *also* a broken merge — `306f483` was committed with unresolved conflict
+markers, which is why a three-dot `--shortstat` reported it as a clean
+`+2062/-0` superset. Salvaged the 7 conflict-free files in `ac250ec`; kept
+`main`'s side of the two conflicted ones.
+
+`worktree-statistics-methods` carries genuinely unmerged pluggable pose feature
+representations and a feature-ablation harness with 4 test files. Salvage is
+deferred to the §1d representation task so the code lands shaped to
+`RepresentationMeta` rather than being reworked twice.
+
+The `claude/*` branches the plan flagged as "real fixes" are **superseded, not
+lost**: their tests fail against `main` on API shape, not missing behaviour, and
+in the h5 case `main`'s behaviour is the one §1a wants. Stale tests were dropped
+rather than carried.
+
+**Why:** branches are for divergent development; models are parallel variants
+that must run side by side into one table, which cannot happen across branches
+without confounding representation with algorithm. Tagging before deleting is
+what makes deleting psychologically possible — nothing is lost, so nothing needs
+defending.
+**Related:** `docs/BRANCH_TRIAGE.md`, `ac250ec`, #65
