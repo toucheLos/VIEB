@@ -89,4 +89,13 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["ml*", "views*"]
+# Two roots during the bakeoff consolidation: the legacy flat modules at the
+# repo root, and the new src/vieb tree that models are being moved into.
+where = [".", "src"]
+include = ["ml*", "views*", "vieb*"]
+
+[tool.pytest.ini_options]
+# So `pytest` works from a checkout without an editable install, which is what
+# the local development loop and the fixture-based tests rely on.
+pythonpath = ["src", "."]
+testpaths = ["tests"]
