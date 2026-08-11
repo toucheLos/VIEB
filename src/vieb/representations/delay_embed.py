@@ -3,7 +3,7 @@
 Delay embedding lives here rather than in each model because the failure mode is
 silent: a K-frame window straddling two recordings produces a point that is
 half one animal and half another, and nothing downstream can tell. There is one
-implementation, it takes ``RepresentationMeta``, and it never crosses a seam.
+implementation, it takes ``PoseDataset``, and it never crosses a seam.
 
 K stays a *model* hyperparameter rather than being baked into the frozen
 representation, because §4a picks K by sweeping it — but every model that
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..models.base import RepresentationMeta
+from ..data.dataset import PoseDataset
 
 
 def embedded_length(n: int, k: int, stride: int = 1) -> int:
@@ -26,7 +26,7 @@ def embedded_length(n: int, k: int, stride: int = 1) -> int:
 
 def delay_embed(
     X: np.ndarray,
-    meta: RepresentationMeta,
+    data: PoseDataset,
     k: int,
     stride: int = 1,
     *,
@@ -49,8 +49,8 @@ def delay_embed(
     without reconstructing the offsets by hand.
     """
     X = np.asarray(X)
-    if X.shape[0] != meta.n_frames:
-        raise ValueError(f"X has {X.shape[0]} frames, meta has {meta.n_frames}")
+    if X.shape[0] != data.n_frames:
+        raise ValueError(f"X has {X.shape[0]} frames, dataset has {data.n_frames}")
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     if stride < 1:
@@ -62,7 +62,7 @@ def delay_embed(
     frm_idx: list[np.ndarray] = []
     dropped: list[str] = []
 
-    for r, (rid, sl) in enumerate(meta.slices()):
+    for r, (rid, sl) in enumerate(data.slices()):
         seg = X[sl]
         n_out = embedded_length(seg.shape[0], k, stride)
         if n_out <= 0:
@@ -79,19 +79,20 @@ def delay_embed(
     if not blocks:
         raise ValueError(
             f"delay embedding with k={k}, stride={stride} (span {span} frames) "
-            f"leaves no points: every one of {meta.n_recordings} recordings is "
+            f"leaves no points: every one of {data.n_recordings} recordings is "
             f"shorter than the window"
         )
 
     out = np.concatenate(blocks, axis=0)
-    if dropped:
-        out_meta_note = (
-            f"{len(dropped)} of {meta.n_recordings} recordings shorter than the "
+    if dropped and report is not None:
+        # Reported rather than warned so the caller can record it in the manifest:
+        # a run that silently dropped 200 short recordings and one that dropped
+        # none must not produce indistinguishable provenance.
+        report["dropped_recordings"] = list(dropped)
+        report["dropped_note"] = (
+            f"{len(dropped)} of {data.n_recordings} recordings shorter than the "
             f"{span + 1}-frame window and dropped"
         )
-        out = np.asarray(out)
-        # Attached rather than warned so the caller can record it in the manifest.
-        setattr(out, "_dropped_note", out_meta_note)
 
     if return_index:
         return out, np.concatenate(rec_idx), np.concatenate(frm_idx)
@@ -102,7 +103,7 @@ def scatter_labels(
     point_labels: np.ndarray,
     rec_index: np.ndarray,
     frame_index: np.ndarray,
-    meta: RepresentationMeta,
+    data: PoseDataset,
     *,
     fill: int = -1,
     backfill_window: bool = True,
@@ -115,8 +116,8 @@ def scatter_labels(
     purely as an artifact of the embedding. Set it False to label only each
     window's last frame and leave the rest ``fill``.
     """
-    labels = np.full(meta.n_frames, fill, dtype=np.int32)
-    b = np.asarray(meta.boundaries)
+    labels = np.full(data.n_frames, fill, dtype=np.int32)
+    b = np.asarray(data.boundaries())
     offsets = b[rec_index]
     labels[offsets + frame_index] = point_labels
 
@@ -124,7 +125,7 @@ def scatter_labels(
         # Walk backwards from each recording's first labelled frame, filling the
         # lead-in with that frame's label. Cheap and per-recording, so it can
         # never pull a label across a seam.
-        for k in range(meta.n_recordings):
+        for k in range(data.n_recordings):
             lo, hi = int(b[k]), int(b[k + 1])
             seg = labels[lo:hi]
             assigned = np.flatnonzero(seg != fill)

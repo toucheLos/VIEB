@@ -54,13 +54,17 @@ def short(h: str, n: int = 12) -> str:
 def run_dir(
     dataset: str,
     repr_hash: str,
-    model: str,
+    segmenter: str,
     cfg_hash: str,
     *,
     create: bool = False,
 ) -> Path:
-    """``<store>/<dataset>/<repr_hash>/<model>/<config_hash>/``."""
-    path = run_store() / dataset / short(repr_hash) / model / short(cfg_hash)
+    """``<store>/<dataset>/<repr_hash>/<segmenter>/<config_hash>/``.
+
+    Representation and segmenter are separate path components because they are
+    separate slots — this is what lets the run store be listed along either axis.
+    """
+    path = run_store() / dataset / short(repr_hash) / segmenter / short(cfg_hash)
     if create:
         (path / "logs").mkdir(parents=True, exist_ok=True)
         (path / "figures").mkdir(parents=True, exist_ok=True)
