@@ -83,9 +83,9 @@ class Registry:
 REPRESENTATIONS = Registry(
     "representation",
     {
-        "identity": ("vieb.representations.identity", "IdentityRepresentation"),
-        "pca": ("vieb.representations.pca", "PCARepresentation"),
-        "diffusion": ("vieb.representations.diffusion", "DiffusionRepresentation"),
+        "identity": ("vieb.representations.postural", "IdentityRepresentation"),
+        "pca": ("vieb.representations.postural", "PCARepresentation"),
+        "diffusion": ("vieb.representations.postural", "DiffusionRepresentation"),
         "engineered91": ("vieb.representations.engineered91", "Engineered91Representation"),
     },
 )
