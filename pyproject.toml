@@ -24,6 +24,8 @@ dependencies = [
     "pyyaml>=6.0",
     "joblib>=1.3",
     "h5py>=3.10",
+    # VUS-1 writes bouts.parquet; pandas needs an engine for it.
+    "pyarrow>=14",
     "tables>=3.8",
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",

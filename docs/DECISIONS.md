@@ -1327,3 +1327,113 @@ without confounding representation with algorithm. Tagging before deleting is
 what makes deleting psychologically possible — nothing is lost, so nothing needs
 defending.
 **Related:** `docs/BRANCH_TRIAGE.md`, `ac250ec`, #65
+
+## 67 — The bakeoff interface is two slots, not one: Representation x Segmenter
+
+`src/vieb/` acquired a `Model` contract in `f10df5b` that fused representation and
+algorithm into one plugin, with `RepresentationMeta` describing an array someone
+else had already built. That is the shape that made #65's comparison have to be
+assembled by hand: an artifact recording only "pca-HDBSCAN" cannot be grouped
+along either axis, so neither "how do the two latents compare?" nor "how do the
+two algorithms compare?" is answerable from the artifacts.
+
+The contract is now two independently named and registered slots, composed by the
+runner from config strings:
+
+    Representation.fit_transform(data) -> (n_frames, d)
+    Segmenter.fit(X, data, *, seed) ; Segmenter.predict(X, data) -> Segmentation
+
+`RepresentationMeta` became `data.PoseDataset`, which carries the keypoints rather
+than describing another array. `valid_windows(k, stride)` joins `slices()` as a
+supported way to respect a seam, and is tested to emit exactly the frames
+`delay_embed` does. `Segmentation` replaces a bare ndarray so an arm can return
+eigenvalues, separatrix labels or soft probabilities without a side channel.
+`n_states` counts *distinct assigned ids*, not `max + 1`.
+
+**Why:** representation as a separate frozen axis is what makes the table multiply
+— a new representation adds a column across every segmenter rather than one more
+unattributable row — and it is the only way to attribute MoSeq's win, which
+currently differs from every VIEB arm in representation *and* algorithm at once.
+
+**Related:** #65, #66, `MODELS.md`, `5b20d7a`, `a7a0f00`, `57d012d`, `3329492`
+
+## 68 — `ticc` and `flow_field` are dropped: the comparison closes at what exists
+
+Neither has an implementation in this repo, in any sibling tree, or on any branch.
+The registry listed both, pointing at modules that were never written, so
+selecting either raised an ImportError that read like a broken environment.
+`~/exbias/CLAUDE.md` already retracted the TICC figure it once quoted: "no TICC
+code or output exists anywhere."
+
+Seven arms remain: `vieb_v1`, `moseq`, `exbias`, and `{pca, diffusion}` x
+`{hdbscan, koopman}`. `hsmm` and `ulam` are added by later prompts.
+
+**Why:** a registry entry for a method that does not exist is worse than its
+absence — it fails at run time, in a way that looks like an environment problem,
+after the grid has already started.
+
+**Related:** #65, `MODELS.md`, `5b20d7a`
+
+## 69 — The port is verified against pre-dedup input, because §6a changed the input
+
+The verification gate requires each ported arm to reproduce its pre-port labels
+exactly. That is in direct tension with fixing the h5/csv duplication: the
+`koopman_*` runs were fit on 4,925 files / 28,626,107 frames, and the fixed loader
+yields 3,846 / 22,355,989. An arm cannot match a reference produced from different
+input.
+
+So `load_dataset(deduplicate=False)` reproduces the pre-dedup file set exactly,
+and the gate runs there — same input bytes, same seed, same params. The dedup is
+asserted separately. Both totals were verified on disk and are exact; 28,626,107
+is precisely the length of `koopman_labels.npz`.
+
+Two arms cannot be verified by refitting and are verified by construction instead:
+`moseq` (Gibbs-sampled AR-HMM, and the reference arm) and `exbias` (segments
+first, so it never consumes a per-frame representation) read their saved labels.
+`exbias` reproduces `n_states: 0`, `noise_frac: 1.0` exactly.
+
+`vieb_v1` has **no pre-port output anywhere on this machine** — no `_labels.npy`,
+no `results/shared/`, no `cluster_info.json`. The 222-recording run cited in
+`~/exbias/CLAUDE.md` (83.5% dominant state) is gone. Its reference must be
+captured by running the current code before Phase 4 touches `ml/` or `compare.py`.
+
+**Why:** "same seed, same params" is not sufficient if the input differs, and a
+silently changed method invalidates the whole comparison.
+
+**Related:** #59, #65, `a7a0f00`, `3329492`
+
+## 70 — Four boundary and unit defects found during the port: reported, not fixed
+
+Each changes an arm's output, so fixing any of them here would fail that arm's own
+verification gate. They are ported as-is and handed to a later prompt.
+
+- **`compare.py:926-933`** — `_fit_hmm` estimates its transition matrix from labels
+  concatenated across every recording, with noise frames *deleted* rather than
+  segmented around, so it counts a fabricated transition across each of ~3,845
+  recording seams and across every excised noise run. Its own comment asserts the
+  opposite. This is the one boundary leak that reaches a published v1 number.
+  Smoothing is applied per recording, so only the fitted matrix is contaminated.
+- **`vieb_v2/representation/tune.py:107`** — `suggest()` pools all recordings before
+  computing autocorrelation and delayed mutual information, then recommends the
+  delay-embedding `tau`, in a package whose other modules raise `TypeError` to
+  prevent exactly that.
+- **`vieb_v2/representation/metrics.py:106`** — `speed_diagnostics` diffs across
+  seams (one spurious large step per recording); `_mean_bout_length` counts a
+  seam-spanning run as one bout.
+- **`ml/feature_extraction.py`** — two edge conventions in one class:
+  `_compute_temporal_features` truncates its window at a recording head while
+  `_compute_movement_entropy` zero-fills. Its `smooth_window=5` and
+  `feature_window=30` are also unreachable from any caller, so they are hardcoded
+  to 0.17 s / 1.0 s at 30 fps and 0.02 s / 0.12 s at 250.
+
+Three defects *were* fixed, because each was a crash or a silent data-loss bug in
+code with no reference output to invalidate: `delay_embed` reported dropped
+recordings via `setattr` on an ndarray (always raises); `_read_dlc_csv` accepted
+any three-row-header parse as DLC layout, so flat csvs lost two data rows to
+headers; and the loader's skip list matched the full path, so a project under a
+directory named `metadata` found zero pose files.
+
+**Why:** the port's value is that it changes nothing. A defect found on the way
+past is worth writing down and worth not fixing in the same commit.
+
+**Related:** #60, #65, `a7a0f00`, `3329492`

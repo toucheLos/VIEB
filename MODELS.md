@@ -1,7 +1,8 @@
 # Models
 
-Every model is a plugin in `src/vieb/models/`, selected by name. Nothing else in
-the codebase branches on which arm is running.
+An arm is a **representation** crossed with a **segmenter**, each a plugin
+selected by name — `src/vieb/representations/` and `src/vieb/segmenters/`.
+Nothing else in the codebase branches on which arm is running.
 
 ```bash
 vieb models                                    # this table, live
@@ -34,15 +35,17 @@ it differs from every VIEB arm in representation *and* algorithm at once.
 | `koopman` | a basin of local affine Koopman operators | **runs** | #65 | best VIEB arm on `diffusion` (0.187) |
 | `moseq` | an AR-HMM syllable (external Keypoint-MoSeq) | **runs** | #65 | reference arm, 0.361. Pinned external dep, thin adapter |
 | `ulam` | Voronoi microstates + transfer-operator spectrum | **gate failed at K=1** | #64 | no plateau at any lag; see below |
-| `exbias` | — | code exists, **never scored** | — | `~/exbias/exbias.py`, 768 lines, standalone |
-| `vieb_v1` | HDBSCAN on 91 engineered features → UMAP | code exists, **never scored on this axis** | — | the flat `~/vieb` tree |
+| `exbias` | a maximal interval of smooth pose | **runs** (adapter reads its VUS-1) | — | `~/exbias/exbias.py`. Both runs: **0 states, noise 1.0** |
+| `vieb_v1` | HDBSCAN on 91 engineered features → UMAP | **runs** | — | UMAP-10 + HMM Viterbi. **No pre-port output on disk** (#69) |
 | `hsmm` | an explicit-duration AR-HSMM state | **not built** | — | Stage 2 |
 | `ulam_msm` | a macrostate from the coarse-grained spectrum | **not built** | — | Stage 2; resumes `ulam` with delay embedding |
 
-### Does not exist
+### Does not exist — dropped from the registry (#68)
 
 Two entries in the original plan's adapter list have no implementation anywhere
-in this repo, and are not merely unrun:
+in this repo, and are not merely unrun. Both were registered, pointing at modules
+that were never written, so selecting either failed in a way that read like a
+broken environment. They are no longer registered:
 
 - **`ticc`** (Toeplitz inverse covariance) — no code, no mention in any doc.
 - **`flow_field`** — `docs/V2_RESULTS_CONTEXT.md` records that
@@ -101,11 +104,65 @@ information, not ARI.
 
 ## Adding a model
 
-1. Implement `Model` (`src/vieb/models/base.py`): `fit`, `label`, `save`, `load`.
-2. Register it in `src/vieb/models/registry.py`.
+1. Implement `Segmenter` (`src/vieb/segmenters/base.py`): `fit(X, data, *, seed)`,
+   `predict(X, data) -> Segmentation`, `get_params`, `save`, `load`.
+2. Register it in `SEGMENTERS` (`src/vieb/registry.py`).
 3. Add `configs/models/<name>.yaml`.
+
+A new *representation* implements `fit_transform(data) -> (n_frames, d)` and
+`get_params`, and registers in `REPRESENTATIONS`. It adds a column across every
+segmenter rather than one more unattributable row — see #67.
 
 That is all. The harness owns loading, the representation, run-length encoding
 into bouts, VUS-1 output, and every metric. **No model gets its own scoring
 path** — that duplication is why the same question has been answered differently
 in different places.
+
+## The two slots, as built
+
+```python
+class Representation(Protocol):
+    name: str
+    def fit_transform(self, data: PoseDataset) -> np.ndarray: ...   # (n_frames, d)
+    def get_params(self) -> dict: ...
+
+class Segmenter(Protocol):
+    name: str
+    version: str
+    def fit(self, X, data: PoseDataset, *, seed: int) -> None: ...
+    def predict(self, X, data: PoseDataset) -> Segmentation: ...
+    def get_params(self) -> dict: ...
+
+@dataclass
+class Segmentation:
+    frame_labels: np.ndarray   # (n_frames,), -1 = unassigned
+    n_states: int              # distinct assigned ids, not max + 1
+    extra: dict                # eigenvalues, separatrix labels, probabilities
+```
+
+Both take the `PoseDataset` even when only `X` is needed: some methods need `fps`
+and the recording boundaries, and a uniform signature is worth more than a minimal
+one. `PoseDataset.slices()` and `.valid_windows(k, stride)` are the only supported
+ways to respect a recording seam.
+
+`-1` does not mean the same thing across arms: HDBSCAN's is "unclustered",
+Koopman's is "near a separatrix" — a transition (#57). Both are unassigned under
+the contract, but a noise fraction is not comparable across the two families.
+
+## Running the grid
+
+```python
+from vieb.data import load_dataset
+from vieb.compare import ArmSpec, run_arm, specs_from_config
+
+data, report = load_dataset(pose_dir, fps=30.0, dataset="luna")
+run_arm(ArmSpec("diffusion", "koopman"), data)
+
+# Or cross both slots from config:
+specs_from_config({"representations": ["pca", "diffusion"],
+                   "segmenters": ["hdbscan", "koopman"]})
+```
+
+`load_dataset(deduplicate=False)` reproduces the **pre-dedup** file set (4,925
+files / 28,626,107 frames) that the `koopman_*` runs were fit on. It exists for
+the verification gate and is not a mode any new run should use — see #69.
