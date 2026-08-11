@@ -1437,3 +1437,119 @@ directory named `metadata` found zero pose files.
 past is worth writing down and worth not fixing in the same commit.
 
 **Related:** #60, #65, `a7a0f00`, `3329492`
+
+## 71 — The sticky HMM's dwell-time mode is 1 frame, measured, not argued
+
+Over all 3,846 Luna recordings of the keypoint-MoSeq baseline
+(`~/moseq/luna_demo/2026_07_26-19_54_24`, kappa 1e6, latent_dim 10, K 100):
+720,191 bouts, **mode 1 frame**, median 12 (0.40 s), mean 31.0, CV 3.31, and
+`largest_state_frac` **0.4235** over 43 syllables actually used.
+
+The geometric dwell time `P(d=n) = p^(n-1)(1-p)` is monotonically decreasing, so
+the mode is 1 at *every* kappa — raising kappa moves the mean and never the mode.
+That is the premise of the `hsmm` branch and it holds on this data.
+
+Two corrections while measuring it: the "43.8%" dominant syllable quoted in the
+`hsmm` prompt is not in any artifact — `43.8` appears in the docs as **px/s**, the
+speed of the fast tercile (`V2_MODEL_COMPARISON.md:276`). And the two dated result
+directories under `luna_demo/` are the same model applied twice (identical
+checkpoint size, identical syllable statistics), so "the baseline" is unambiguous.
+
+**Why:** the branch's whole claim is about where the mode is, so the baseline's
+mode is measured the same way the model's will be, before any model is fitted.
+
+**Related:** #65, `V2_MODEL_COMPARISON.md`
+
+## 72 — `hsmm`: the duration model is an embedding, and reuses the existing forward-backward
+
+`NegBin(r, p)` durations are represented exactly as a chain of `r` sub-states with
+geometric holding, so the HSMM is an HMM on `K * r_max` states and
+`dynamax.hmm_posterior_sample` — the routine `jax_moseq` already calls — runs
+unchanged. No `D_max`, no truncation; support is unbounded. The AR emission model,
+its MNIW priors and `resample_ar_params` are called verbatim on the *collapsed*
+state sequence and never learn the embedding exists. The sticky-HMM baseline for
+the §4 comparisons is `jax_moseq.models.arhmm` itself, not a reimplementation.
+
+Three departures, all deliberate and all duration-side:
+
+- **`kappa = 0` and a zero diagonal.** Persistence is carried entirely by `d`.
+  Transition counts are taken over *segments*, not frames; a frame-level count is
+  overwhelmingly diagonal and would re-learn the persistence the duration model is
+  meant to own. `sample_betas`/`sample_pi` are reused at `kappa=0` (safe: the
+  diagonal-downweighting binomial becomes `Binomial(n, 1) = n`), then the diagonal
+  is zeroed and rows renormalized.
+- **Cost is `O(T (K r_max)^2)`, not the `O(T K^2 r)` the prompt states.** The
+  latter needs a structured scan exploiting that only sub-state `r_k - 1` can
+  leave; the dense embedding is what reuses the tested routine verbatim, and it
+  fits the 100-recording fit set inside one GPU job. A structured path is a later
+  optimization, gated by a test that it matches the dense one.
+- **The first `nlags` frames of each recording are `-1`.** An AR(3) emission has no
+  prediction for them. keypoint-MoSeq pads them with the first syllable; copying
+  that would put three fabricated frames at the head of every recording.
+
+**Related:** #60, #67, #71
+
+## 73 — `r` and `p` must be proposed together, along the constant-mean manifold
+
+The first `resample_r` proposed `r -> r+1` at fixed `p` and the sampler stayed
+pinned at its `r = 1` initialization, reporting geometric durations for data that
+was not geometric. The chain's mean duration is `r/(1-p)`, so a move in `r` alone
+also scales the mean by `(r+1)/r`; the observed durations then have a far lower
+likelihood and the move is rejected essentially always.
+
+The proposal now sets `p'` so that `r'/(1-p') = r/(1-p)`. The two hypotheses being
+compared then have the same mean and differ only in *shape* — the comparison that
+is actually of interest. The map is linear with Jacobian `r'/r`, and the +/-1
+proposal is asymmetric at the grid edges, so both corrections are included.
+
+**Why:** this failure mode is silent and looks like a result. A sampler that never
+moves `r` off 1 reproduces the sticky HMM exactly, so the arm would have reported
+"no improvement over MoSeq" as a finding rather than as a bug.
+
+**Related:** #72
+
+## 74 — The empirical bout mode is too noisy to be a gate; the fitted mode is the measurement
+
+§4.1's first form asserted recovery of duration modes from `bincount(durations).argmax()`.
+On **ground truth** at 171 bouts that estimator returns [8, 17, 20, 43, 135] against
+true [8, 15, 30, 60, 121] — two states off by more than 20%. The test would have
+failed on perfect data, and did fail on a fit whose ARI was already above 0.8.
+
+Recovery is asserted on `negbin_mode(r_k, p_k)`, the fitted model's own claim about
+the mode, with the sample size raised so the durations are identifiable. The
+empirical mode is still what is *reported* for the baseline and in §5, where it is
+computed over 720,191 bouts rather than 171.
+
+**Why:** a gate that fails on ground truth is measuring the wrong thing, and would
+have been "fixed" by loosening the model.
+
+**Related:** #71, #72
+
+## 75 — `ulam` removed from the segmenter registry until it exists
+
+`SEGMENTERS` listed `ulam` (and, before this branch, `hsmm`) pointing at modules
+that were never written, so selecting one raised the registry's "install the
+optional dependency on the login node" ImportError — sending you to debug an
+environment that is fine. Same reasoning as #68 removed `ticc` and `flow_field`.
+It goes back in when Prompt 02 writes `vieb/segmenters/ulam.py`.
+
+**Related:** #68
+
+## 76 — `moseq_latent` reads kpms's own latents instead of refitting PCA
+
+The `hsmm` arm must run at the same `latent_dim`, K and seed as the MoSeq baseline
+so the comparison isolates the duration model. The strongest form of that is not
+matching settings but reading the trajectories kpms already wrote: its result CSVs
+carry `latent_state 0..9` per frame for all 3,846 recordings. A refit would have to
+reproduce kpms's whitening, its 1e6-frame PCA subsample and its heading/centroid
+initialization exactly, and any residual difference would land in the one
+comparison the branch exists to make.
+
+Those CSVs also carry `centroid x`, `centroid y` and `heading`. They are read and
+reported but **not** returned as channels — kpms models them outside the AR process
+that generates syllables, which is the representation-side reason every arm here
+struggles to separate freezing from locomotion (#60). Turning them into channels is
+`representation-repair`'s decision; `MoSeqLatentRepresentation(locomotor_channels=True)`
+raises `NotImplementedError` naming it rather than guessing a definition.
+
+**Related:** #60, #67, #71

@@ -37,8 +37,13 @@ it differs from every VIEB arm in representation *and* algorithm at once.
 | `ulam` | Voronoi microstates + transfer-operator spectrum | **gate failed at K=1** | #64 | no plateau at any lag; see below |
 | `exbias` | a maximal interval of smooth pose | **runs** (adapter reads its VUS-1) | — | `~/exbias/exbias.py`. Both runs: **0 states, noise 1.0** |
 | `vieb_v1` | HDBSCAN on 91 engineered features → UMAP | **runs** | — | UMAP-10 + HMM Viterbi. **No pre-port output on disk** (#69) |
-| `hsmm` | an explicit-duration AR-HSMM state | **not built** | — | Stage 2 |
+| `hsmm` | an explicit-duration AR-HSMM state | **runs**; §4 synthetic gate passed | — | NegBin durations, zero-diagonal transitions. §5 blocked on `obs` (#72) |
 | `ulam_msm` | a macrostate from the coarse-grained spectrum | **not built** | — | Stage 2; resumes `ulam` with delay embedding |
+
+`ulam` is **not currently in `SEGMENTERS`** — it named a module that was never
+written, so selecting it raised an ImportError about a missing optional dependency
+and sent you to debug a working environment. Same reasoning as #68; it returns when
+`src/vieb/segmenters/ulam.py` exists (#75).
 
 ### Does not exist — dropped from the registry (#68)
 
@@ -87,9 +92,19 @@ a row whose hash disagrees with its config is flagged, never silently compared.
 | `pca` | pooled PCA on aligned pose, 95% variance | 9 | 206 s |
 | `diffusion` | landmark diffusion maps + Nyström, α=1, 3,000 landmarks | 8 | 1,189 s |
 | `obs` | 9 pose PCs **+** restored `centroid_speed`, `angular_velocity` | 11 | — |
+| `moseq_latent` | `latent_state 0..9` read back from kpms's own result CSVs | 10 | ~0 (read) |
 
 `pca` vs `obs` is the repaired-representation contrast the plan asks to run the
 full bakeoff on. The difference between those two tables is itself a result.
+
+`moseq_latent` exists so an arm can be compared to keypoint-MoSeq on *the same
+numbers* rather than on matching settings — kpms already wrote its per-frame
+latents for all 3,846 recordings, and reproducing its whitening, PCA subsample and
+heading initialization exactly would be a verification problem of its own (#76). It
+is purely postural for the same reason `pca` is: kpms models centroid and heading
+outside the AR process that generates syllables. Its `locomotor_channels` argument
+is the attachment point for the `obs` repair and currently raises
+`NotImplementedError` rather than guessing a channel definition.
 
 ## How models are judged
 

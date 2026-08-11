@@ -87,6 +87,7 @@ REPRESENTATIONS = Registry(
         "pca": ("vieb.representations.postural", "PCARepresentation"),
         "diffusion": ("vieb.representations.postural", "DiffusionRepresentation"),
         "engineered91": ("vieb.representations.engineered91", "Engineered91Representation"),
+        "moseq_latent": ("vieb.representations.moseq_latent", "MoSeqLatentRepresentation"),
     },
 )
 
@@ -99,6 +100,11 @@ SEGMENTERS = Registry(
         "exbias": ("vieb.segmenters.external", "ExBiasSegmenter"),
         "vieb_v1": ("vieb.segmenters.vieb_v1", "ViebV1Segmenter"),
         "hsmm": ("vieb.segmenters.hsmm", "HSMMSegmenter"),
-        "ulam": ("vieb.segmenters.ulam", "UlamSegmenter"),
     },
 )
+
+# ``ulam`` was removed for the same reason ``ticc`` and ``flow_field`` were: it
+# named a module that does not exist, so selecting it raised the "install the
+# optional dependency on the login node" ImportError above — which sends you to
+# debug an environment that is fine. It belongs back here the moment Prompt 02
+# writes ``vieb/segmenters/ulam.py``, and not before.
