@@ -55,3 +55,14 @@ results/
 # Projects
 projects/*
 metadata.csv
+
+# SLURM logs. These go to ~/vieb-logs/ or ~/vieb-runs/; nothing generated lives
+# in git. Previously only vieb_v2/hpc/.gitignore covered these, so a job
+# submitted from anywhere else left its log tracked.
+*.out
+*.err
+slurm-*.out
+
+# Run outputs live in ~/vieb-runs/ (see src/vieb/paths.py), never in the repo.
+runs/
+vieb-runs/
