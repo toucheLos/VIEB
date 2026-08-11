@@ -86,3 +86,33 @@ class TestTwoSlots:
     def test_hdbscan_resolves(self):
         cls = SEGMENTERS["hdbscan"]
         assert cls.name == "hdbscan"
+
+
+class TestImportOrder:
+    """`vieb.io` and `vieb.data` must each import cleanly first.
+
+    They referenced each other for `normalize_recording_id`, which worked only
+    when `vieb.data` happened to be imported first — so `python compare_methods.py`
+    failed while every test passed. The function now lives in `vieb.ids`, below
+    both. These run in subprocesses because import order is process-global.
+    """
+
+    @pytest.mark.parametrize("first", ["vieb.io", "vieb.data", "vieb.compare",
+                                       "vieb.segmenters", "vieb.representations"])
+    def test_package_imports_cleanly_when_first(self, first):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        src = str(Path(__file__).resolve().parent.parent / "src")
+        proc = subprocess.run(
+            [sys.executable, "-c", f"import sys; sys.path.insert(0, {src!r}); import {first}"],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"importing {first} first failed:\n{proc.stderr}"
+
+    def test_normalize_is_the_same_function_everywhere(self):
+        from vieb.data.loaders import normalize_recording_id as a
+        from vieb.ids import normalize_recording_id as b
+        from vieb.io.vus1 import normalize_recording_id as c
+        assert a is b is c, "one id rule, or arms silently fail to join"

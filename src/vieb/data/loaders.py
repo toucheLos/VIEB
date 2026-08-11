@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..io.vus1 import normalize_recording_id
+from ..ids import normalize_recording_id
 from .dataset import PoseDataset
 
 POSE_PATTERNS = ("*.h5", "*.csv")

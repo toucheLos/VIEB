@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.dataset import UNASSIGNED, PoseDataset
+from ..ids import normalize_recording_id  # re-exported: the public name lives here
 
 SCHEMA_VERSION = "VUS-1"
 
@@ -86,27 +87,6 @@ def encode_bouts(
         },
         columns=BOUT_COLUMNS,
     )
-
-
-def normalize_recording_id(name: str) -> str:
-    """Strip a trailing ``DLC_*`` suffix and any file extension.
-
-    ``20241016_Box_1_CFC_Day_0_(Context_A)_308DLC_Resnet50_VIEBFeb11shuffle2_snapshot_best-30.h5``
-    becomes ``20241016_Box_1_CFC_Day_0_(Context_A)_308``.
-
-    Every loader routes through this, at both read and write. Recording ids that
-    disagree between arms are how a join silently drops rows — it is the single
-    thing most likely to make a comparison wrong while still producing a table.
-    """
-    stem = Path(str(name)).name
-    for ext in (".h5", ".hdf5", ".csv", ".mp4", ".avi", ".npy", ".npz", ".parquet"):
-        if stem.lower().endswith(ext):
-            stem = stem[: -len(ext)]
-            break
-    idx = stem.find("DLC_")
-    if idx > 0:
-        stem = stem[:idx]
-    return stem
 
 
 @dataclass
