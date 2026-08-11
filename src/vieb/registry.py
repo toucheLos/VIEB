@@ -95,8 +95,8 @@ SEGMENTERS = Registry(
     {
         "hdbscan": ("vieb.segmenters.hdbscan", "HDBSCANSegmenter"),
         "koopman": ("vieb.segmenters.koopman", "KoopmanSegmenter"),
-        "moseq": ("vieb.segmenters.moseq", "MoSeqSegmenter"),
-        "exbias": ("vieb.segmenters.exbias", "ExBiasSegmenter"),
+        "moseq": ("vieb.segmenters.external", "MoSeqSegmenter"),
+        "exbias": ("vieb.segmenters.external", "ExBiasSegmenter"),
         "vieb_v1": ("vieb.segmenters.vieb_v1", "ViebV1Segmenter"),
         "hsmm": ("vieb.segmenters.hsmm", "HSMMSegmenter"),
         "ulam": ("vieb.segmenters.ulam", "UlamSegmenter"),
