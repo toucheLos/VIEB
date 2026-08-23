@@ -15,7 +15,6 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -28,8 +27,6 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -37,7 +34,7 @@ from PyQt5.QtWidgets import (
 from _utils import APP_CONFIG_PATH, ROOT
 
 LIGHT_DIALOG_STYLE = """
-QDialog, QWidget {
+QDialog {
     background: #ffffff;
     color: #202124;
 }
@@ -45,7 +42,7 @@ QLabel {
     color: #202124;
     background: transparent;
 }
-QLineEdit, QComboBox, QTableWidget, QScrollArea {
+QLineEdit, QScrollArea {
     background: #ffffff;
     color: #202124;
     border: 1px solid #DADCE0;
@@ -105,6 +102,22 @@ def _ensure_project_scaffold(folder: Path) -> None:
 
 
 def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
+    external_paths = set(cfg.get("external_paths") or [])
+    for key, flat_key in (
+        ("raw_videos", "raw_videos_dir"),
+        ("metadata", "metadata_csv_path"),
+        ("results", "results_dir"),
+    ):
+        raw = cfg.get(flat_key)
+        if not raw:
+            continue
+        resolved = Path(raw).expanduser()
+        if not resolved.is_absolute():
+            resolved = folder / resolved
+        try:
+            resolved.resolve().relative_to(folder.resolve())
+        except ValueError:
+            external_paths.add(key)
     cfg["paths"] = {
         "raw_videos": cfg.get("raw_videos_dir") or str(folder / "raw_videos"),
         "pose_files": cfg.get("pose_files_dir", ""),
@@ -113,6 +126,7 @@ def _apply_nested_paths(cfg: dict, folder: Path) -> dict:
         "results": cfg.get("results_dir") or str(folder / "results"),
         "external_data_root": cfg.get("external_data_root", ""),
     }
+    cfg["external_paths"] = sorted(external_paths)
     cfg.setdefault("metadata_schema", {})
     cfg.setdefault("analysis_groups", [])
     cfg.setdefault("ui_panels", {})
@@ -417,10 +431,13 @@ class ProjectSelectorDialog(QDialog):
 
     def _make_card(self, proj: dict, is_active: bool) -> QWidget:
         card = QWidget()
+        card.setObjectName("projectCard")
         border_color = "#4E79A7" if is_active else "#E5E5E5"
         card.setStyleSheet(
-            f"QWidget{{background:#fff;border:1px solid {border_color};"
+            f"QWidget#projectCard{{background:#fff;border:1px solid {border_color};"
             "border-radius:6px;}}"
+            "QWidget#projectCard QLabel{border:none;background:transparent;}"
+            "QWidget#projectCard QPushButton{border:1px solid #DADCE0;}"
         )
         row = QHBoxLayout(card)
         row.setContentsMargins(14, 10, 14, 10)
@@ -499,22 +516,13 @@ class NewProjectDialog(QDialog):
         title.setFont(QFont("Arial", 14, QFont.Bold))
         lay.addWidget(title)
 
-        # ── Pose data source ────────────────────────────────────────────
-        source_lbl = QLabel("Do you have a CSV, H5, or DLC project?")
-        source_lbl.setFont(QFont("Arial", 10, QFont.Bold))
-        lay.addWidget(source_lbl)
-
-        source_row = QHBoxLayout()
-        self._radio_csv = QRadioButton("CSV (DeepLabCut per-video CSVs)")
-        self._radio_h5 = QRadioButton("H5 (single pose file)")
-        self._radio_dlc = QRadioButton("DLC project (config.yaml + train)")
-        self._radio_csv.setChecked(True)
-        self._source_group = QButtonGroup(self)
-        for rb in (self._radio_csv, self._radio_h5, self._radio_dlc):
-            self._source_group.addButton(rb)
-            source_row.addWidget(rb)
-        source_row.addStretch()
-        lay.addLayout(source_row)
+        subtitle = QLabel(
+            "Create the project first. You can add raw videos, pose files, or H5 data "
+            "afterward from Stage 0."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color:#5f6368;")
+        lay.addWidget(subtitle)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
@@ -549,70 +557,6 @@ class NewProjectDialog(QDialog):
         self._meta_label = "Metadata CSV:"
         form.addRow(self._meta_label, self._make_row(self._meta, meta_btn))
 
-        self._dlc = QLineEdit()
-        self._dlc.setPlaceholderText("Optional — set later in DLC Setup")
-        dlc_btn = QPushButton("Browse...")
-        dlc_btn.setFixedWidth(80)
-        dlc_btn.clicked.connect(
-            lambda: self._browse_file(
-                self._dlc, "YAML files (*.yaml *.yml);;All files (*)"
-            )
-        )
-        self._dlc_label = "DLC config.yaml:"
-        form.addRow(self._dlc_label, self._make_row(self._dlc, dlc_btn))
-
-        # ── H5 pose file fields ─────────────────────────────────────────
-        self._h5_path = QLineEdit()
-        self._h5_path.setPlaceholderText("Path to .h5 pose file")
-        h5_btn = QPushButton("Browse...")
-        h5_btn.setFixedWidth(80)
-        h5_btn.clicked.connect(
-            lambda: self._browse_file(self._h5_path, "HDF5 files (*.h5 *.hdf5)")
-        )
-        self._h5_path_label = "H5 file *:"
-        form.addRow(self._h5_path_label, self._make_row(self._h5_path, h5_btn))
-
-        self._h5_manifest = QLineEdit()
-        self._h5_manifest.setPlaceholderText("Optional — maps animal_id/filename to h5_key")
-        h5_manifest_btn = QPushButton("Browse...")
-        h5_manifest_btn.setFixedWidth(80)
-        h5_manifest_btn.clicked.connect(
-            lambda: self._browse_file(self._h5_manifest, "CSV files (*.csv)")
-        )
-        self._h5_manifest_label = "H5 manifest:"
-        form.addRow(self._h5_manifest_label, self._make_row(self._h5_manifest, h5_manifest_btn))
-
-        self._h5_key_combo = QComboBox()
-        self._h5_key_combo.setEditable(True)
-        self._h5_key_label = "H5 key (default):"
-        form.addRow(self._h5_key_label, self._h5_key_combo)
-
-        self._h5_source_col_combo = QComboBox()
-        self._h5_source_col_combo.setEditable(True)
-        self._h5_source_col_label = "H5 source column:"
-        form.addRow(self._h5_source_col_label, self._h5_source_col_combo)
-
-        self._h5_detect_btn = QPushButton("Detect")
-        self._h5_detect_btn.setToolTip("Open the H5 file and auto-populate the available keys and columns.")
-        self._h5_detect_btn.clicked.connect(self._on_detect_h5)
-        self._h5_detect_label = ""
-        form.addRow(self._h5_detect_label, self._h5_detect_btn)
-
-        self._h5_summary = QLabel("")
-        self._h5_summary.setWordWrap(True)
-        self._h5_summary.setStyleSheet("color:#666; font-size:11px;")
-        self._h5_summary_label = ""
-        form.addRow(self._h5_summary_label, self._h5_summary)
-
-        self._h5_preview_table = QTableWidget(0, 1)
-        self._h5_preview_table.setHorizontalHeaderLabels(["Column/Dataset"])
-        self._h5_preview_table.horizontalHeader().setStretchLastSection(True)
-        self._h5_preview_table.verticalHeader().setVisible(False)
-        self._h5_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._h5_preview_table.setMaximumHeight(150)
-        self._h5_preview_label = ""
-        form.addRow(self._h5_preview_label, self._h5_preview_table)
-
         lay.addLayout(form)
         self._form = form
 
@@ -621,10 +565,6 @@ class NewProjectDialog(QDialog):
         btns.accepted.connect(self._create)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
-
-        for rb in (self._radio_csv, self._radio_h5, self._radio_dlc):
-            rb.toggled.connect(self._update_visible_fields)
-        self._update_visible_fields()
 
     @staticmethod
     def _make_row(le: QLineEdit, btn: QPushButton) -> QWidget:
@@ -653,124 +593,11 @@ class NewProjectDialog(QDialog):
         if p:
             le.setText(p)
 
-    def _set_row_visible(self, field_widget: QWidget, visible: bool):
-        label = self._form.labelForField(field_widget)
-        if label is not None:
-            label.setVisible(visible)
-        field_widget.setVisible(visible)
-
-    def _update_visible_fields(self):
-        is_h5 = self._radio_h5.isChecked()
-        is_csv = self._radio_csv.isChecked()
-        is_dlc = self._radio_dlc.isChecked()
-
-        # widgets carry their own row container (returned by _make_row), so
-        # toggle visibility on the row container, not the inner QLineEdit
-        self._set_row_visible(self._raw.parentWidget(), is_csv or is_dlc)
-        self._set_row_visible(self._meta.parentWidget(), True)
-        self._set_row_visible(self._dlc.parentWidget(), is_dlc)
-
-        for w in (
-            self._h5_path.parentWidget(),
-            self._h5_manifest.parentWidget(),
-            self._h5_key_combo,
-            self._h5_source_col_combo,
-            self._h5_detect_btn,
-            self._h5_summary,
-            self._h5_preview_table,
-        ):
-            self._set_row_visible(w, is_h5)
-
-    def _on_detect_h5(self):
-        h5_path = self._h5_path.text().strip()
-        if not h5_path:
-            QMessageBox.warning(self, "Detect H5", "Enter or browse to an H5 file first.")
-            return
-        try:
-            from pose_io import inspect_h5
-            info = inspect_h5(h5_path)
-        except Exception as e:
-            QMessageBox.warning(self, "Detect H5", f"Could not read H5 file:\n{e}")
-            return
-
-        keys = info.get("keys", [])
-        if not keys:
-            QMessageBox.warning(self, "Detect H5", "No keys found in this H5 file.")
-            return
-
-        self._h5_key_combo.clear()
-        self._h5_key_combo.addItems(keys)
-
-        first_details = info.get("details", {}).get(keys[0], {})
-        columns = first_details.get("columns") or list(first_details.get("datasets", {}).keys())
-        self._h5_source_col_combo.clear()
-        self._h5_source_col_combo.addItems(columns)
-
-        n_frames = first_details.get("n_frames")
-        summary = f"Found {len(keys)} key(s). '{keys[0]}': "
-        if columns:
-            summary += f"{len(columns)} column(s)"
-        if n_frames is not None:
-            summary += f", {n_frames} frames"
-        self._h5_summary.setText(summary)
-
-        self._h5_preview_table.setRowCount(len(columns))
-        for row, col_name in enumerate(columns):
-            self._h5_preview_table.setItem(row, 0, QTableWidgetItem(str(col_name)))
-
     def _create(self):
         name = self._name.text().strip()
         if not name:
             QMessageBox.warning(self, "Validation", "Project name is required.")
             return
-
-        is_h5 = self._radio_h5.isChecked()
-        is_dlc = self._radio_dlc.isChecked()
-
-        h5_path = self._h5_path.text().strip()
-        h5_key = self._h5_key_combo.currentText().strip()
-        h5_source_col = self._h5_source_col_combo.currentText().strip()
-        h5_manifest = self._h5_manifest.text().strip()
-
-        if is_h5:
-            if not h5_path:
-                QMessageBox.warning(self, "Validation", "H5 file is required for H5 projects.")
-                return
-            if not Path(h5_path).exists():
-                QMessageBox.warning(self, "Validation", f"H5 file not found:\n{h5_path}")
-                return
-            try:
-                from pose_io import inspect_h5
-                info = inspect_h5(h5_path)
-            except Exception as e:
-                QMessageBox.warning(self, "Validation", f"Could not open H5 file:\n{e}")
-                return
-
-            keys = info.get("keys", [])
-            if not keys:
-                QMessageBox.warning(self, "Validation", "H5 file contains no usable keys.")
-                return
-
-            xy_re = re.compile(r"(_x$|_y$|/x$|/y$|^x$|^y$)", re.IGNORECASE)
-            first_details = info["details"].get(keys[0], {})
-            cols = first_details.get("columns") or []
-            datasets = list(first_details.get("datasets", {}).keys())
-            has_xy = any(xy_re.search(str(c)) for c in cols) or bool(
-                first_details.get("shape")
-            ) or any(name.lower() in ("coords", "x", "y", "xy", "pose") for name in datasets)
-            if not has_xy and not datasets and not cols:
-                QMessageBox.warning(
-                    self, "Validation",
-                    f"Key '{keys[0]}' in this H5 file doesn't look like pose data "
-                    "(no x/y-like columns or datasets found)."
-                )
-                return
-
-        if is_dlc:
-            dlc_yaml = self._dlc.text().strip()
-            if dlc_yaml and not Path(dlc_yaml).exists():
-                QMessageBox.warning(self, "Validation", f"DLC config.yaml not found:\n{dlc_yaml}")
-                return
 
         slug = _slugify(name)
         for proj in self.app_cfg.get("projects", []):
@@ -803,27 +630,18 @@ class NewProjectDialog(QDialog):
         cfg["results_dir"] = str(folder / "results")
         raw = self._raw.text().strip()
         cfg["raw_videos_dir"] = raw if raw else str(folder / "raw_videos")
+        cfg["pose_source"] = "none"
 
         meta_csv_path = self._meta.text().strip()
 
-        if is_h5:
-            cfg["pose_source"] = "h5"
-            cfg["h5_path"] = h5_path
-            cfg["h5_key"] = h5_key
-            cfg["h5_source_col"] = h5_source_col
-            cfg["h5_manifest_path"] = h5_manifest
-        else:
-            cfg["pose_source"] = "csv"
-
         # Auto-generate a starter metadata.csv when no metadata CSV was given
-        # and we have raw videos and/or an H5 pose file to infer rows from.
+        # and we have raw videos to infer rows from.
         meta_generated = False
         meta_rows = 0
-        if not meta_csv_path and (cfg["raw_videos_dir"] or h5_path):
+        if not meta_csv_path and raw:
             from metadata_generator import generate_metadata_template, write_metadata_csv
             df = generate_metadata_template(
-                raw_videos_dir=cfg["raw_videos_dir"] if not is_h5 else None,
-                h5_path=h5_path if is_h5 else None,
+                raw_videos_dir=cfg["raw_videos_dir"],
             )
             if not df.empty:
                 meta_csv_path = str(folder / "metadata.csv")
@@ -840,11 +658,6 @@ class NewProjectDialog(QDialog):
             from views.metadata_mapper import _autodetect_columns
             detected = _autodetect_columns(meta_csv_path)
             cfg["column_map"].update(detected)
-
-        if is_dlc:
-            dlc_yaml = self._dlc.text().strip()
-            if dlc_yaml:
-                cfg["dlc_project_path"] = str(Path(dlc_yaml).parent)
 
         _ensure_project_scaffold(folder)
         _pm.write_project_config(folder, _apply_nested_paths(cfg, folder))

@@ -899,11 +899,10 @@ def _clear_layout(layout):
 
 
 class _ValidationPlayer(VideoPlayer):
-    """VideoPlayer with loop-on default, 2x speed option, and frame counter."""
+    """VideoPlayer with loop-on default and a frame counter."""
 
     def _build(self):
         super()._build()
-        self._speed_combo.addItem("2x")
         self._loop_btn.setChecked(True)
         self._frame_lbl = QLabel("Frame: 0 / 0")
         self._frame_lbl.setAlignment(Qt.AlignCenter)

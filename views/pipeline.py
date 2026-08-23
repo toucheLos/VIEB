@@ -12,13 +12,11 @@ from PyQt5.QtWidgets import (
 )
 
 from _utils import (
-    ROOT, RESULTS, STAGES, _has_pose_csvs, _open_folder, _save_cfg,
+    ROOT, RESULTS, STAGES, _STAGE_BY_ID, APP_CONFIG_PATH, _has_pose_csvs, _open_folder, _save_cfg,
     wsl_cuml_available, wsl_cuml_reset_cache, _probe_wsl_cuml, _state_key, _MPL,
 )
 from _workers import PipelineRunner, SubprocessWorker
 from _widgets import StageRow
-
-_STAGE_BY_ID = {s["id"]: s for s in STAGES}
 from _dialogs import WslSetupDialog, DiagnoseDialog
 
 if _MPL:
@@ -104,11 +102,10 @@ class RunPipelineView(QWidget):
                 continue
             row = StageRow(stage, self.cfg)
             if stage["id"] == 0:
-                row.run_stage.connect(lambda _: self._open_env_setup())
-                row._run_btn.setText("Open Setup ▶")
+                row.run_stage.connect(lambda _: self._check_stage0_readiness())
+                row._run_btn.setText("Check Project Readiness")
                 row._from_btn.hide()
-                # Auto-complete if venv already exists
-                if self._venv_exists():
+                if self._stage0_complete():
                     row.set_status("done")
             else:
                 row.run_stage.connect(self._run_stage)
@@ -267,8 +264,32 @@ class RunPipelineView(QWidget):
             return (venv / "Scripts" / "python.exe").exists()
         return (venv / "bin" / "python").exists()
 
+    def _stage0_complete(self) -> bool:
+        try:
+            import project_manager as _pm
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            return _pm.onboarding_complete(project)
+        except Exception:
+            return False
+
+    def _check_stage0_readiness(self):
+        """Stage 0 action: lightweight project readiness check."""
+        try:
+            import project_manager as _pm
+            _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except Exception:
+            QMessageBox.information(
+                self, "Stage 0: Onboarding",
+                "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.\n\n"
+                "Use the Pipeline view to create or open a project.",
+            )
+            return
+        row = self._rows.get(0)
+        if row and self._stage0_complete():
+            row.set_status("done")
+
     def _open_env_setup(self):
-        """Stage 0 action: open GPU setup on Windows; show terminal instructions elsewhere."""
+        """GPU/environment setup — separate from Stage 0 project readiness."""
         if sys.platform == "win32":
             dlg = WslSetupDialog(self)
             dlg.exec_()
@@ -282,10 +303,6 @@ class RunPipelineView(QWidget):
                 "The script will create the venv and optionally install GPU extras.\n"
                 "Once complete, restart the application.",
             )
-        # Refresh Stage 0 completion indicator
-        row = self._rows.get(0)
-        if row and self._venv_exists():
-            row.set_status("done")
 
     def _param_changed(self, key, value):
         self.cfg[key] = value
@@ -444,6 +461,17 @@ class RunPipelineView(QWidget):
 
         self._diag_frame.show()
 
+        # Resolved min_samples info from run manifest
+        rm = data.get("run_manifest") or {}
+        ms_req = rm.get("min_samples_requested", None)
+        ms_res = rm.get("min_samples_resolved", rm.get("hdbscan_min_samples", ""))
+        if ms_req == 0 and ms_res:
+            ms_text = f"min_samples: Auto (resolved to {ms_res})"
+        elif ms_res:
+            ms_text = f"min_samples: {ms_res}"
+        else:
+            ms_text = ""
+
         # Parameters summary
         lines = [
             f"States: {diag.get('n_states', '?')}   "
@@ -457,6 +485,8 @@ class RunPipelineView(QWidget):
             f"Features: {diag.get('n_features', '?')}   "
             f"Wavelets: {'yes' if diag.get('use_wavelets') else 'no'}",
         ]
+        if ms_text:
+            lines.append(ms_text)
         self._diag_params.setText("\n".join(lines))
 
         # Clear old warnings

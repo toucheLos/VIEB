@@ -15,17 +15,29 @@ _EXT_TYPE = {
     ".csv": "CSV",
     ".tsv": "CSV",
     ".json": "JSON",
+    ".txt": "Text",
+    ".yaml": "YAML",
+    ".yml": "YAML",
     ".png": "Image",
     ".jpg": "Image",
     ".jpeg": "Image",
+    ".gif": "Image",
+    ".webp": "Image",
     ".svg": "Image",
+    ".html": "HTML",
+    ".htm": "HTML",
     ".pdf": "PDF",
     ".mp4": "Video",
     ".avi": "Video",
     ".mov": "Video",
     ".npy": "NumPy",
+    ".npz": "NumPy",
+    ".gz": "NumPy",
     ".pkl": "Model",
     ".pt": "Model",
+    ".pth": "Model",
+    ".h5": "HDF5",
+    ".hdf5": "HDF5",
     ".xlsx": "Excel",
     ".xls": "Excel",
 }
@@ -36,29 +48,51 @@ _CATEGORY_RULES: list[tuple[str, str]] = [
     ("comparison/summary_table.csv", "Summary"),
     ("comparison/animal_scalars.csv", "Summary"),
     ("metadata_schema_report.json", "Summary"),
-    # States
-    ("characterization/state_summary.csv", "States"),
-    ("characterization/labels_per_frame.csv", "States"),
-    ("characterization/context_report.csv", "States"),
-    ("validation/state_labels.csv", "States"),
-    # Bouts
-    ("characterization/bouts.csv", "Bouts"),
-    ("motifs/bouts.csv", "Bouts"),
-    # Motifs
-    ("comparison/motifs.csv", "Motifs"),
-    ("motifs/", "Motifs"),
-    # Transitions
-    ("comparison/transition_", "Transitions"),
-    # Diagnostics
-    ("diagnostics/", "Diagnostics"),
+    # Features and shared model artifacts
+    ("features/", "Features"),
     ("shared/cluster_info.json", "Diagnostics"),
-    ("shared/run_manifest.json", "Diagnostics"),
     ("shared/validation_report.json", "Diagnostics"),
-    # Metadata / config
+    ("shared/run_manifest.json", "Metadata"),
     ("shared/preprocessor.pkl", "Metadata"),
     ("shared/umap_reducer.pkl", "Metadata"),
     ("shared/clusterer.pkl", "Metadata"),
-    ("features/index.json", "Metadata"),
+    ("shared/", "Cluster Runs"),
+    # State characterization
+    ("characterization/state_occupancy.png", "State Characterization"),
+    ("characterization/state_duration_summary.png", "State Characterization"),
+    ("characterization/state_feature_profiles.png", "State Characterization"),
+    ("characterization/state_feature_zscores.png", "State Characterization"),
+    ("characterization/state_summary.csv", "State Characterization"),
+    ("characterization/bouts.csv", "State Characterization"),
+    ("characterization/labels_per_frame.csv", "State Characterization"),
+    ("characterization/context_report.csv", "State Characterization"),
+    ("characterization/state_", "State Characterization"),
+    ("characterization/", "State Characterization"),
+    ("validation/state_labels.csv", "States"),
+    # Motifs
+    ("comparison/motifs.csv", "Motifs"),
+    ("comparison/motif_", "Motifs"),
+    ("motifs/", "Motifs"),
+    # Video Stories (sequence artifacts)
+    ("sequences/", "Video Stories"),
+    # Transitions
+    ("comparison/transition_table.csv", "Transitions"),
+    ("comparison/transition_", "Transitions"),
+    # Comparison
+    ("comparison/contrast_vector_comparison.png", "Comparison"),
+    ("comparison/bout_duration_by_context.csv", "Comparison"),
+    ("comparison/state_by_", "Comparison"),
+    ("comparison/animal_trajectories.png", "Comparison"),
+    ("comparison/", "Comparison"),
+    # Diagnostics
+    ("diagnostics/", "Diagnostics"),
+    # Cluster Runs (saved run snapshots)
+    ("runs/", "Cluster Runs"),
+    # Quantification
+    ("quantification/", "Quantification"),
+    # Metadata / config
+    ("metadata", "Metadata"),
+    ("run_manifest.json", "Metadata"),
 ]
 
 _SKIP_PATTERNS = ("_labels.npy", "_probs.npy", "_features.npy")
@@ -78,6 +112,8 @@ def categorize_file(rel_path: str) -> tuple[str, str]:
         return "Plots", file_type
     if file_type == "Video":
         return "Clips", file_type
+    if file_type in {"Model", "NumPy", "HDF5"}:
+        return "Models / Binary", file_type
 
     return "Raw Tables", file_type
 
@@ -113,9 +149,13 @@ def scan_artifacts(
                     continue
 
                 if scan_root != results_dir:
-                    category = "Clips"
                     ext = os.path.splitext(fname)[1].lower()
                     file_type = _EXT_TYPE.get(ext, "Other")
+                    category = (
+                        "Video Stories"
+                        if rel_path.replace("\\", "/").startswith("stories/")
+                        else "Clips"
+                    )
                     rel_path = os.path.join("clips", rel_path)
                 else:
                     category, file_type = categorize_file(rel_path)
@@ -143,20 +183,50 @@ def scan_artifacts(
 
 _PUBLICATION_FILES = [
     "comparison/summary_table.csv",
-    "characterization/state_summary.csv",
-    "comparison/motifs.csv",
     "comparison/transition_table.csv",
+    "comparison/state_by_day.png",
+    "comparison/state_by_context.png",
+    "comparison/state_by_experiment.png",
+    "comparison/state_by_fear.png",
+    "comparison/state_by_animal.png",
+    "comparison/animal_trajectories.png",
+    "comparison/motif_heatmap.png",
+    "comparison/bout_duration_by_context.csv",
+    "comparison/contrast_vector_comparison.png",
+    "characterization/state_summary.csv",
+    "characterization/state_occupancy.png",
+    "characterization/state_duration_summary.png",
+    "characterization/state_feature_profiles.png",
+    "characterization/state_feature_zscores.csv",
+    "characterization/state_feature_zscores.png",
+    "characterization/context_report.csv",
+    "comparison/motifs.csv",
     "motifs/motif_summary.csv",
     "motifs/motif_context_enrichment.csv",
+    "motifs/motif_exemplars.csv",
+    "sequences/video_story_bouts.csv",
+    "sequences/video_stories.csv",
+    "sequences/subject_journeys.csv",
     "diagnostics/cluster_overview.png",
+    "diagnostics/umap_embedding_by_state.png",
     "diagnostics/cluster_diagnostics.json",
     "shared/cluster_info.json",
     "shared/run_manifest.json",
+    "quantification/master_table.csv",
+    "quantification/contrast_vectors.csv",
+    "quantification/cohort_contrast_stats.csv",
+    "quantification/contrast_bars.png",
+    "quantification/contrast_heatmap.png",
+    "quantification/contrast_magnitude.png",
+    "quantification/contrast_scatter.png",
 ]
 
 _PUBLICATION_GLOBS = [
     ("comparison", "*.png"),
+    ("characterization", "*.png"),
     ("diagnostics", "*.png"),
+    ("quantification", "*.png"),
+    ("clips", "*.mp4"),
 ]
 
 

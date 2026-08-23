@@ -108,33 +108,6 @@ class OverviewView(QWidget):
         bl.addLayout(acts_row)
         lay.addWidget(self._banner)
 
-        # Previous Session banner
-        self._prev_banner = QFrame()
-        self._prev_banner.setObjectName("prevBanner")
-        self._prev_banner.setStyleSheet(
-            "QFrame#prevBanner{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;}"
-        )
-        pb_lay = QHBoxLayout(self._prev_banner)
-        pb_lay.setContentsMargins(16, 10, 16, 10)
-        pb_lay.setSpacing(10)
-        self._prev_lbl = QLabel("Previous analysis results available.")
-        self._prev_lbl.setStyleSheet("background:transparent;border:none;color:#664d03;")
-        pb_lay.addWidget(self._prev_lbl, stretch=1)
-        self._prev_load_btn = QPushButton("Load Previous Session")
-        self._prev_load_btn.setFixedHeight(28)
-        pb_lay.addWidget(self._prev_load_btn)
-        _pb_dismiss = QPushButton("✕")
-        _pb_dismiss.setFlat(True)
-        _pb_dismiss.setFixedSize(22, 22)
-        _pb_dismiss.setStyleSheet(
-            "QPushButton{color:#664d03;border:none;background:transparent;font-size:11px;}"
-            "QPushButton:hover{color:#c62828;}"
-        )
-        _pb_dismiss.clicked.connect(self._prev_banner.hide)
-        pb_lay.addWidget(_pb_dismiss)
-        self._prev_banner.hide()
-        lay.addWidget(self._prev_banner)
-
         # Title + Export
         top = QHBoxLayout()
         title_lbl = QLabel("Overview")
@@ -961,21 +934,8 @@ class OverviewView(QWidget):
     def show_load_banner(self, data, on_load, has_results: bool):
         if not self._banner_dismissed:
             self._banner.setVisible(not has_results)
-        if not has_results:
-            self._prev_banner.hide()
-            return
-        p = RESULTS / "comparison" / "summary_table.csv"
-        date_str = _fmt_ts(p.stat().st_mtime) if p.exists() else "a previous session"
-        self._prev_lbl.setText(f"Results from {date_str} available on disk.")
-        try:
-            self._prev_load_btn.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        self._prev_load_btn.clicked.connect(lambda: (on_load(), self._prev_banner.hide()))
-        self._prev_banner.show()
 
     def update_data(self, data):
-        self._prev_banner.hide()
         self._update_banner(data)
         self._data = data
         cohort = data.get("cohort")

@@ -17,6 +17,69 @@ from _workers import SubprocessWorker
 from views.dlc_setup import _StepCard, _PRIMARY_BTN_STYLE, _ClickableLabel, _translate_log
 
 
+class _VideoStatusChecker(QThread):
+    """Counts videos/CSVs/extracted stems off the main thread."""
+    done = pyqtSignal(object)  # emits a dict of counts
+
+    def __init__(self, cfg: dict):
+        super().__init__()
+        self._cfg = cfg
+
+    def run(self):
+        try:
+            result = self._gather()
+        except Exception:
+            result = {}
+        self.done.emit(result)
+
+    def _gather(self) -> dict:
+        import vieb_config as _vc
+        raw_dir = Path(self._cfg.get("raw_videos_dir", "") or str(ROOT / "raw_videos"))
+        total_videos = len(list(raw_dir.glob("*.mp4"))) if raw_dir.exists() else 0
+        csv_count = len(list(raw_dir.glob("*DLC*.csv"))) if raw_dir.exists() else 0
+
+        index_path = RESULTS / "features" / "index.json"
+        index = {}
+        if index_path.exists():
+            try:
+                with open(index_path) as f:
+                    index = json.load(f)
+            except Exception:
+                pass
+        extracted = len([k for k in index if k != "_meta"])
+
+        shared_dir = RESULTS / "shared"
+        pending_cluster = [
+            stem for stem in index if stem != "_meta"
+            and not (shared_dir / f"{stem}_labels.npy").exists()
+        ]
+
+        has_shared_model = all(
+            (shared_dir / fn).exists()
+            for fn in ("preprocessor.pkl", "umap_reducer.pkl", "clusterer.pkl", "cluster_info.json")
+        )
+
+        has_trained_dlc = False
+        try:
+            project_path = _vc.get_dlc_project_path()
+            if project_path:
+                has_trained_dlc = bool(list(Path(project_path).glob("dlc-models/**/train/snapshot-*.index")))
+        except Exception:
+            pass
+
+        has_pose_csvs = _has_pose_csvs(raw_dir)
+
+        return {
+            "total_videos": total_videos,
+            "csv_count": csv_count,
+            "extracted": extracted,
+            "pending_cluster": pending_cluster,
+            "has_shared_model": has_shared_model,
+            "has_trained_dlc": has_trained_dlc,
+            "has_pose_csvs": has_pose_csvs,
+        }
+
+
 class AddVideosView(QWidget):
     """Guided flow for adding new videos to a project that already has a
     trained DLC model and a fitted shared cluster model.
@@ -35,6 +98,9 @@ class AddVideosView(QWidget):
         super().__init__()
         self.cfg = cfg
         self._worker = None
+        self._checker = None
+        self._refresh_pending = False
+        self._running_command = ""
         self._action_buttons: list[QPushButton] = []
         self._active_step_num: int | None = None
         self._step_results: dict[int, bool] = {}
@@ -214,6 +280,25 @@ class AddVideosView(QWidget):
     # ── Step rebuilding ──────────────────────────────────────────────────
 
     def refresh(self):
+        if self._checker and self._checker.isRunning():
+            self._refresh_pending = True
+            return
+        self._banner_frame.setStyleSheet(
+            "QFrame#statusBanner{background:#f5f5f5;border:1px solid #e0e0e0;border-radius:6px;}"
+        )
+        self._banner_label.setText("Scanning project…")
+        self._checker = _VideoStatusChecker(self.cfg)
+        self._checker.done.connect(self._on_status_done)
+        self._checker.start()
+
+    def _on_status_done(self, counts: dict) -> None:
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._checker = _VideoStatusChecker(self.cfg)
+            self._checker.done.connect(self._on_status_done)
+            self._checker.start()
+            return
+
         while self._steps_lay.count():
             item = self._steps_lay.takeAt(0)
             w = item.widget()
@@ -223,10 +308,13 @@ class AddVideosView(QWidget):
         self._action_buttons = []
         self._steps = {}
 
-        total_videos = self._count_total_videos()
-        csv_count = self._count_pose_csvs()
-        extracted = self._count_extracted()
-        pending_cluster = self._stems_without_labels()
+        total_videos = counts.get("total_videos", 0)
+        csv_count = counts.get("csv_count", 0)
+        extracted = counts.get("extracted", 0)
+        pending_cluster = counts.get("pending_cluster", [])
+        has_shared_model = counts.get("has_shared_model", False)
+        has_trained_dlc = counts.get("has_trained_dlc", False)
+        has_pose_csvs = counts.get("has_pose_csvs", False)
 
         new_for_pose = max(0, total_videos - csv_count)
         new_for_features = max(0, csv_count - extracted)
@@ -253,7 +341,7 @@ class AddVideosView(QWidget):
                 "Work through the steps below in order."
             )
 
-        if not self._has_trained_dlc() and not _has_pose_csvs(self._raw_dir()):
+        if not has_trained_dlc and not has_pose_csvs:
             note = _StepCard(
                 1, "Set up DeepLabCut first",
                 "Add Videos assumes you already have a trained DLC model (or existing pose "
@@ -332,8 +420,7 @@ class AddVideosView(QWidget):
         info3.setStyleSheet("color:#666;font-size:11px;")
         step3.body_layout().addWidget(info3)
 
-        has_model = self._has_shared_model()
-        if has_model:
+        if has_shared_model:
             self._apply_radio = QRadioButton(
                 "Apply existing cluster model (fast — keeps existing state labels unchanged)"
             )
@@ -426,13 +513,14 @@ class AddVideosView(QWidget):
         if self._active_step_num is not None:
             self._step_results.pop(self._active_step_num, None)
         self._set_buttons_enabled(False)
-        self.worker_running.emit(True)
         if use_dlc_python:
             python_exe = self.cfg.get("dlc_python") or str(ROOT / "venv-dlc" / "bin" / "python")
             if not os.path.exists(python_exe):
                 python_exe = sys.executable
         else:
             python_exe = sys.executable
+        self._running_command = "python " + " ".join(str(a) for a in args)
+        self.worker_running.emit(True)
         self._worker = SubprocessWorker(args, python_exe=python_exe)
         self._worker.log.connect(self._on_raw_log)
         self._worker.done.connect(self._on_worker_done)
@@ -441,6 +529,7 @@ class AddVideosView(QWidget):
     def _on_worker_done(self, ok: bool):
         self._set_buttons_enabled(True)
         self.worker_running.emit(False)
+        self._running_command = ""
         if ok:
             self._log_human("✓ Task completed successfully.")
         else:

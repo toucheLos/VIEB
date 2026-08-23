@@ -11,6 +11,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import project_manager as pm
+
 
 def _setup_report_project(tmp_path, monkeypatch, metadata: pd.DataFrame, config_extra: dict | None = None):
     project_dir = tmp_path / "project"
@@ -107,9 +109,19 @@ def test_cmd_report_skips_missing_fear_column(tmp_path, monkeypatch, capsys):
     assert (results_dir / "characterization" / "bouts.csv").exists()
     assert (results_dir / "characterization" / "state_summary.csv").exists()
     assert (results_dir / "comparison" / "transition_table.csv").exists()
+    assert (results_dir / "sequences" / "video_story_bouts.csv").exists()
+    assert (results_dir / "sequences" / "video_stories.csv").exists()
+    assert (results_dir / "sequences" / "subject_journeys.csv").exists()
     assert (results_dir / "comparison" / "transition_by_context.png").exists()
     assert (results_dir / "comparison" / "state_by_context.png").exists()
     assert (results_dir / "comparison" / "state_by_animal.png").exists()
+    design = json.loads((results_dir / "analysis_design.json").read_text(encoding="utf-8"))
+    assert design["detected_mode"] == "time_and_condition"
+    assert (results_dir / "comparison" / "state_occupancy_by_time_and_condition.png").exists()
+    assert (results_dir / "comparison" / "condition_contrast_over_time.png").exists()
+    assert (results_dir / "comparison" / "context_enriched_states.png").exists()
+    assert (results_dir / "comparison" / "transition_by_condition.png").exists()
+    assert (results_dir / "comparison" / "condition_state_trajectories.png").exists()
     assert (results_dir / "comparison" / "motifs.csv").exists()
     assert not (results_dir / "comparison" / "state_by_fear.png").exists()
 
@@ -201,8 +213,19 @@ def test_cmd_report_without_context_skips_context_outputs(tmp_path, monkeypatch,
 
     out = capsys.readouterr().out
     assert "context" in out
+    assert "condition" in out
     assert (results_dir / "comparison" / "summary_table.csv").exists()
     assert (results_dir / "comparison" / "transition_table.csv").exists()
+    assert (results_dir / "sequences" / "video_story_bouts.csv").exists()
+    assert (results_dir / "sequences" / "video_stories.csv").exists()
+    assert (results_dir / "sequences" / "subject_journeys.csv").exists()
+    design = json.loads((results_dir / "analysis_design.json").read_text(encoding="utf-8"))
+    assert design["detected_mode"] == "time_only"
+    assert (results_dir / "comparison" / "state_occupancy_over_time.png").exists()
+    assert (results_dir / "comparison" / "state_duration_over_time.png").exists()
+    assert (results_dir / "comparison" / "transition_entropy_over_time.png").exists()
+    assert (results_dir / "comparison" / "per_subject_state_trajectories.png").exists()
+    assert (results_dir / "comparison" / "change_from_baseline.png").exists()
     assert not (results_dir / "comparison" / "transition_by_context.png").exists()
     assert not (results_dir / "comparison" / "motifs.csv").exists()
 
@@ -224,3 +247,21 @@ def test_stem_derivation_common_extensions():
     assert [ms.derive_stem(v) for v in values] == [
         "session1", "session2", "session3", "session4", "session5"
     ]
+
+
+def test_report_cli_diagnostics_use_active_project_paths(tmp_path, capsys):
+    project = pm.create_project(tmp_path / "projects" / "report_project", "Report Project", repo_root=tmp_path)
+    app = tmp_path / "app_config.json"
+    app.write_text(json.dumps({"active_project": str(project)}), encoding="utf-8")
+
+    import compare
+
+    paths = compare._print_project_path_diagnostics(str(tmp_path), str(app))
+
+    out = capsys.readouterr().out
+    assert f"Active project: {project}" in out
+    assert f"Metadata path: {project / 'metadata.csv'} (origin: project_config)" in out
+    assert f"Results dir: {project / 'results'} (origin: project_config)" in out
+    assert f"Raw videos dir: {project / 'raw_videos'} (origin: project_config)" in out
+    assert f"Config path: {project / 'config.json'}" in out
+    assert paths["metadata"].path == (project / "metadata.csv").resolve()

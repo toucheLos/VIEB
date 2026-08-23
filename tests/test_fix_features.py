@@ -202,3 +202,67 @@ def test_fix_features_noop_when_consistent(tmp_path, monkeypatch, capsys):
     compare.cmd_fix_features(fps=30.0)
     captured = capsys.readouterr()
     assert "Nothing to fix" in captured.out
+
+
+def test_fix_features_preserves_and_reconstructs_meta_fields(tmp_path, monkeypatch):
+    """cmd_fix_features must not drop existing _meta fields and must rebuild feature_names."""
+    compare, project_dir, results_dir, features_dir = _setup_project(
+        tmp_path, monkeypatch, use_wavelets=True
+    )
+    raw_dir = project_dir / "raw_videos"
+
+    feats_a, path_a, pose_a = _extract_features_array(
+        compare, results_dir, "vidA",
+        raw_dir / "vidA.mp4", raw_dir / "vidADLC_resnet50.csv", use_wavelets=False,
+    )
+    feats_b, path_b, pose_b = _extract_features_array(
+        compare, results_dir, "vidB",
+        raw_dir / "vidB.mp4", raw_dir / "vidBDLC_resnet50.csv", use_wavelets=True,
+    )
+
+    index = {
+        "vidA": {
+            "video_path": str(raw_dir / "vidA.mp4"),
+            "csv_path": str(raw_dir / "vidADLC_resnet50.csv"),
+            "n_frames": int(pose_a.shape[0]),
+            "n_keypoints": int(pose_a.shape[1]),
+            "n_features": int(feats_a.shape[1]),
+            "features_path": str(path_a),
+        },
+        "vidB": {
+            "video_path": str(raw_dir / "vidB.mp4"),
+            "csv_path": str(raw_dir / "vidBDLC_resnet50.csv"),
+            "n_frames": int(pose_b.shape[0]),
+            "n_keypoints": int(pose_b.shape[1]),
+            "n_features": int(feats_b.shape[1]),
+            "features_path": str(path_b),
+        },
+        "_meta": {
+            "n_keypoints": int(pose_a.shape[1]),
+            "n_features": int(feats_a.shape[1]),
+            "use_wavelets": False,
+            "vieb_version": "1.0",
+            "pose_source": "csv",
+            "project_name": "test_project",  # custom field that must survive
+        },
+    }
+    index_path = features_dir / "index.json"
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    compare.cmd_fix_features(fps=30.0)
+
+    with open(index_path) as f:
+        new_index = json.load(f)
+
+    meta = new_index["_meta"]
+    # Updated fields
+    assert meta["use_wavelets"] is True
+    assert meta["n_features"] == feats_b.shape[1]
+    # Preserved fields must not be dropped
+    assert meta.get("vieb_version") == "1.0"
+    assert meta.get("pose_source") == "csv"
+    assert meta.get("project_name") == "test_project"
+    # feature_names must be rebuilt (non-empty list of strings)
+    assert isinstance(meta.get("feature_names"), list) and len(meta["feature_names"]) > 0
+    assert meta["feature_names"][0].startswith("speed_")

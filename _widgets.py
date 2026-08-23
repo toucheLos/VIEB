@@ -4,10 +4,10 @@ import os
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtGui import QCursor, QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSlider, QToolButton,
+    QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QTableWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,54 @@ if _MPL:
             super().__init__(self.fig)
             self.setParent(parent)
             self.ax = self.fig.add_subplot(111)
+            self.setCursor(QCursor(Qt.PointingHandCursor))
+            self.setToolTip("Click to expand")
+            # If set, _show_expanded loads this PNG directly (full resolution)
+            # instead of re-rendering the figure.
+            self._expand_png_path = None  # str path or None
+
+        def mousePressEvent(self, event):
+            super().mousePressEvent(event)
+            self._show_expanded()
+
+        def _show_expanded(self):
+            if self._expand_png_path:
+                pix = QPixmap(self._expand_png_path)
+            else:
+                from io import BytesIO
+                buf = BytesIO()
+                try:
+                    self.fig.savefig(buf, format="png", dpi=250, bbox_inches="tight")
+                except Exception:
+                    return
+                buf.seek(0)
+                pix = QPixmap()
+                pix.loadFromData(buf.read())
+            if pix.isNull():
+                return
+            screen = QApplication.primaryScreen().availableGeometry()
+            max_w = int(screen.width() * 0.92)
+            max_h = int(screen.height() * 0.88)
+            dlg = QDialog(self.parent())
+            dlg.setWindowTitle("Chart — click anywhere or press Esc to close")
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+            dlg.resize(min(pix.width() + 40, max_w), min(pix.height() + 80, max_h))
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(4, 4, 4, 4)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            lbl = QLabel()
+            lbl.setPixmap(pix)
+            lbl.setAlignment(Qt.AlignCenter)
+            scroll.setWidget(lbl)
+            lay.addWidget(scroll, stretch=1)
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.clicked.connect(dlg.accept)
+            lay.addWidget(close_btn, alignment=Qt.AlignRight)
+            dlg.exec_()
+
 else:
     class MplCanvas(QWidget):
         def __init__(self, parent=None, figsize=(6, 4)):
@@ -37,8 +85,105 @@ else:
             pass
 
 
+def set_chart_expand_source(canvas, png_path=None):
+    """Wire a MplCanvas's click-to-expand to show a source PNG at full resolution.
+
+    Charts that are drawn by re-rendering a matplotlib figure (e.g. bar charts,
+    scatter plots built from a dataframe) look fine expanded at high DPI. But
+    charts that are themselves just an ``ax.imshow()`` of an already-rendered
+    PNG (heatmaps saved by compare.py/cohort_analysis.py etc.) look blurry when
+    the *screen-resolution* imshow is re-rendered and upscaled. For those,
+    point the canvas at the original file so expand shows it pixel-for-pixel.
+
+    Pass png_path=None (or omit) to fall back to the default figure re-render.
+    """
+    if canvas is not None:
+        canvas._expand_png_path = str(png_path) if png_path else None
+
+
+class CollapsibleTableWidget(QWidget):
+    """Drop-in QTableWidget replacement that can collapse to its first few rows.
+
+    Existing code populates tables via setRowCount()/setColumnCount()/setItem()
+    etc. — this wrapper intercepts only the row-count-changing calls to apply
+    a "top N rows + header" view with a toggle button, and proxies everything
+    else (setItem, signals, headers, sorting, ...) straight through to a real
+    QTableWidget so no call-site behavior changes. Rows beyond the preview are
+    hidden (setRowHidden), not removed, so rowCount()/item() still see all data.
+    """
+
+    def __init__(self, rows=0, columns=0, parent=None, preview_rows=3):
+        super().__init__(parent)
+        self._preview_rows = preview_rows
+        self._collapsed = True
+        self.table = QTableWidget(rows, columns)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+
+        self._toggle_btn = QPushButton()
+        self._toggle_btn.setFlat(True)
+        self._toggle_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._toggle_btn.setStyleSheet(
+            "QPushButton { text-align:left; color:#4a90d9; border:none; padding:2px; }"
+        )
+        self._toggle_btn.clicked.connect(self._toggle)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.addWidget(self._toggle_btn)
+        bar.addStretch()
+        self._bar = QWidget()
+        self._bar.setLayout(bar)
+        self._bar.setVisible(False)
+
+        lay.addWidget(self._bar)
+        lay.addWidget(self.table)
+        self._apply_collapse()
+
+    def _apply_collapse(self):
+        n = self.table.rowCount()
+        if n <= self._preview_rows:
+            self._bar.setVisible(False)
+            for r in range(n):
+                self.table.setRowHidden(r, False)
+            return
+        self._bar.setVisible(True)
+        if self._collapsed:
+            self._toggle_btn.setText(f"Show all {n} rows ▾")
+        else:
+            self._toggle_btn.setText(f"Show top {self._preview_rows} ▴")
+        for r in range(n):
+            self.table.setRowHidden(r, self._collapsed and r >= self._preview_rows)
+
+    def _toggle(self):
+        self._collapsed = not self._collapsed
+        self._apply_collapse()
+
+    def setRowCount(self, n):
+        self.table.setRowCount(n)
+        self._collapsed = True
+        self._apply_collapse()
+
+    def insertRow(self, row):
+        self.table.insertRow(row)
+        self._apply_collapse()
+
+    def removeRow(self, row):
+        self.table.removeRow(row)
+        self._apply_collapse()
+
+    def __getattr__(self, name):
+        # Fall through to the wrapped QTableWidget for anything not
+        # explicitly overridden above (setItem, signals, headers, ...).
+        if name == "table":
+            raise AttributeError(name)
+        return getattr(self.table, name)
+
+
 class VideoPlayer(QWidget):
     video_finished = pyqtSignal()
+    frame_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,8 +205,9 @@ class VideoPlayer(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self._display = QLabel("No video loaded", alignment=Qt.AlignCenter)
         self._display.setMinimumSize(320, 220)
+        self._display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._display.setStyleSheet("background:#111;color:#999;")
-        lay.addWidget(self._display)
+        lay.addWidget(self._display, stretch=1)
 
         ctrl = QHBoxLayout()
         self._btn_play = QPushButton("Play")
@@ -78,7 +224,7 @@ class VideoPlayer(QWidget):
 
         ctrl.addWidget(QLabel("Speed"))
         self._speed_combo = QComboBox()
-        self._speed_combo.addItems(["0.25x", "0.5x", "1x"])
+        self._speed_combo.addItems(["0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x"])
         self._speed_combo.setCurrentText("1x")
         self._speed_combo.currentTextChanged.connect(self._set_speed)
         ctrl.addWidget(self._speed_combo)
@@ -126,6 +272,14 @@ class VideoPlayer(QWidget):
         self._slider.blockSignals(True)
         self._slider.setValue(idx)
         self._slider.blockSignals(False)
+        self.frame_changed.emit(idx)
+
+    def resizeEvent(self, e):
+        # Re-render the current frame at the new size when paused; during
+        # playback _show already re-scales every frame.
+        super().resizeEvent(e)
+        if self._cap and not self._playing:
+            self._show(self._cur)
 
     def _next_frame(self):
         nxt = self._cur + 1
@@ -376,6 +530,11 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ARROW_STYLE = (
+        "QToolButton{color:#5f6368;background:transparent;border:none;"
+        "padding:0;margin:0;}"
+        "QToolButton:hover{background:#edf2f7;border-radius:3px;}"
+    )
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -434,10 +593,12 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
-        self._arrow.setStyleSheet(
-            "color:#999;background:transparent;border:none;"
-        )
+        self._arrow = QToolButton()
+        self._arrow.setArrowType(Qt.RightArrow)
+        self._arrow.setCursor(Qt.PointingHandCursor)
+        self._arrow.setFixedSize(18, 18)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.clicked.connect(self._toggle)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -488,12 +649,6 @@ class StageRow(QFrame):
             self._collapse.setChecked(bool(self.cfg.get("enable_state_collapse", False)))
             self._collapse.toggled.connect(lambda v: self.changed.emit("enable_state_collapse", v))
             params.addWidget(self._collapse)
-            has_params = True
-        if self.stage["id"] == 11:
-            self._clips = QCheckBox("Export video clips")
-            self._clips.setChecked(bool(self.cfg.get("export_clips", False)))
-            self._clips.toggled.connect(lambda v: self.changed.emit("export_clips", v))
-            params.addWidget(self._clips)
             has_params = True
         if self.stage["id"] == 5:
             self._diagnose_btn = QPushButton("Diagnose")
@@ -566,11 +721,13 @@ class StageRow(QFrame):
 
         self.set_status("pending")
 
-    def _toggle(self):
-        expanded = not self._body.isVisible()
+    def _set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _toggle(self):
+        self._set_expanded(not self._body.isVisible())
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -586,14 +743,7 @@ class StageRow(QFrame):
             f"background:transparent;border:none;font-size:13px;"
             f"font-weight:bold;color:{icon_color};"
         )
-        if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText("▾")
-        else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText("▸")
+        self._set_expanded(status == "running")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)

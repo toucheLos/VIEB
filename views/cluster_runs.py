@@ -1,26 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
-from _utils import ROOT, RESULTS, _save_cfg, _load_cfg
+from _utils import ROOT, RESULTS, _save_cfg
+from cluster_run_manager import ClusterRunManager
 
 
-def _shared_dir() -> Path:
-    return RESULTS / "shared"
-
-
-def _runs_dir() -> Path:
-    return RESULTS / "runs"
+def _manager() -> ClusterRunManager:
+    return ClusterRunManager(RESULTS, config_path=ROOT / "config.json")
 
 
 def _load_manifest(path: Path) -> dict | None:
@@ -28,19 +23,6 @@ def _load_manifest(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-
-
-def _next_run_n(runs_dir: Path) -> int:
-    max_n = 0
-    if runs_dir.is_dir():
-        for name in os.listdir(runs_dir):
-            if name.startswith("run_") and (runs_dir / name).is_dir():
-                try:
-                    n = int(name.split("_")[1])
-                    max_n = max(max_n, n)
-                except (IndexError, ValueError):
-                    pass
-    return max_n + 1
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +60,8 @@ class _RunCard(QFrame):
         noise_frac = m.get("noise_frac", None)
         mcs = m.get("min_cluster_size", "—")
         umap_dims = m.get("umap_dims", "—")
-        hms = m.get("hdbscan_min_samples", 0)
+        ms_req = m.get("min_samples_requested", None)
+        ms_res = m.get("min_samples_resolved", m.get("hdbscan_min_samples", 0))
         saved = bool(m.get("saved", False))
 
         id_row = QHBoxLayout()
@@ -100,8 +83,10 @@ class _RunCard(QFrame):
         lay.addWidget(QLabel("  ·  ".join(meta_parts)))
 
         param_parts = [f"mcs={mcs}", f"umap={umap_dims}"]
-        if hms:
-            param_parts.append(f"min_samples={hms}")
+        if ms_req is not None and ms_req == 0:
+            param_parts.append(f"min_samples=Auto (→{ms_res})")
+        elif ms_res:
+            param_parts.append(f"min_samples={ms_res}")
         param_lbl = QLabel("  ·  ".join(param_parts))
         param_lbl.setStyleSheet("color:#666;font-size:11px;")
         lay.addWidget(param_lbl)
@@ -199,6 +184,36 @@ class ClusterRunsView(QWidget):
         self._current_layout.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._current_area)
 
+        self._diag_frame = QFrame()
+        self._diag_frame.setFrameShape(QFrame.StyledPanel)
+        self._diag_frame.setStyleSheet(
+            "QFrame{background:#FAFAFA;border:1px solid #E0E0E0;border-radius:6px;}"
+        )
+        df_lay = QVBoxLayout(self._diag_frame)
+        df_lay.setContentsMargins(16, 12, 16, 12)
+        df_lay.setSpacing(8)
+
+        diag_hdr = QHBoxLayout()
+        diag_title = QLabel("Clustering Diagnostics")
+        diag_title.setFont(QFont("Arial", 12, QFont.Bold))
+        diag_hdr.addWidget(diag_title)
+        diag_hdr.addStretch()
+        df_lay.addLayout(diag_hdr)
+
+        self._diag_params = QLabel("")
+        self._diag_params.setWordWrap(True)
+        self._diag_params.setStyleSheet(
+            "font-size:11px;color:#444;font-family:monospace;border:none;background:transparent;"
+        )
+        df_lay.addWidget(self._diag_params)
+
+        self._diag_warnings_lay = QVBoxLayout()
+        self._diag_warnings_lay.setSpacing(4)
+        df_lay.addLayout(self._diag_warnings_lay)
+
+        self._diag_frame.hide()
+        outer.addWidget(self._diag_frame)
+
         div = QFrame()
         div.setFrameShape(QFrame.HLine)
         div.setStyleSheet("color:#E5E5E5;background:#E5E5E5;border:none;max-height:1px;")
@@ -230,6 +245,7 @@ class ClusterRunsView(QWidget):
 
     def refresh(self):
         self._refresh_current()
+        self._refresh_diagnostics()
         self._refresh_saved()
 
     # ------------------------------------------------------------------
@@ -243,7 +259,7 @@ class ClusterRunsView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        manifest_path = _shared_dir() / "run_manifest.json"
+        manifest_path = RESULTS / "shared" / "run_manifest.json"
         if not manifest_path.exists():
             lbl = QLabel("No current run. Run --cluster to create one.")
             lbl.setStyleSheet("color:#888;font-style:italic;")
@@ -269,28 +285,136 @@ class ClusterRunsView(QWidget):
         lay.addWidget(card)
 
     # ------------------------------------------------------------------
+    # Diagnostics panel
+    # ------------------------------------------------------------------
+
+    def _refresh_diagnostics(self):
+        manifest = _load_manifest(RESULTS / "shared" / "run_manifest.json") or {}
+        ci       = _load_manifest(RESULTS / "shared" / "cluster_info.json") or {}
+
+        if not manifest and not ci:
+            self._diag_frame.hide()
+            return
+
+        feat_meta: dict = {}
+        idx_path = RESULTS / "features" / "index.json"
+        if idx_path.exists():
+            idx = _load_manifest(idx_path)
+            if idx:
+                raw_meta = idx.get("_meta", {})
+                # Inline schema migration: feature_count → n_features
+                feat_meta = dict(raw_meta)
+                if "n_features" not in feat_meta and "feature_count" in feat_meta:
+                    feat_meta["n_features"] = feat_meta["feature_count"]
+
+        def _v(m1, m2, key, default="—"):
+            v = m1.get(key)
+            if v is None:
+                v = m2.get(key)
+            return v if v is not None else default
+
+        n_clusters  = _v(manifest, ci, "n_clusters")
+        noise_pct   = manifest.get("noise_frac") or ci.get("noise_frac") or ci.get("low_confidence_frac") or 0
+        mean_conf   = manifest.get("mean_confidence") or ci.get("mean_confidence") or 0
+        umap_dims   = _v(manifest, ci, "umap_dims")
+        mcs         = _v(manifest, ci, "min_cluster_size")
+        ms_req      = manifest.get("min_samples_requested")
+        ms_res      = manifest.get("min_samples_resolved", manifest.get("hdbscan_min_samples"))
+        assign      = manifest.get("assignment_method", ci.get("assignment_method", "—"))
+        health      = manifest.get("health_status", "—")
+
+        # n_features: index.json _meta is primary; manifest is fallback (written since this fix)
+        n_features = feat_meta.get("n_features")
+        if n_features is None:
+            n_features = manifest.get("n_features", ci.get("n_features", "—"))
+
+        # use_wavelets: index.json _meta is primary; manifest fallback; None = unknown
+        use_wavelets = feat_meta.get("use_wavelets")
+        if use_wavelets is None:
+            uw_fallback = manifest.get("use_wavelets")
+            if uw_fallback is not None:
+                use_wavelets = uw_fallback
+
+        if ms_req == 0 and ms_res:
+            ms_text = f"min_samples=Auto (→{ms_res})"
+        elif ms_res:
+            ms_text = f"min_samples={ms_res}"
+        else:
+            ms_text = ""
+
+        if use_wavelets is True:
+            wav_text = "yes"
+        elif use_wavelets is False:
+            wav_text = "no"
+        else:
+            wav_text = "—"
+
+        health_colors = {"good": "#2e7d32", "suspicious": "#e65100", "failed": "#c62828"}
+        health_color = health_colors.get(str(health), "#555")
+
+        line1 = f"States: {n_clusters}   Noise: {float(noise_pct) * 100:.1f}%   Conf: {float(mean_conf):.3f}"
+        line2_parts = [f"mcs={mcs}", f"umap={umap_dims}"]
+        if ms_text:
+            line2_parts.append(ms_text)
+        line2 = "   ".join(line2_parts)
+        line3_parts = [f"Features: {n_features}", f"Wavelets: {wav_text}", f"Assign: {assign}"]
+        line3 = "   ".join(line3_parts)
+
+        self._diag_params.setText(f"{line1}\n{line2}\n{line3}")
+
+        while self._diag_warnings_lay.count():
+            item = self._diag_warnings_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        health_lbl = QLabel(f"Health: {health}")
+        health_lbl.setStyleSheet(f"color:{health_color};font-size:11px;font-weight:600;padding:2px 0;border:none;background:transparent;")
+        self._diag_warnings_lay.addWidget(health_lbl)
+
+        warnings = manifest.get("warnings", [])
+        if isinstance(warnings, str):
+            warnings = [warnings]
+        elif not isinstance(warnings, list):
+            warnings = []
+        if not warnings:
+            ok_lbl = QLabel("No warnings.")
+            ok_lbl.setStyleSheet("color:#2e7d32;font-size:11px;padding:2px 0;border:none;background:transparent;")
+            self._diag_warnings_lay.addWidget(ok_lbl)
+        for w in warnings:
+            if isinstance(w, dict):
+                level   = w.get("level", "info")
+                message = w.get("message", "")
+                action  = w.get("action")
+            else:
+                level, message, action = "warning", str(w), None
+            if level == "error":
+                color, icon = "#c62828", "!"
+            elif level == "warning":
+                color, icon = "#e65100", "*"
+            else:
+                color, icon = "#1565c0", "i"
+            lbl = QLabel(f"  {icon}  {message}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color:{color};font-size:11px;padding:2px 0;border:none;background:transparent;")
+            if action:
+                lbl.setToolTip(action)
+            self._diag_warnings_lay.addWidget(lbl)
+
+        self._diag_frame.show()
+
+    # ------------------------------------------------------------------
     # Saved runs list
     # ------------------------------------------------------------------
 
     def _refresh_saved(self):
         vl = self._saved_vl
-        # Remove all but the trailing stretch
         while vl.count() > 1:
             item = vl.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        runs_dir = _runs_dir()
-        saved_runs: list[tuple[str, dict]] = []
-        if runs_dir.is_dir():
-            for entry in sorted(os.listdir(runs_dir)):
-                run_path = runs_dir / entry
-                if not run_path.is_dir():
-                    continue
-                mp = run_path / "run_manifest.json"
-                m = _load_manifest(mp)
-                if m and m.get("saved", False):
-                    saved_runs.append((entry, m))
+        mgr = _manager()
+        saved_runs = [(m.run_id, m.to_dict()) for m in mgr.list_runs() if m.saved]
 
         if not saved_runs:
             self._no_saved_lbl.show()
@@ -309,26 +433,22 @@ class ClusterRunsView(QWidget):
     # ------------------------------------------------------------------
 
     def _save_current_run(self):
-        manifest_path = _shared_dir() / "run_manifest.json"
+        shared = RESULTS / "shared"
+        manifest_path = shared / "run_manifest.json"
         if not manifest_path.exists():
             return
-
         manifest = _load_manifest(manifest_path)
         if manifest is None:
             return
 
+        run_id = manifest.get("run_id", "")
+        if not run_id:
+            return
+
+        _manager().save_run(run_id)
+
         manifest["saved"] = True
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-        run_id = manifest.get("run_id", "")
-        if run_id:
-            run_dir = _runs_dir() / run_id
-            run_dir.mkdir(parents=True, exist_ok=True)
-            for fname in os.listdir(_shared_dir()):
-                src = _shared_dir() / fname
-                if src.is_file():
-                    shutil.copy2(src, run_dir / fname)
-
         self.cfg["current_run_saved"] = True
         _save_cfg(self.cfg)
 
@@ -338,20 +458,16 @@ class ClusterRunsView(QWidget):
     def _delete_current_run(self):
         reply = QMessageBox.question(
             self, "Delete Current Run",
-            "Delete the current unsaved run? This cannot be undone.",
+            "Delete the current run? This cannot be undone.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        shared = _shared_dir()
-        cluster_files = (
-            list(shared.glob("*.npy"))
-            + list(shared.glob("*.pkl"))
-            + [shared / "cluster_info.json", shared / "run_manifest.json",
-               shared / "validation_report.json"]
-        )
-        for p in cluster_files:
+        shared = RESULTS / "shared"
+        for p in (list(shared.glob("*.npy")) + list(shared.glob("*.pkl"))
+                  + [shared / "cluster_info.json", shared / "run_manifest.json",
+                     shared / "validation_report.json"]):
             try:
                 if p.exists():
                     p.unlink()
@@ -360,39 +476,22 @@ class ClusterRunsView(QWidget):
 
         self.cfg["current_run_saved"] = False
         self.cfg["current_run_id"] = ""
+        self.cfg["active_cluster_run"] = ""
         _save_cfg(self.cfg)
         self.refresh()
 
     def _activate_run(self, run_name: str):
-        run_dir = _runs_dir() / run_name
-        if not run_dir.is_dir():
+        mgr = _manager()
+        try:
+            mgr.set_active_run(run_name)
+        except FileNotFoundError:
             QMessageBox.warning(self, "Not Found", f"Run directory not found: {run_name}")
             return
 
-        shared = _shared_dir()
-        shared.mkdir(parents=True, exist_ok=True)
-
-        cluster_files = (
-            list(shared.glob("*.npy"))
-            + list(shared.glob("*.pkl"))
-            + [shared / "cluster_info.json", shared / "run_manifest.json",
-               shared / "validation_report.json"]
-        )
-        for p in cluster_files:
-            try:
-                if p.exists():
-                    p.unlink()
-            except Exception:
-                pass
-
-        for fname in os.listdir(run_dir):
-            src = run_dir / fname
-            if src.is_file():
-                shutil.copy2(src, shared / fname)
-
-        manifest = _load_manifest(run_dir / "run_manifest.json")
-        run_id = manifest.get("run_id", run_name) if manifest else run_name
+        m = mgr.load_run_manifest(run_name)
+        run_id = m.run_id if m else run_name
         self.cfg["current_run_id"] = run_id
+        self.cfg["active_cluster_run"] = run_id
         self.cfg["current_run_saved"] = True
         _save_cfg(self.cfg)
 
@@ -401,7 +500,8 @@ class ClusterRunsView(QWidget):
         self.cluster_changed.emit()
 
     def _rename_current_run(self):
-        manifest_path = _shared_dir() / "run_manifest.json"
+        shared = RESULTS / "shared"
+        manifest_path = shared / "run_manifest.json"
         if not manifest_path.exists():
             return
         manifest = _load_manifest(manifest_path)
@@ -409,16 +509,12 @@ class ClusterRunsView(QWidget):
             return
 
         old_id = manifest.get("run_id", "")
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Run", "New name:", text=old_id
-        )
-        if not ok or not new_name.strip():
+        new_name, ok = QInputDialog.getText(self, "Rename Run", "New name:", text=old_id)
+        if not ok or not new_name.strip() or new_name.strip() == old_id:
             return
         new_name = new_name.strip()
-        if new_name == old_id:
-            return
 
-        runs_dir = _runs_dir()
+        runs_dir = RESULTS / "runs"
         if (runs_dir / new_name).exists():
             QMessageBox.warning(self, "Name Taken", f"A saved run named '{new_name}' already exists.")
             return
@@ -426,63 +522,55 @@ class ClusterRunsView(QWidget):
         manifest["run_id"] = new_name
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-        # If there's a saved copy under the old name, rename that directory too
         old_dir = runs_dir / old_id
         if old_dir.is_dir():
             new_dir = runs_dir / new_name
             old_dir.rename(new_dir)
-            saved_manifest_path = new_dir / "run_manifest.json"
-            saved_manifest = _load_manifest(saved_manifest_path)
-            if saved_manifest is not None:
-                saved_manifest["run_id"] = new_name
-                saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+            saved_mp = new_dir / "run_manifest.json"
+            saved_m = _load_manifest(saved_mp)
+            if saved_m is not None:
+                saved_m["run_id"] = new_name
+                saved_mp.write_text(json.dumps(saved_m, indent=2), encoding="utf-8")
 
-        if self.cfg.get("current_run_id") == old_id:
-            self.cfg["current_run_id"] = new_name
-            _save_cfg(self.cfg)
-
+        for key in ("current_run_id", "active_cluster_run"):
+            if self.cfg.get(key) == old_id:
+                self.cfg[key] = new_name
+        _save_cfg(self.cfg)
         self.refresh()
 
     def _rename_saved_run(self, run_name: str):
-        runs_dir = _runs_dir()
-        run_dir = runs_dir / run_name
-        if not run_dir.is_dir():
+        runs_dir = RESULTS / "runs"
+        if not (runs_dir / run_name).is_dir():
             QMessageBox.warning(self, "Not Found", f"Run directory not found: {run_name}")
             return
 
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Run", "New name:", text=run_name
-        )
-        if not ok or not new_name.strip():
+        new_name, ok = QInputDialog.getText(self, "Rename Run", "New name:", text=run_name)
+        if not ok or not new_name.strip() or new_name.strip() == run_name:
             return
         new_name = new_name.strip()
-        if new_name == run_name:
-            return
 
         if (runs_dir / new_name).exists():
             QMessageBox.warning(self, "Name Taken", f"A run named '{new_name}' already exists.")
             return
 
-        new_dir = runs_dir / new_name
-        run_dir.rename(new_dir)
+        (runs_dir / run_name).rename(runs_dir / new_name)
 
-        saved_manifest_path = new_dir / "run_manifest.json"
-        saved_manifest = _load_manifest(saved_manifest_path)
-        if saved_manifest is not None:
-            saved_manifest["run_id"] = new_name
-            saved_manifest_path.write_text(json.dumps(saved_manifest, indent=2), encoding="utf-8")
+        saved_mp = runs_dir / new_name / "run_manifest.json"
+        saved_m = _load_manifest(saved_mp)
+        if saved_m is not None:
+            saved_m["run_id"] = new_name
+            saved_mp.write_text(json.dumps(saved_m, indent=2), encoding="utf-8")
 
-        # Update current run manifest and cfg if this was the active run
-        current_manifest_path = _shared_dir() / "run_manifest.json"
-        current_manifest = _load_manifest(current_manifest_path)
-        if current_manifest and current_manifest.get("run_id") == run_name:
-            current_manifest["run_id"] = new_name
-            current_manifest_path.write_text(json.dumps(current_manifest, indent=2), encoding="utf-8")
+        current_mp = RESULTS / "shared" / "run_manifest.json"
+        current_m = _load_manifest(current_mp)
+        if current_m and current_m.get("run_id") == run_name:
+            current_m["run_id"] = new_name
+            current_mp.write_text(json.dumps(current_m, indent=2), encoding="utf-8")
 
-        if self.cfg.get("current_run_id") == run_name:
-            self.cfg["current_run_id"] = new_name
-            _save_cfg(self.cfg)
-
+        for key in ("current_run_id", "active_cluster_run"):
+            if self.cfg.get(key) == run_name:
+                self.cfg[key] = new_name
+        _save_cfg(self.cfg)
         self.refresh()
 
     def _delete_saved_run(self, run_name: str):
@@ -494,19 +582,12 @@ class ClusterRunsView(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        run_dir = _runs_dir() / run_name
-        try:
-            shutil.rmtree(run_dir)
-        except Exception as exc:
-            QMessageBox.warning(self, "Error", f"Could not delete run: {exc}")
-            return
+        _manager().delete_run(run_name)
 
-        current_run_id = self.cfg.get("current_run_id", "")
-        run_manifest = _load_manifest(_shared_dir() / "run_manifest.json")
-        active_run_id = run_manifest.get("run_id", "") if run_manifest else ""
-
-        if run_name == active_run_id or run_name == current_run_id:
-            shared = _shared_dir()
+        run_m = _load_manifest(RESULTS / "shared" / "run_manifest.json")
+        shared_id = run_m.get("run_id", "") if run_m else ""
+        if run_name in (shared_id, self.cfg.get("current_run_id", ""), self.cfg.get("active_cluster_run", "")):
+            shared = RESULTS / "shared"
             for p in (list(shared.glob("*.npy")) + list(shared.glob("*.pkl"))
                       + [shared / "cluster_info.json", shared / "run_manifest.json",
                          shared / "validation_report.json"]):
@@ -517,6 +598,7 @@ class ClusterRunsView(QWidget):
                     pass
             self.cfg["current_run_id"] = ""
             self.cfg["current_run_saved"] = False
+            self.cfg["active_cluster_run"] = ""
             _save_cfg(self.cfg)
 
         self.refresh()

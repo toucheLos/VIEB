@@ -15,9 +15,11 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import time as _time
 import numpy as np
 import pandas as pd
 
+_t_mpl = _time.perf_counter()
 _MPL = False
 try:
     import matplotlib
@@ -33,7 +35,9 @@ try:
     _MPL = True
 except Exception:
     pass
+print(f"[timing] _utils.py matplotlib import: {(_time.perf_counter() - _t_mpl) * 1000:.1f} ms")
 
+_t_cv2 = _time.perf_counter()
 _CV2 = False
 try:
     import cv2
@@ -41,8 +45,11 @@ try:
     _CV2 = True
 except Exception:
     pass
+print(f"[timing] _utils.py cv2 import: {(_time.perf_counter() - _t_cv2) * 1000:.1f} ms")
 
 from PyQt5.QtGui import QImage, QPixmap
+
+from dlc_project_utils import discover_dlc_projects, normalize_dlc_project_path
 
 # ---------------------------------------------------------------------------
 # Path constants
@@ -313,68 +320,8 @@ def _wsl_elevate_install(extra_args: str = "") -> None:
     )
 
 
-STAGES = [
-    {
-        "id": 0,
-        "name": "Onboarding",
-        "desc": "Choose a project, import a session-defining data source, and prepare metadata.",
-        "cmd": "onboard project",
-    },
-    {
-        "id": 1,
-        "name": "Pose Estimation / DLC Analysis",
-        "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
-        "cmd": "python setup_dlc_training.py --analyze",
-    },
-    {
-        "id": 2,
-        "name": "Feature Extraction",
-        "desc": "Extract frame-level behavioral features from tracked keypoints.",
-        "cmd": "python compare.py --extract [--no-wavelets]",
-    },
-    {
-        "id": 3,
-        "name": "Preprocessing · UMAP · Clustering · Smoothing",
-        "desc": "Standardize features, reduce with UMAP, cluster with HDBSCAN, then smooth labels with HMM.",
-        "cmd": "python compare.py --cluster --min-cluster-size N --umap-dims N [--hdbscan-min-samples N] [--validate]",
-    },
-    {
-        "id": 4,
-        "name": "State Collapsing (optional)",
-        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
-        "cmd": "python compare.py --collapse --collapse-threshold 0.5",
-    },
-    {
-        "id": 5,
-        "name": "Report Generation",
-        "desc": "Build summary tables, transition outputs, and group comparison plots.",
-        "cmd": "python compare.py --report",
-    },
-    {
-        "id": 6,
-        "name": "Per-Animal Scalars",
-        "desc": "Compute freeze AUC and discrimination metrics for each animal.",
-        "cmd": "python compare.py --summarize",
-    },
-    {
-        "id": 7,
-        "name": "Motif Discovery",
-        "desc": "Find enriched bigram/trigram motifs between contexts.",
-        "cmd": "python compare.py --motifs",
-    },
-    {
-        "id": 8,
-        "name": "Generate Clips",
-        "desc": "Export exemplar video clips for each behavioral state.",
-        "cmd": "python generate_clips.py",
-    },
-    {
-        "id": 9,
-        "name": "Add Videos",
-        "desc": "Add more videos to the active project after a first pass or when expanding the dataset.",
-        "cmd": "open add videos",
-    },
-]
+# Stage registry lives in the dependency-free _stages module (single source of truth).
+from _stages import STAGES, _STAGE_BY_ID  # noqa: F401,E402
 
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
@@ -401,6 +348,7 @@ _DEFAULT_CFG = {
     "cohort_csv_path": "",
     "current_run_saved": False,
     "current_run_id": "",
+    "active_cluster_run": "",
     "column_map": {
         "animal_id":  "animal_id",
         "day":        "day",
@@ -455,10 +403,19 @@ def _save_projects(projects: list) -> None:
 def _register_project(path: str) -> None:
     """Add or move a project to the top of the recent-projects list."""
     projects = _load_projects()
-    path = os.path.abspath(path)
-    projects = [p for p in projects if os.path.abspath(p.get("path", "")) != path]
+    project_path = normalize_dlc_project_path(path) or Path(path).expanduser().resolve()
+    path = str(project_path)
+
+    def _same_project(entry: dict) -> bool:
+        raw = entry.get("path", "")
+        normalized = normalize_dlc_project_path(raw)
+        if normalized is None:
+            return False
+        return str(normalized) == path
+
+    projects = [p for p in projects if not _same_project(p)]
     projects.insert(0, {
-        "name": os.path.basename(path),
+        "name": project_path.name,
         "path": path,
         "config": os.path.join(path, "config.yaml"),
         "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -523,8 +480,9 @@ def _results_exist():
 
 
 def _find_dlc_project():
-    for p in ROOT.glob("VIEB-*/config.yaml"):
-        return p.parent
+    projects = discover_dlc_projects(ROOT)
+    if projects:
+        return projects[0]
     return None
 
 

@@ -6,8 +6,7 @@ rather than hardcoding any directory name.  The DLC project path is resolved in
 this priority order:
 
   1. config.json key "dlc_project_path" (explicit override)
-  2. Auto-discovery: any directory in the project root matching VIEB-*-20YY-MM-DD
-     that also contains a config.yaml
+  2. Auto-discovery: a generated DLC*/ legacy VIEB-* directory that contains a config.yaml
   3. None  — DLC not yet configured; callers decide what to do
 """
 
@@ -15,20 +14,46 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from typing import Optional
 from pathlib import Path
 
 import project_manager as _pm
+from dlc_project_utils import discover_dlc_projects, normalize_dlc_project_path
 
 PROJECT_ROOT: str = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "config.json")
 _APP_CONFIG_PATH: str = os.path.join(PROJECT_ROOT, "app_config.json")
+_path_cache: dict[str, str] = {}
 
-# Standard DLC project directory naming: VIEB-<anything>-YYYY-MM-DD
-_DLC_NAME_RE = re.compile(r"^VIEB-.+-20\d{2}-\d{2}-\d{2}$")
 
+def invalidate_path_cache() -> None:
+    """Clear resolved project path values after config or active project changes."""
+    _path_cache.clear()
+
+
+def _path_cache_token() -> str:
+    try:
+        app_mtime = os.path.getmtime(_APP_CONFIG_PATH)
+    except Exception:
+        app_mtime = -1.0
+    try:
+        cfg = _pm.load_app_config(_APP_CONFIG_PATH)
+        active = cfg.get("active_project", "")
+    except Exception:
+        active = ""
+    return f"{_APP_CONFIG_PATH}|{active}|{app_mtime:.6f}"
+
+
+def _cached_project_path(cache_key: str, project_key: str) -> str:
+    token = _path_cache_token()
+    token_key = "_token"
+    if _path_cache.get(token_key) != token:
+        _path_cache.clear()
+        _path_cache[token_key] = token
+    if cache_key not in _path_cache:
+        _path_cache[cache_key] = str(_pm.resolve_project_path(project_key, PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _path_cache[cache_key]
 
 # ---------------------------------------------------------------------------
 # config.json helpers (thin wrappers — gui.py is the authoritative writer)
@@ -51,6 +76,8 @@ def _require_config() -> dict:
 
 
 def _save_config(data: dict) -> None:
+    _pm.invalidate_project_cache()
+    invalidate_path_cache()
     project = _pm.get_active_project(PROJECT_ROOT, _APP_CONFIG_PATH)
     _pm.write_project_config(project, data)
 
@@ -69,25 +96,16 @@ def get_dlc_project_path() -> Optional[str]:
     cfg = _load_config()
 
     # 1. Explicit entry in config.json
-    explicit = cfg.get("dlc_project_path")
-    if explicit and os.path.isdir(explicit):
-        if os.path.exists(os.path.join(explicit, "config.yaml")):
-            return explicit
+    explicit = normalize_dlc_project_path(cfg.get("dlc_project_path"))
+    if explicit and explicit.is_dir():
+        if (explicit / "config.yaml").exists():
+            return str(explicit)
         # Registered but config.yaml missing — fall through to discovery
 
-    # 2. Auto-discovery: scan project root for any matching directory
-    try:
-        entries = sorted(os.listdir(PROJECT_ROOT))
-    except OSError:
-        entries = []
-
-    for entry in entries:
-        if _DLC_NAME_RE.match(entry):
-            candidate = os.path.join(PROJECT_ROOT, entry)
-            if os.path.isdir(candidate) and os.path.exists(
-                os.path.join(candidate, "config.yaml")
-            ):
-                return candidate
+    # 2. Auto-discovery: scan project root for generated DLC projects
+    discovered = discover_dlc_projects(PROJECT_ROOT)
+    if discovered:
+        return str(discovered[0])
 
     return None
 
@@ -101,7 +119,8 @@ def get_dlc_config_path() -> Optional[str]:
 def set_dlc_project_path(path: str) -> None:
     """Persist a DLC project path to config.json so future calls find it immediately."""
     cfg = _load_config()
-    cfg["dlc_project_path"] = os.path.abspath(path)
+    project_path = normalize_dlc_project_path(path)
+    cfg["dlc_project_path"] = str(project_path) if project_path else os.path.abspath(path)
     _save_config(cfg)
 
 
@@ -242,17 +261,17 @@ def normalize_metadata_columns(df) -> "pd.DataFrame":
 
 def get_raw_videos_dir() -> str:
     """Return the active project's raw-videos directory."""
-    return str(_pm.resolve_project_path("raw_videos", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _cached_project_path("raw_videos_dir", "raw_videos")
 
 
 def get_results_dir() -> str:
     """Return the active project's results directory."""
-    return str(_pm.resolve_project_path("results", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _cached_project_path("results_dir", "results")
 
 
 def get_metadata_path() -> str:
     """Return the active project's metadata CSV path."""
-    return str(_pm.resolve_project_path("metadata", PROJECT_ROOT, _APP_CONFIG_PATH))
+    return _cached_project_path("metadata_path", "metadata")
 
 
 def get_pose_source() -> str:
@@ -305,8 +324,10 @@ def get_clips_dir() -> str:
     """Return the clips directory.
     Derived as the sibling of get_results_dir() named 'clips', which reproduces
     the default PROJECT_ROOT/clips when results_dir is PROJECT_ROOT/results."""
-    from pathlib import Path as _Path
-    return str(_Path(get_results_dir()).parent / "clips")
+    if "clips_dir" not in _path_cache:
+        from pathlib import Path as _Path
+        _path_cache["clips_dir"] = str(_Path(get_results_dir()).parent / "clips")
+    return _path_cache["clips_dir"]
 
 
 def require_dlc_project_path() -> str:

@@ -69,8 +69,12 @@ MIN_BOUT_FRAMES = 6  # 0.2 s
 # Shared helpers — verbatim copies from characterize.py
 # ---------------------------------------------------------------------------
 
-def _resolve_video_path(path: str) -> str:
-    """Resolve a video path that may be relative (from index.json built on another OS)."""
+def _resolve_video_path(path: str | None) -> str | None:
+    """Resolve a video path that may be relative (from index.json built on
+    another OS). Returns None if path is falsy or cannot be found anywhere
+    — e.g. an H5-extracted session whose video only exists on a remote host."""
+    if not path:
+        return None
     if os.path.exists(path):
         return path
     proj_root = os.path.dirname(os.path.abspath(__file__))
@@ -82,7 +86,31 @@ def _resolve_video_path(path: str) -> str:
         candidate = os.path.join(raw_dir, os.path.basename(path))
         if os.path.exists(candidate):
             return candidate
-    return path
+    return None
+
+
+def _summarize_video_availability(index: dict) -> None:
+    """Print a summary of how many index.json sessions have a usable local
+    video, distinguishing missing video_path from unresolvable-on-disk."""
+    stems = [s for s in index.keys() if s != "_meta"]
+    n_total = len(stems)
+    n_missing = 0
+    n_unresolvable = 0
+    n_ok = 0
+    for s in stems:
+        info = index[s]
+        raw_vp = info.get("video_path") if isinstance(info, dict) else None
+        if not raw_vp:
+            n_missing += 1
+            continue
+        if _resolve_video_path(raw_vp):
+            n_ok += 1
+        else:
+            n_unresolvable += 1
+    print(
+        f"\n{n_ok}/{n_total} sessions have a usable local video "
+        f"({n_missing} missing video_path, {n_unresolvable} unresolvable locally)."
+    )
 
 
 def _load_prereqs():
@@ -158,7 +186,7 @@ def _build_bouts_df(index, fps, meta):
                 "animal_id": animal_map.get(stem, ""),
                 "day": day_map.get(stem, ""),
                 "experiment": exp_map.get(stem, ""),
-                "video_path": _resolve_video_path(index[stem]["video_path"]),
+                "video_path": _resolve_video_path(index[stem].get("video_path")),
                 "features_path": index[stem]["features_path"],
             })
     return pd.DataFrame(rows)
@@ -243,6 +271,7 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     centers    = np.array(cluster_info["cluster_centers"])
     clips_written = 0
     clips_attempted = 0
+    clip_index_rows = []
 
     base_clips_dir = output_dir if output_dir else _vc.get_clips_dir()
 
@@ -250,12 +279,39 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     if os.path.exists(bouts_csv):
         bouts_df = pd.read_csv(bouts_csv)
-        vp_map = {s: _resolve_video_path(info["video_path"]) for s, info in index.items() if "video_path" in info}
+        vp_map = {}
+        for s, info in index.items():
+            if "video_path" not in info:
+                continue
+            raw_vp = info.get("video_path")
+            if not raw_vp:
+                continue
+            resolved = _resolve_video_path(raw_vp)
+            if not resolved:
+                continue
+            vp_map[s] = resolved
         fp_map = {s: info["features_path"] for s, info in index.items() if "features_path" in info}
         bouts_df["video_path"]    = bouts_df["stem"].map(vp_map)
         bouts_df["features_path"] = bouts_df["stem"].map(fp_map)
     else:
         bouts_df = _build_bouts_df(index, fps, meta)
+
+    _summarize_video_availability(index)
+
+    # Preflight: drop bouts whose video isn't locally resolvable before any
+    # export attempt, so a lab with partially-available data gets clips for
+    # what IS available instead of wasting attempts (or hard-failing) on what
+    # isn't. video_path resolution already happened above, so this is just a
+    # filter, not a re-check.
+    _n_before = len(bouts_df)
+    if "video_path" in bouts_df.columns:
+        bouts_df = bouts_df[bouts_df["video_path"].notna()].copy()
+    if _n_before > 0 and bouts_df.empty:
+        raise RuntimeError(
+            "No usable local video files — no clips can be written.\n"
+            f"  raw_videos dir : {_vc.get_raw_videos_dir()}\n"
+            "Check that the directory is mounted and readable, then re-run."
+        )
 
     # Load preprocessor for "typical" ranking
     preprocessor = None
@@ -314,11 +370,17 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
             else:
                 left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
             clips_attempted += 1
+            clip_path = os.path.join(out_dir, f"longest_{i+1:02d}.mp4")
             ok = _export_clip(b["video_path"], left, right - 1,
-                              os.path.join(out_dir, f"longest_{i+1:02d}.mp4"), fps=fps,
+                              clip_path, fps=fps,
                               pad_to_secs=5.0, max_secs=max_clip_frames / fps)
             clips_written += int(ok)
             n_ok += int(ok)
+            if ok:
+                clip_index_rows.append({
+                    "clip_path": clip_path, "state_id": k, "kind": "longest",
+                    "stem": stem, "video_path": b["video_path"],
+                })
         print(f"  longest: {n_ok}/{len(kb)} clips written")
 
         # ── Typical bouts (nearest to cluster centroid in PCA space) ───────
@@ -366,11 +428,17 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
                     else:
                         left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
                     clips_attempted += 1
+                    clip_path = os.path.join(out_dir, f"typical_{i+1:02d}.mp4")
                     ok = _export_clip(b["video_path"], left, right - 1,
-                                      os.path.join(out_dir, f"typical_{i+1:02d}.mp4"), fps=fps,
+                                      clip_path, fps=fps,
                                       pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                     clips_written += int(ok)
                     n_ok += int(ok)
+                    if ok:
+                        clip_index_rows.append({
+                            "clip_path": clip_path, "state_id": k, "kind": "typical",
+                            "stem": stem, "video_path": b["video_path"],
+                        })
                 print(f"  typical: {n_ok}/{len(kb)} clips written")
 
         # ── Context-specific bouts ─────────────────────────────────────────
@@ -386,11 +454,18 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
                 else:
                     left, right = int(b["start_frame"]), int(b["end_frame"]) + 1
                 clips_attempted += 1
+                clip_path = os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4")
                 ok = _export_clip(b["video_path"], left, right - 1,
-                                  os.path.join(out_dir, f"context_{best_ctx}_{i+1:02d}.mp4"), fps=fps,
+                                  clip_path, fps=fps,
                                   pad_to_secs=5.0, max_secs=max_clip_frames / fps)
                 clips_written += int(ok)
                 n_ok += int(ok)
+                if ok:
+                    clip_index_rows.append({
+                        "clip_path": clip_path, "state_id": k,
+                        "kind": f"context_{best_ctx}",
+                        "stem": stem, "video_path": b["video_path"],
+                    })
             print(f"  context-{best_ctx}: {n_ok}/{len(ctx_bouts)} clips written")
 
     if skipped_states:
@@ -415,6 +490,14 @@ def cmd_clips(fps=30.0, n_clips=None, clip_purity=0.95, max_clip_frames=300,
     if failed:
         print(f"\nWARNING: {failed}/{clips_attempted} clips failed to export.")
     print(f"\nDone: {clips_written}/{clips_attempted} clips saved under {base_clips_dir}/state_<id>/")
+
+    clip_idx_path = os.path.join(_res(), "characterization", "clip_video_index.csv")
+    os.makedirs(os.path.dirname(clip_idx_path), exist_ok=True)
+    pd.DataFrame(
+        clip_index_rows,
+        columns=["clip_path", "state_id", "kind", "stem", "video_path"],
+    ).to_csv(clip_idx_path, index=False)
+    print(f"Clip video index: {clip_idx_path} ({len(clip_index_rows)} clips)")
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +596,52 @@ def _select_diverse_candidates(candidates, limit):
     return selected
 
 
+def _build_motif_sequences_from_bouts(bouts_df, meta_by_stem=None):
+    """Derive bout-level bigram/trigram occurrences from a bouts table.
+
+    Mirrors the schema of compare.py's motif_sequences.csv so cmd_motif_clips can
+    run without a prior `compare.py --motifs`. `position` is the bout index within
+    each stem's bouts sorted by start_frame, matching how cmd_motif_clips resolves
+    frame ranges. Bout sequences are inherently non-degenerate (consecutive bouts
+    always differ in state), so no degenerate filtering is needed here.
+    """
+    cols = ["stem", "type", "motif", "position", "context",
+            "animal_id", "day", "experiment"]
+    if bouts_df is None or bouts_df.empty or "state" not in bouts_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for stem, grp in bouts_df.groupby("stem"):
+        grp = grp.sort_values("start_frame")
+        states = grp["state"].tolist()
+        first = grp.iloc[0]
+
+        def _meta_val(col):
+            if col in grp.columns:
+                v = first.get(col, "")
+                return "" if pd.isna(v) else str(v)
+            if meta_by_stem is not None and stem in meta_by_stem.index \
+                    and col in meta_by_stem.columns:
+                v = meta_by_stem.loc[stem, col]
+                return "" if pd.isna(v) else str(v)
+            return ""
+
+        context = _meta_val("context")
+        animal_id = _meta_val("animal_id")
+        day = _meta_val("day")
+        experiment = _meta_val("experiment")
+
+        for n, typ in ((2, "bigram"), (3, "trigram")):
+            for i in range(len(states) - n + 1):
+                motif = tuple(int(s) for s in states[i:i + n])
+                rows.append({
+                    "stem": str(stem), "type": typ, "motif": str(motif),
+                    "position": i, "context": context, "animal_id": animal_id,
+                    "day": day, "experiment": experiment,
+                })
+    return pd.DataFrame(rows, columns=cols)
+
+
 def cmd_motif_clips(
     fps=None, top_motifs=10, clips_per_motif=5,
     clip_padding_sec=1.0, output_dir=None,
@@ -541,18 +670,56 @@ def cmd_motif_clips(
         bouts_csv = os.path.join(_res(), "characterization", "bouts.csv")
     index_path = os.path.join(_res(), "features", "index.json")
 
-    for path, label in [
-        (seqs_csv, "motif occurrence source (default: results/motifs/motif_sequences.csv)"),
-        (bouts_csv, "bouts.csv (motifs/ or characterization/)"),
-        (index_path, "results/features/index.json"),
-    ]:
-        if not os.path.exists(path):
-            sys.exit(f"Missing {label}: {path}. Run motif discovery first, then re-run with --motif-clips.")
-
-    seqs_df = pd.read_csv(seqs_csv)
-    bouts_df = pd.read_csv(bouts_csv)
+    # index.json is the one hard requirement — it maps stems to videos/features.
+    if not os.path.exists(index_path):
+        sys.exit(
+            f"Missing results/features/index.json: {index_path}. "
+            "Run compare.py --extract / --cluster first, then re-run with --motif-clips."
+        )
     with open(index_path) as f:
         index = {k: v for k, v in json.load(f).items() if isinstance(v, dict) and "features_path" in v}
+
+    # An explicitly requested motif source must exist; the default may be rebuilt.
+    if motif_source and not os.path.exists(motif_source):
+        sys.exit(f"Missing motif occurrence source: {motif_source}.")
+
+    # Load metadata once (used for bout context and the fallback sequence build).
+    meta = pd.DataFrame()
+    if os.path.exists(_meta()):
+        try:
+            meta = _vc.normalize_metadata_columns(pd.read_csv(_meta()))
+            if "stem" not in meta.columns and "filename" in meta.columns:
+                meta["stem"] = meta["filename"].astype(str).str.replace(r"\.[^.]+$", "", regex=True)
+        except Exception:
+            meta = pd.DataFrame()
+
+    # Bouts: read an existing table, otherwise build from labels + index.
+    if os.path.exists(bouts_csv):
+        bouts_df = pd.read_csv(bouts_csv)
+    else:
+        bouts_df = _build_bouts_df(index, fps, meta)
+        if bouts_df is None or bouts_df.empty:
+            sys.exit(
+                "No bouts available to build motif clips. "
+                "Run compare.py --cluster (and optionally --report) first."
+            )
+
+    # Motif occurrences: read an existing table, otherwise derive them from the
+    # bout sequences so a single click works right after clustering.
+    if os.path.exists(seqs_csv):
+        seqs_df = pd.read_csv(seqs_csv)
+    else:
+        meta_by_stem_fb = (
+            meta.drop_duplicates("stem").set_index("stem")
+            if "stem" in meta.columns else None
+        )
+        seqs_df = _build_motif_sequences_from_bouts(bouts_df, meta_by_stem_fb)
+        if seqs_df.empty:
+            sys.exit(
+                "No motif sequences could be derived from bouts. "
+                "Ensure clustering produced sessions with multiple bouts."
+            )
+        print(f"[info] {seqs_csv} not found — derived motif sequences from bouts on the fly.")
 
     required = {"stem", "motif", "position"}
     missing_cols = required - set(seqs_df.columns)
@@ -687,12 +854,18 @@ def cmd_motif_clips(
             animal_id = str(_first_present(occ, ["animal_id"], _first_present(meta_row, ["animal_id"], "")))
             group = str(_first_present(occ, ["group"], _first_present(meta_row, ["group", "cohort"], "")))
             context = str(_first_present(occ, ["context"], _first_present(meta_row, ["context"], "")))
-            video_path = video_map.get(stem, "")
+            video_path = video_map.get(stem) or ""
             skipped_reason = ""
             if stem not in stem_bouts:
                 skipped_reason = "stem not found in bouts.csv"
             elif not video_path:
-                skipped_reason = "source video not listed in feature index"
+                # stem in video_map with a None value means video_path was
+                # set in index.json but couldn't be resolved to an existing
+                # file; absent from video_map means it was never listed.
+                skipped_reason = (
+                    "source video missing" if stem in video_map
+                    else "source video not listed in feature index"
+                )
             elif not os.path.exists(str(video_path)):
                 skipped_reason = "source video missing"
             bouts = stem_bouts.get(stem, [])
@@ -777,15 +950,15 @@ def cmd_motif_clips(
         print(f"  {dir_name}: {n_ok}/{len(selected)} clips written")
 
     # Write index CSV
-    idx_path = os.path.join(_res(), "motifs", "motif_clip_index.csv")
+    idx_path = os.path.join(_res(), "motifs", "motif_exemplars.csv")
     if index_rows:
         os.makedirs(os.path.dirname(idx_path), exist_ok=True)
         pd.DataFrame(index_rows).to_csv(idx_path, index=False)
-        print(f"\nMotif clip index: {idx_path}")
+        print(f"\nMotif exemplar index: {idx_path}")
     else:
         os.makedirs(os.path.dirname(idx_path), exist_ok=True)
         pd.DataFrame(columns=list(_empty_index_row("", "", "", "").keys())).to_csv(idx_path, index=False)
-        print(f"\nMotif clip index: {idx_path} (empty)")
+        print(f"\nMotif exemplar index: {idx_path} (empty)")
 
     failed = total_attempted - total_written
     if total_attempted == 0:

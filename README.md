@@ -73,7 +73,11 @@ python user_interface.py
 
 VIEB is organized as a staged pipeline. Each stage builds on the previous one. The GUI guides you through all stages with a live terminal output and status indicators.
 
-### Stage 0 — Pose Estimation (DeepLabCut)
+### Stage 0 — Onboarding
+
+Before the pipeline can run, VIEB verifies that an active project exists and has enough information to proceed. Stage 0 shows a summary card with the project name, readiness status, and detected data sources. One primary button guides you through the next step — creating a project, choosing between detected projects, fixing missing configuration, or continuing to the pipeline. Detailed validation checks are available under a "Show details" toggle. All checks are lightweight — no directory scanning, no heavy library loading.
+
+### Stage 1 — Pose Estimation (DeepLabCut)
 
 VIEB takes DeepLabCut CSV output as input. If you have already run DLC on your videos, point VIEB to your `config.yaml` via the DLC Setup view and your raw videos directory via Settings. VIEB will find the pose CSVs automatically.
 
@@ -83,7 +87,7 @@ If you are starting from scratch, VIEB includes a full DLC training pipeline: ad
 
 Custom keypoint configurations are supported via the keypoint mapping panel in DLC Setup.
 
-### Stage 1 — Feature Extraction
+### Stage 2 — Feature Extraction
 
 ```bash
 python compare.py --extract
@@ -143,7 +147,7 @@ Compares behavioral profiles across experimental groups using Mann-Whitney U tes
 
 ## GUI Overview
 
-The VIEB GUI provides a complete interface for running and inspecting the pipeline without touching the terminal.
+The VIEB GUI provides a complete interface for running and inspecting the pipeline without touching the terminal. All views are constructed lazily on first visit.
 
 ### Overview
 Dashboard showing dataset statistics, number of discovered behavioral states, and mean state occupancy broken down by cohort or individual animal.
@@ -151,23 +155,30 @@ Dashboard showing dataset statistics, number of discovered behavioral states, an
 ### Pipeline
 Staged pipeline runner. Each stage shows its command, status, and live terminal output. Run stages individually or in sequence.
 
+### Cluster Runs
+Manage and compare clustering experiments. Queue multiple parameter configurations (min_cluster_size, UMAP dims, min_samples) for batch execution, save runs for later comparison, and restore any saved run as the active clustering. A comparison table shows all runs side-by-side with health status indicators.
+
 ### Browse States
 Visual explorer for discovered behavioral states. Displays exemplar video clips, kinematic profiles, and context enrichment for each state. Paginated across all animals.
 
 ### Analysis
-Six-tab analysis hub:
-- **Comparison Report** — state occupancy by day, context, experiment, and animal
-- **State Characterization** — kinematic profiles and heuristic labels per state
+Ten-tab analysis hub (tabs built lazily on first visit):
+- **State Characterization** — kinematic profiles, exemplar clips, and heuristic labels per state
+- **State Comparison** — state occupancy by day, context, experiment, and animal
+- **Transitions & Motifs** — transition matrices and context-enriched motif sequences
+- **Diagnostics** — cluster quality metrics and UMAP embeddings
 - **Cohort Analysis** — group-level comparisons with statistical outputs
 - **Quantification** — per-animal behavioral scalars and master table
 - **Fear Index** — leave-one-out normalized fear expression index
 - **Jess Correlation** — correlation between behavioral scalars and protein expression data
+- **Event Alignment** — time-locked state occupancy around experimental events
+- **Column Mapping** — metadata column mapper for CSV field configuration
 
 ### Validation
-Manual frame labeling interface for ground-truth validation of discovered states.
+Three-tab validation hub: Clip Reviewer (session-based annotation with supervised classifier), Video Watching (random clip sampling), and Frame Sampling (frame-level labeling for paper figures).
 
 ### Settings
-Configure all paths (raw videos, results, metadata, DLC project), arena bounds, FPS, and clustering parameters.
+Full project configuration editor: paths (raw videos, results, metadata, DLC interpreter, cohort file), pose data source (CSV or H5 with auto-detection), arena bounds, context groups and descriptions, experiment labels, FPS, UMAP dimensions, HDBSCAN min_samples, column mapping, metadata generation and validation, and learning curve panel configuration.
 
 ---
 

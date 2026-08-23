@@ -16,22 +16,32 @@ def test_categorize_csv_png_json_mp4():
     assert categorize_file("comparison/summary_table.csv") == ("Summary", "CSV")
     assert categorize_file("comparison/motifs.csv") == ("Motifs", "CSV")
     assert categorize_file("diagnostics/cluster_overview.png") == ("Diagnostics", "Image")
+    assert categorize_file("diagnostics/umap_embedding_by_state.png") == ("Diagnostics", "Image")
     assert categorize_file("motifs/motif_sequences.csv") == ("Motifs", "CSV")
+    assert categorize_file("sequences/video_stories.csv") == ("Video Stories", "CSV")
     assert categorize_file("comparison/transition_table.csv") == ("Transitions", "CSV")
-    assert categorize_file("comparison/state_by_context.png") == ("Plots", "Image")
+    assert categorize_file("comparison/state_by_context.png") == ("Comparison", "Image")
+    assert categorize_file("comparison/contrast_vector_comparison.png") == ("Comparison", "Image")
     assert categorize_file("shared/cluster_info.json") == ("Diagnostics", "JSON")
-    assert categorize_file("characterization/bouts.csv") == ("Bouts", "CSV")
+    assert categorize_file("characterization/bouts.csv") == ("State Characterization", "CSV")
 
 
 def test_categorize_states():
-    assert categorize_file("characterization/state_summary.csv") == ("States", "CSV")
-    assert categorize_file("characterization/context_report.csv") == ("States", "CSV")
+    assert categorize_file("characterization/state_summary.csv") == ("State Characterization", "CSV")
+    assert categorize_file("characterization/context_report.csv") == ("State Characterization", "CSV")
+    assert categorize_file("characterization/state_occupancy.png") == ("State Characterization", "Image")
     assert categorize_file("validation/state_labels.csv") == ("States", "CSV")
+
+
+def test_categorize_cluster_runs():
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/cluster_info.json") == ("Cluster Runs", "JSON")
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/clusterer.pkl") == ("Cluster Runs", "Model")
+    assert categorize_file("runs/run_001_20260101_0000_mcs2000_umap10/run_manifest.json") == ("Cluster Runs", "JSON")
 
 
 def test_categorize_metadata():
     assert categorize_file("shared/preprocessor.pkl") == ("Metadata", "Model")
-    assert categorize_file("features/index.json") == ("Metadata", "JSON")
+    assert categorize_file("features/index.json") == ("Features", "JSON")
 
 
 def test_categorize_video_as_clips():
@@ -51,7 +61,8 @@ def test_categorize_mov_extension():
 def test_scan_finds_files(tmp_path):
     (tmp_path / "comparison").mkdir()
     (tmp_path / "comparison" / "summary_table.csv").write_text("a,b\n1,2")
-    (tmp_path / "comparison" / "state_occupancy.png").write_bytes(b"PNG")
+    (tmp_path / "characterization").mkdir()
+    (tmp_path / "characterization" / "state_occupancy.png").write_bytes(b"PNG")
     (tmp_path / "diagnostics").mkdir()
     (tmp_path / "diagnostics" / "cluster_diagnostics.json").write_text("{}")
 
@@ -59,6 +70,7 @@ def test_scan_finds_files(tmp_path):
     assert len(artifacts) == 3
     categories = {a["category"] for a in artifacts}
     assert "Summary" in categories
+    assert "State Characterization" in categories
     assert "Diagnostics" in categories
 
 
@@ -80,6 +92,21 @@ def test_scan_includes_bulk_when_requested(tmp_path):
     artifacts = scan_artifacts(str(tmp_path), include_bulk=True)
     names = [a["name"] for a in artifacts]
     assert "video1_labels.npy" in names
+
+
+def test_scan_categorizes_story_clips_separately_from_state_clips(tmp_path):
+    results_dir = tmp_path / "results"
+    clips_dir = tmp_path / "clips"
+    results_dir.mkdir()
+    (clips_dir / "stories" / "vid1").mkdir(parents=True)
+    (clips_dir / "state_0").mkdir(parents=True)
+    (clips_dir / "stories" / "vid1" / "f0-150.mp4").write_bytes(b"x")
+    (clips_dir / "state_0" / "longest_01.mp4").write_bytes(b"x")
+
+    artifacts = scan_artifacts(str(results_dir), clips_dir=str(clips_dir))
+    by_rel = {a["rel_path"].replace("\\", "/"): a["category"] for a in artifacts}
+    assert by_rel["clips/stories/vid1/f0-150.mp4"] == "Video Stories"
+    assert by_rel["clips/state_0/longest_01.mp4"] == "Clips"
 
 
 def test_scan_empty_dir(tmp_path):
@@ -122,6 +149,15 @@ def test_publication_bundle(tmp_path):
     (results / "shared" / "cluster_info.json").write_text('{"n":5}')
     (results / "motifs").mkdir()
     (results / "motifs" / "motif_summary.csv").write_text("x,y\n1,2")
+    (results / "sequences").mkdir()
+    (results / "sequences" / "video_story_bouts.csv").write_text("video_id,state\nv1,0")
+    (results / "sequences" / "video_stories.csv").write_text("video_id,n_bouts\nv1,1")
+    (results / "sequences" / "subject_journeys.csv").write_text("subject_id,timepoint\ns1,0")
+    (results / "characterization").mkdir()
+    (results / "characterization" / "state_occupancy.png").write_bytes(b"PNG")
+    (results / "diagnostics").mkdir()
+    (results / "diagnostics" / "umap_embedding_by_state.png").write_bytes(b"PNG")
+    (results / "comparison" / "contrast_vector_comparison.png").write_bytes(b"PNG")
 
     out = str(tmp_path / "pub.zip")
     build_publication_bundle(str(results), out)
@@ -133,7 +169,13 @@ def test_publication_bundle(tmp_path):
         assert "shared/run_manifest.json" in names
         assert "shared/cluster_info.json" in names
         assert "comparison/state_by_context.png" in names
+        assert "characterization/state_occupancy.png" in names
+        assert "diagnostics/umap_embedding_by_state.png" in names
+        assert "comparison/contrast_vector_comparison.png" in names
         assert "motifs/motif_summary.csv" in names
+        assert "sequences/video_story_bouts.csv" in names
+        assert "sequences/video_stories.csv" in names
+        assert "sequences/subject_journeys.csv" in names
 
 
 def test_publication_bundle_skips_missing(tmp_path):

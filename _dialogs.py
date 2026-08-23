@@ -30,6 +30,11 @@ from _utils import (
     detect_nvidia_driver, select_gpu_stack, gpu_stack_message,
 )
 from _workers import ExportWorker, SubprocessWorker
+from dlc_project_utils import (
+    default_dlc_task_name,
+    expected_dlc_project_dir,
+    normalize_dlc_project_path,
+)
 
 if _MPL:
     from _utils import plt, PdfPages, Figure, mpl_cm, mpimg
@@ -70,12 +75,17 @@ class _CreateProjectDialog(QDialog):
             return le
 
         self._proj_name = field(
-            "Project name", "e.g. VIEB",
-            "Short name for this DLC project (no spaces recommended).",
+            "DLC project name",
+            "e.g. DLC-Luna-2026-06-30",
+            "Editable DeepLabCut task name. VIEB defaults this to DLC-<project>-<date>.",
         )
+        self._proj_name.setText(default_dlc_task_name(self.cfg.get("project_name")))
         self._experimenter = field(
             "Experimenter name", "e.g. Carlos",
-            "Your name — used to name the project directory (VIEB-<name>-<date>).",
+            "Your name — DeepLabCut includes this in the generated project directory.",
+        )
+        self._experimenter.setText(
+            str(self.cfg.get("dlc_experimenter") or os.environ.get("USER") or "").strip()
         )
 
         # Video directory row (with Browse button)
@@ -121,6 +131,20 @@ class _CreateProjectDialog(QDialog):
             self._status.setStyleSheet("color:#c62828;")
             return
 
+        expected_dir = expected_dlc_project_dir(ROOT, name, experimenter)
+        expected_config = expected_dir / "config.yaml"
+        if expected_dir.exists():
+            if expected_config.exists():
+                self._use_existing_project(expected_dir)
+                return
+            self._status.setText(
+                "⚠ A folder already exists for this DLC project name, but it does not "
+                f"contain config.yaml:\n{expected_dir}\n\n"
+                "Choose a different DLC project name or remove the incomplete folder."
+            )
+            self._status.setStyleSheet("color:#c62828;")
+            return
+
         try:
             import deeplabcut
         except ImportError:
@@ -142,16 +166,38 @@ class _CreateProjectDialog(QDialog):
                 working_directory=str(ROOT),
                 copy_videos=False,
             )
+            project_dir = normalize_dlc_project_path(project_path) or expected_dir
+            if not (project_dir / "config.yaml").exists() and expected_config.exists():
+                project_dir = expected_dir
+            if not (project_dir / "config.yaml").exists():
+                raise RuntimeError(
+                    "DeepLabCut did not create a config.yaml at the expected project path."
+                )
             import vieb_config
-            vieb_config.set_dlc_project_path(project_path)
-            _register_project(project_path)
-            self.result_path = project_path
-            self._status.setText(f"✓ Created: {project_path}")
+            vieb_config.set_dlc_project_path(str(project_dir))
+            self.cfg["dlc_project_path"] = str(project_dir)
+            self.cfg["dlc_experimenter"] = experimenter
+            _save_cfg(self.cfg)
+            _register_project(str(project_dir))
+            self.result_path = str(project_dir)
+            self._status.setText(f"✓ Created: {project_dir}")
             self._status.setStyleSheet("color:#2e7d32;")
             self.accept()
         except Exception as exc:
             self._status.setText(f"✕ Failed: {exc}")
             self._status.setStyleSheet("color:#c62828;")
+
+    def _use_existing_project(self, project_dir: Path):
+        import vieb_config
+        vieb_config.set_dlc_project_path(str(project_dir))
+        self.cfg["dlc_project_path"] = str(project_dir)
+        self.cfg["dlc_experimenter"] = self._experimenter.text().strip()
+        _save_cfg(self.cfg)
+        _register_project(str(project_dir))
+        self.result_path = str(project_dir)
+        self._status.setText(f"✓ Using existing DLC project: {project_dir}")
+        self._status.setStyleSheet("color:#2e7d32;")
+        self.accept()
 
 
 class WslSetupDialog(QDialog):
@@ -673,188 +719,6 @@ class LinuxGpuSetupDialog(QDialog):
         else:
             self._status.setText("Verification failed — check the output above.")
             self._status.setStyleSheet("color:#b71c1c;font-weight:bold;")
-
-
-class OnboardingDialog(QDialog):
-    completed = pyqtSignal()
-
-    def __init__(self, cfg, parent=None):
-        super().__init__(parent)
-        self.cfg = cfg
-        self._worker = None
-        self._pipeline = None
-        self.setWindowTitle("Welcome to VIEB")
-        self.setModal(True)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(30, 30, 30, 30)
-        self._steps = QLabel("Step 1 - Project Setup   >   Step 2 - Pose Estimation   >   Step 3 - Pipeline Configuration")
-        self._steps.setFont(QFont("Arial", 12, QFont.Bold))
-        lay.addWidget(self._steps)
-        self._stack = QStackedWidget()
-        lay.addWidget(self._stack, stretch=1)
-        self._build_step1()
-        self._build_step2()
-        self._build_step3()
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumHeight(150)
-        self._log.setStyleSheet("background:#111;color:#ddd;")
-        lay.addWidget(self._log)
-
-    def _build_step1(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        l.addWidget(QLabel("Raw videos directory"))
-        h = QHBoxLayout()
-        self._raw_dir = QLineEdit(self.cfg.get("raw_videos_dir", str(ROOT / "raw_videos")))
-        b = QPushButton("Browse...")
-        b.clicked.connect(self._browse_raw)
-        h.addWidget(self._raw_dir)
-        h.addWidget(b)
-        l.addLayout(h)
-        l.addWidget(QLabel("Project name"))
-        self._proj = QLineEdit(self.cfg.get("project_name", "VIEB Project"))
-        l.addWidget(self._proj)
-        self._have_dlc = QCheckBox("I have already run DeepLabCut pose estimation")
-        l.addWidget(self._have_dlc)
-        nxt = QPushButton("Continue")
-        nxt.clicked.connect(self._step1_next)
-        l.addWidget(nxt)
-        l.addStretch()
-        self._stack.addWidget(w)
-
-    def _build_step2(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        card = QLabel(
-            "VIEB uses DeepLabCut to track 8 body keypoints per frame.\n"
-            "This requires labeling ~20 frames per video to train the model.\n"
-            "This step takes several hours but only needs to be done once."
-        )
-        card.setStyleSheet("background:#eef4ff;padding:12px;border:1px solid #c8dafc;border-radius:8px;")
-        l.addWidget(card)
-        self._btn_label = QPushButton("Start Labeling Queue")
-        self._btn_train = QPushButton("Train Model")
-        self._btn_analyze = QPushButton("Run Pose Estimation on All Videos")
-        self._btn_label.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--label"]))
-        self._btn_train.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--train"]))
-        self._btn_analyze.clicked.connect(lambda: self._run_setup(["setup_dlc_training.py", "--analyze"]))
-        l.addWidget(self._btn_label)
-        l.addWidget(self._btn_train)
-        l.addWidget(self._btn_analyze)
-        self._csv_prog = QProgressBar()
-        l.addWidget(self._csv_prog)
-        nxt = QPushButton("Continue to Pipeline Configuration")
-        nxt.clicked.connect(lambda: self._stack.setCurrentIndex(2))
-        l.addWidget(nxt)
-        l.addStretch()
-        self._stack.addWidget(w)
-        self._csv_timer = QTimer(self)
-        self._csv_timer.timeout.connect(self._update_csv_progress)
-        self._csv_timer.start(2000)
-
-    def _build_step3(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        self._mcs = QSlider(Qt.Horizontal)
-        self._mcs.setRange(500, 5000)
-        self._mcs.setValue(int(self.cfg.get("min_cluster_size", 2000)))
-        self._mcs_lbl = QLabel(f"min_cluster_size: {self._mcs.value()}")
-        self._mcs.valueChanged.connect(lambda v: self._mcs_lbl.setText(f"min_cluster_size: {v}"))
-        l.addWidget(self._mcs_lbl)
-        l.addWidget(self._mcs)
-        self._wave = QCheckBox("Use Morlet wavelets")
-        self._wave.setChecked(bool(self.cfg.get("use_wavelets", True)))
-        l.addWidget(self._wave)
-        g = QGridLayout()
-        self._xmin = QSpinBox(); self._xmin.setRange(0, 9999); self._xmin.setValue(int(self.cfg.get("arena_bounds", {}).get("x_min", 0)))
-        self._ymin = QSpinBox(); self._ymin.setRange(0, 9999); self._ymin.setValue(int(self.cfg.get("arena_bounds", {}).get("y_min", 0)))
-        self._xmax = QSpinBox(); self._xmax.setRange(0, 9999); self._xmax.setValue(int(self.cfg.get("arena_bounds", {}).get("x_max", 1280)))
-        self._ymax = QSpinBox(); self._ymax.setRange(0, 9999); self._ymax.setValue(int(self.cfg.get("arena_bounds", {}).get("y_max", 960)))
-        g.addWidget(QLabel("x_min"), 0, 0); g.addWidget(self._xmin, 0, 1)
-        g.addWidget(QLabel("y_min"), 0, 2); g.addWidget(self._ymin, 0, 3)
-        g.addWidget(QLabel("x_max"), 1, 0); g.addWidget(self._xmax, 1, 1)
-        g.addWidget(QLabel("y_max"), 1, 2); g.addWidget(self._ymax, 1, 3)
-        l.addLayout(g)
-        self._run = QPushButton("Run Full Pipeline")
-        self._run.clicked.connect(self._run_full)
-        l.addWidget(self._run)
-        self._run_prog = QProgressBar()
-        self._run_prog.setRange(0, 1)
-        l.addWidget(self._run_prog)
-        l.addStretch()
-        self._stack.addWidget(w)
-
-    def _browse_raw(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Raw Videos", self._raw_dir.text())
-        if d:
-            self._raw_dir.setText(d)
-
-    def _step1_next(self):
-        self.cfg["raw_videos_dir"] = self._raw_dir.text()
-        self.cfg["project_name"] = self._proj.text().strip() or "VIEB Project"
-        _save_cfg(self.cfg)
-        self._stack.setCurrentIndex(2 if self._have_dlc.isChecked() else 1)
-
-    def _run_setup(self, args):
-        if self._worker and self._worker.isRunning():
-            return
-        self._worker = SubprocessWorker(args)
-        self._worker.log.connect(lambda t: self._log.insertPlainText(t))
-        self._worker.done.connect(lambda ok: self._log.insertPlainText(f"\n{'OK' if ok else 'FAIL'}: {' '.join(args)}\n"))
-        self._worker.start()
-
-    def _update_csv_progress(self):
-        raw = Path(self._raw_dir.text())
-        vids = list(raw.glob("*.mp4")) if raw.exists() else []
-        csvs = list(raw.glob("*DLC*.csv")) if raw.exists() else []
-        total = max(1, len(vids))
-        self._csv_prog.setRange(0, total)
-        self._csv_prog.setValue(min(total, len(csvs)))
-        self._csv_prog.setFormat(f"{len(csvs)} / {len(vids)} videos with CSV")
-
-    def _on_stage_started(self, sid):
-        self._log.insertPlainText(f"\nStage {sid} started...\n")
-
-    def _on_stage_done(self, sid, ok):
-        self._log.insertPlainText(f"Stage {sid} {'done' if ok else 'failed'}.\n")
-        self._run_prog.setValue(min(1, self._run_prog.value() + 1))
-
-    def _run_full(self):
-        if self._pipeline and self._pipeline.isRunning():
-            return
-        self.cfg["min_cluster_size"] = int(self._mcs.value())
-        self.cfg["use_wavelets"] = bool(self._wave.isChecked())
-        self.cfg["arena_bounds"] = {
-            "x_min": self._xmin.value(),
-            "y_min": self._ymin.value(),
-            "x_max": self._xmax.value(),
-            "y_max": self._ymax.value(),
-        }
-        _save_cfg(self.cfg)
-        stages = [2, 3, 8, 9, 10, 11] if self._have_dlc.isChecked() else [1, 2, 3, 8, 9, 10, 11]
-        self._run_prog.setRange(0, len(stages))
-        self._run_prog.setValue(0)
-        from _workers import PipelineRunner
-        self._pipeline = PipelineRunner(stages, self.cfg)
-        self._pipeline.log.connect(lambda t: self._log.insertPlainText(t))
-        self._pipeline.stage_started.connect(self._on_stage_started)
-        self._pipeline.stage_done.connect(self._on_stage_done)
-        self._pipeline.all_done.connect(self._pipeline_done)
-        self._pipeline.start()
-
-    def _pipeline_done(self, ok):
-        if ok:
-            self.cfg["onboarding_complete"] = True
-            _save_cfg(self.cfg)
-            self.completed.emit()
-            self.accept()
-        else:
-            QMessageBox.warning(self, "Onboarding", "Pipeline failed. Review logs and retry.")
 
 
 class ExportResultsDialog(QDialog):

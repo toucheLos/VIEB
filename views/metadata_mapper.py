@@ -122,7 +122,14 @@ class MetadataMapperWidget(QWidget):
     # ── Build UI ────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        from PyQt5.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(12)
 
@@ -150,6 +157,8 @@ class MetadataMapperWidget(QWidget):
             )
             lay.addWidget(placeholder)
             lay.addStretch()
+            scroll.setWidget(content)
+            outer.addWidget(scroll)
             return
 
         self._csv_path = csv_path
@@ -281,6 +290,9 @@ class MetadataMapperWidget(QWidget):
 
         self._refresh_preview()
         lay.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 

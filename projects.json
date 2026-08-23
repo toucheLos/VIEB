@@ -1,6 +1,12 @@
 {
   "projects": [
     {
+      "name": "Luna DLC-Carlos-2026-06-30",
+      "path": "/home/carlos/vieb/Luna DLC-Carlos-2026-06-30",
+      "config": "/home/carlos/vieb/Luna DLC-Carlos-2026-06-30/config.yaml",
+      "added": "2026-06-30 11:56"
+    },
+    {
       "name": "VIEB-Carlos-2026-02-11",
       "path": "/home/carlos/Projects/vieb/VIEB-Carlos-2026-02-11",
       "config": "/home/carlos/Projects/vieb/VIEB-Carlos-2026-02-11/config.yaml",

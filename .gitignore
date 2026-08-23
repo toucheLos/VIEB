@@ -26,6 +26,8 @@ raw_videos/
 
 # DLC model weights
 **/VIEB-*
+DLC*
+**/DLC*
 
 # Models and large files
 *.pkl

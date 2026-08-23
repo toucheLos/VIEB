@@ -413,7 +413,7 @@ def plot_deviation_distributions(
     data  = [dev_scores[dev_scores["cohort_label"] == c]["composite_z"].dropna().values
              for c in cohorts]
 
-    bp = ax.boxplot(data, labels=[c[:25] for c in cohorts], patch_artist=True,
+    bp = ax.boxplot(data, tick_labels=[c[:25] for c in cohorts], patch_artist=True,
                     widths=0.5, showfliers=False)
     palette = plt.cm.tab20(np.linspace(0, 1, max(1, len(cohorts))))
     for patch, color in zip(bp["boxes"], palette):

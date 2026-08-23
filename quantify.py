@@ -115,6 +115,15 @@ def _ctx_groups(summary):
     return [v for v in vals if v.upper().startswith("A")], [v for v in vals if v.upper().startswith("B")]
 
 
+def coerce_id_column(df: pd.DataFrame, col: str = "animal_id") -> pd.DataFrame:
+    """Return a copy of df with `col` cast to str, so merges/joins on this
+    column never fail due to dtype mismatches (e.g. a cohort file's int64
+    animal_id vs. summary_table.csv's str animal_id from pd.read_csv)."""
+    out = df.copy()
+    out[col] = out[col].astype(str)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Scalar computation functions
 # ---------------------------------------------------------------------------
@@ -319,6 +328,13 @@ def build_master_table(cohort_path=None, out_dir=None, min_confidence: float = 0
     cluster_info = _load_cluster_info()
     cohort = _load_cohort(cohort_path)
 
+    # Coerce animal_id to str up front, on both sides, before any merge below —
+    # cohort files (e.g. via cohort_loader.load_cohort_excel()) commonly store
+    # animal_id as int64, while summary_table.csv's animal_id is read as str.
+    summary = coerce_id_column(summary)
+    if cohort is not None:
+        cohort = coerce_id_column(cohort)
+
     dominant_id = _dominant_state_id(summary, cluster_info)
     print(f"  Dominant state (excluded): {dominant_id}")
 
@@ -345,7 +361,7 @@ def build_master_table(cohort_path=None, out_dir=None, min_confidence: float = 0
             normed = cohort_normalize(summary, cohort)
             fi_df = compute_fear_index(normed)
             master = master.merge(
-                fi_df[["fear_index", "context_discrimination"]].reset_index(),
+                coerce_id_column(fi_df[["fear_index", "context_discrimination"]].reset_index()),
                 on="animal_id", how="left")
             normed.reset_index().to_csv(out_dir / "cohort_normalized_profiles.csv", index=False)
             fi_df.reset_index().to_csv(out_dir / "fear_index.csv", index=False)
@@ -376,7 +392,7 @@ def build_master_table(cohort_path=None, out_dir=None, min_confidence: float = 0
         print(f"  Computing {name}...")
         df = fn()
         if not df.empty:
-            master = master.merge(df, on="animal_id", how="left")
+            master = master.merge(coerce_id_column(df), on="animal_id", how="left")
         else:
             for c in cols:
                 master[c] = float("nan")
@@ -384,7 +400,7 @@ def build_master_table(cohort_path=None, out_dir=None, min_confidence: float = 0
     print("  Computing per-state occupancy scalars...")
     occ_df = build_occupancy_scalars(summary, dominant_id)
     if not occ_df.empty:
-        master = master.merge(occ_df, on="animal_id", how="left")
+        master = master.merge(coerce_id_column(occ_df), on="animal_id", how="left")
 
     out_path = out_dir / "master_table.csv"
     master.to_csv(out_path, index=False)
@@ -429,7 +445,7 @@ def compute_contrast_vector(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = pd.read_csv(summary_csv)
-    summary["animal_id"] = summary["animal_id"].astype(str)
+    summary = coerce_id_column(summary)
 
     # Shared setup: dominant state, non-dominant cols, context detection
     all_state_cols = _state_cols(summary)
@@ -458,8 +474,7 @@ def compute_contrast_vector(
                 summary_csv, output_dir, cohort_csv, per_condition=False
             )
 
-        cohort_df = cohort_df.copy()
-        cohort_df["animal_id"] = cohort_df["animal_id"].astype(str)
+        cohort_df = coerce_id_column(cohort_df)
         summary_c = summary.merge(
             cohort_df[["animal_id", "cohort_label"]].drop_duplicates("animal_id"),
             on="animal_id", how="left",
@@ -577,7 +592,7 @@ def compute_contrast_vector(
             print(f"  {r['animal_id']}: p_A={r['p_A_json'][:80]}  p_B={r['p_B_json'][:80]}")
 
     if cohort_df is not None:
-        cohort_df["animal_id"] = cohort_df["animal_id"].astype(str)
+        cohort_df = coerce_id_column(cohort_df)
         cohort_cols = [c for c in cohort_df.columns if c != "animal_id"]
         result = result.merge(
             cohort_df[["animal_id"] + cohort_cols].drop_duplicates("animal_id"),
@@ -632,13 +647,13 @@ def compute_cohort_contrast(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(contrast_csv)
-    df["animal_id"] = df["animal_id"].astype(str)
+    df = coerce_id_column(df)
 
     # Ensure groupby column present
     if groupby not in df.columns:
         cohort_df = _load_cohort(cohort_csv)
         if cohort_df is not None:
-            cohort_df["animal_id"] = cohort_df["animal_id"].astype(str)
+            cohort_df = coerce_id_column(cohort_df)
             if groupby in cohort_df.columns:
                 df = df.merge(cohort_df[["animal_id", groupby]].drop_duplicates("animal_id"),
                               on="animal_id", how="left")
@@ -826,8 +841,8 @@ def run_jess_correlation(master_table_csv, jess_csv, output_dir):
 
     master = pd.read_csv(master_table_csv)
     jess = pd.read_csv(jess_csv)
-    jess["animal_id"] = jess["animal_id"].astype(str)
-    master["animal_id"] = master["animal_id"].astype(str)
+    jess = coerce_id_column(jess)
+    master = coerce_id_column(master)
 
     merged = master.merge(jess, on="animal_id", how="inner")
     print(f"{len(merged)}/{len(master)} animals matched")
@@ -926,7 +941,7 @@ def compute_state_learning_rates(
     from scipy.stats import linregress
 
     summary = pd.read_csv(summary_csv)
-    summary["animal_id"] = summary["animal_id"].astype(str)
+    summary = coerce_id_column(summary)
 
     cluster_info = _load_cluster_info()
     dominant_id = _dominant_state_id(summary, cluster_info)
@@ -998,7 +1013,7 @@ def compute_state_learning_rates(
             cohort = load_cohort_excel(cohort_csv)
         else:
             cohort = pd.read_csv(cohort_csv)
-        cohort["animal_id"] = cohort["animal_id"].astype(str)
+        cohort = coerce_id_column(cohort)
         id_cols = [c for c in ["cohort_label", "sex", "age_group", "treatment"]
                    if c in cohort.columns]
         df = df.join(cohort.set_index("animal_id")[id_cols], how="left")

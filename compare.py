@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,41 @@ def _res(): return _vc.get_results_dir()
 def _meta(): return _vc.get_metadata_path()
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _print_project_path_diagnostics(repo_root: str | None = None, app_config_path: str | None = None, *, repair: bool = False):
+    import project_manager as _pm
+
+    root = repo_root or ROOT
+    app_path = app_config_path or os.path.join(root, "app_config.json")
+    project = _pm.get_active_project(root, app_path)
+    project_path = Path(project)
+    paths = _pm.resolve_project_paths(root, app_path)
+    print(f"Active project: {project}")
+    print(f"Metadata path: {paths['metadata'].path} (origin: {paths['metadata'].origin})")
+    print(f"Results dir: {paths['results'].path} (origin: {paths['results'].origin})")
+    print(f"Raw videos dir: {paths['raw_videos'].path} (origin: {paths['raw_videos'].origin})")
+    print(f"Config path: {paths['config'].path}")
+    for key in ("metadata", "results", "raw_videos"):
+        info = paths[key]
+        if not info.valid:
+            raise _pm.ProjectSelectionError(
+                f"Refusing project path for {key}: {info.message} Complete Stage 0: Onboarding before running the pipeline."
+            )
+        if not info.path.exists():
+            print(f"[WARN] Resolved {key} path does not exist:")
+            print(f"  {info.path}")
+            candidate = _pm.detect_doubled_project_segment(info.path, project_path, root)
+            if candidate is not None:
+                print(f"[WARN]   This looks like a doubled path from a pre-refactor config.json.")
+                print(f"[WARN]   A working path was found: {candidate}")
+                if repair:
+                    _pm.repair_project_config_path(project_path, key, candidate)
+                    print(f"[FIX]    config.json updated: paths.{key} -> {candidate}")
+                else:
+                    print(f"[FIX]    Re-run with --repair-paths to update config.json automatically,")
+                    print(f"         or edit config.json's paths.{key} to the path above.")
+    return paths
 
 
 def _slug(text: object) -> str:
@@ -292,6 +328,33 @@ def _load_extractor_config():
     return keypoint_roles, object_keypoints, bodypart_names
 
 
+_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
+
+
+def _resolve_h5_video_path(stem, candidates, video_path_map, raw_videos_dir):
+    """Resolve a video path for an H5-extracted session.
+
+    Tries each raw (non-normalized) candidate string against video_path_map
+    (keyed by h5_manifest._normalize()), then falls back to
+    raw_videos_dir/<stem><ext> for each known video extension. Returns None
+    if nothing resolves — that is an expected, valid outcome, not an error.
+    """
+    from h5_manifest import _normalize
+
+    for cand in candidates:
+        if not cand:
+            continue
+        norm = _normalize(cand)
+        if norm in video_path_map:
+            return video_path_map[norm]
+    if raw_videos_dir:
+        for ext in _VIDEO_EXTS:
+            candidate_path = os.path.join(raw_videos_dir, f"{stem}{ext}")
+            if os.path.exists(candidate_path):
+                return candidate_path
+    return None
+
+
 def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """Feature extraction from a single shared H5 pose file (video-less mode).
 
@@ -301,7 +364,7 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     """
     from ml import PoseFeatureExtractor
     from pose_io import inspect_h5, load_pose_h5
-    from h5_manifest import detect_concatenated_table, load_manifest, resolve_h5_key
+    from h5_manifest import detect_concatenated_table, load_manifest, load_video_paths, resolve_h5_key
 
     h5_path = _vc.get_h5_path()
     if not h5_path or not os.path.exists(h5_path):
@@ -326,6 +389,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
     )
     manifest_value_col = session_source_col if concatenated_key is not None else "h5_key"
     manifest = load_manifest(_vc.get_h5_manifest_path(), value_col=manifest_value_col)
+    video_path_map = load_video_paths(_vc.get_h5_manifest_path(), value_col=manifest_value_col)
+    try:
+        raw_videos_dir = _vc.get_raw_videos_dir()
+    except Exception:
+        raw_videos_dir = ""
 
     os.makedirs(os.path.join(_res(), "features"), exist_ok=True)
 
@@ -400,8 +468,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             features_flat = extractor._flatten_features(features_dict)
 
             np.save(out_path, features_flat.astype(np.float32))
+            video_path = _resolve_h5_video_path(
+                stem, [stem, source_value], video_path_map, raw_videos_dir
+            )
             index[stem] = {
-                "video_path": None,
+                "video_path": video_path,
                 "csv_path": None,
                 "h5_path": h5_path,
                 "h5_key": source_value,
@@ -452,8 +523,11 @@ def _cmd_extract_h5(fps: float = 30.0, use_wavelets: bool = True):
             features_flat = extractor._flatten_features(features_dict)
 
             np.save(out_path, features_flat.astype(np.float32))
+            video_path = _resolve_h5_video_path(
+                stem, [stem, h5_key, row_dict.get("animal_id", "")], video_path_map, raw_videos_dir
+            )
             index[stem] = {
-                "video_path": None,
+                "video_path": video_path,
                 "csv_path": None,
                 "h5_path": h5_path,
                 "h5_key": h5_key,
@@ -735,14 +809,16 @@ def cmd_fix_features(fps: float = 30.0):
 
     # ---- Update index metadata to reflect the now-consistent settings ----
     old_meta = index.get("_meta", {})
-    new_meta = {
-        "n_keypoints": target_n_keypoints,
-        "n_features": target_n_features,
-        "use_wavelets": use_wavelets,
-        "vieb_version": old_meta.get("vieb_version", "1.0"),
-    }
-    if "pose_source" in old_meta:
-        new_meta["pose_source"] = old_meta["pose_source"]
+    # Start from a copy so no existing field is silently dropped.
+    new_meta = dict(old_meta)
+    new_meta["n_keypoints"] = target_n_keypoints
+    new_meta["n_features"] = target_n_features
+    new_meta["use_wavelets"] = use_wavelets
+    new_meta.setdefault("vieb_version", "1.0")
+    # Rebuild feature_names and semantic_features from the now-configured extractor.
+    _fm = extractor.get_feature_meta(n_keypoints=target_n_keypoints)
+    new_meta["feature_names"] = _fm.get("feature_names", [])
+    new_meta["semantic_features"] = _fm.get("semantic_features", [])
     index["_meta"] = new_meta
 
     with open(index_path, "w") as f:
@@ -755,6 +831,75 @@ def cmd_fix_features(fps: float = 30.0):
         print("WARNING: dimensions are still inconsistent. Some videos may be "
               "missing pose data — re-run after restoring it, or re-extract "
               "from scratch with --extract.")
+
+
+def cmd_backfill_video_paths():
+    """Backfill video_path for existing index.json entries created before H5
+    extraction started populating it (see _cmd_extract_h5()).
+
+    Only touches entries with h5_path set and video_path missing/None.
+    Every other field on every entry (including entries this doesn't touch)
+    is preserved exactly as loaded — mirrors cmd_fix_features()'s discipline
+    of never dropping unrelated index.json fields.
+    """
+    from h5_manifest import load_video_paths
+
+    index_path = os.path.join(_res(), "features", "index.json")
+    if not os.path.exists(index_path):
+        sys.exit("No index found. Run --extract first.")
+    with open(index_path) as f:
+        index = json.load(f)
+
+    # Extraction may have used either "h5_key" or the configured H5 source
+    # column (e.g. "source_file") as the manifest's value_col, depending on
+    # whether the H5 was a concatenated table — an existing index.json gives
+    # no cheap way to tell which was used for a given entry, so try both
+    # candidate key spaces and merge (first match wins).
+    manifest_path = _vc.get_h5_manifest_path()
+    video_path_map = load_video_paths(manifest_path, value_col="h5_key")
+    source_col = _vc.get_h5_source_col() or None
+    if source_col:
+        for k, v in load_video_paths(manifest_path, value_col=source_col).items():
+            video_path_map.setdefault(k, v)
+
+    try:
+        raw_videos_dir = _vc.get_raw_videos_dir()
+    except Exception:
+        raw_videos_dir = ""
+
+    backfilled = 0
+    already_had = 0
+    skipped_no_h5 = 0
+    still_missing = 0
+
+    for stem, entry in index.items():
+        if stem == "_meta" or not isinstance(entry, dict):
+            continue
+        if not entry.get("h5_path"):
+            skipped_no_h5 += 1
+            continue
+        if entry.get("video_path"):
+            already_had += 1
+            continue
+        candidates = [stem, entry.get("h5_key", "")]
+        video_path = _resolve_h5_video_path(stem, candidates, video_path_map, raw_videos_dir)
+        if video_path:
+            entry["video_path"] = video_path
+            backfilled += 1
+            print(f"  {stem}: video_path -> {video_path}")
+        else:
+            still_missing += 1
+
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    print(f"\nDone. Backfilled {backfilled} entr{'y' if backfilled == 1 else 'ies'}.")
+    print(f"  Already had video_path : {already_had}")
+    print(f"  Skipped (no h5_path)   : {skipped_no_h5}")
+    print(f"  Still unresolved       : {still_missing}"
+          + ("" if not still_missing else
+             " (no manifest video-path column match and no matching file "
+             f"under raw_videos_dir with extensions {_VIDEO_EXTS})"))
 
 
 # ---------------------------------------------------------------------------
@@ -934,90 +1079,52 @@ def _run_validation_report(
 
 def _next_run_n(runs_dir: str) -> int:
     """Return the next integer N for naming a run directory."""
-    max_n = 0
-    if os.path.isdir(runs_dir):
-        for name in os.listdir(runs_dir):
-            if name.startswith("run_") and os.path.isdir(os.path.join(runs_dir, name)):
-                try:
-                    n = int(name.split("_")[1])
-                    max_n = max(max_n, n)
-                except (IndexError, ValueError):
-                    pass
-    return max_n + 1
+    from cluster_run_manager import ClusterRunManager
+    mgr = ClusterRunManager(os.path.dirname(runs_dir))
+    return mgr._next_run_n()
 
 
 def _auto_save_previous_run() -> str | None:
     """Copy results/shared/ to results/runs/{run_id}/ before a new run overwrites it."""
-    import shutil
-    from datetime import datetime as _dt
+    from cluster_run_manager import ClusterRunManager
 
     shared_dir = os.path.join(_res(), "shared")
     cluster_info_path = os.path.join(shared_dir, "cluster_info.json")
     if not os.path.exists(cluster_info_path):
         return None
 
-    with open(cluster_info_path) as f:
-        ci = json.load(f)
-
     manifest_path = os.path.join(shared_dir, "run_manifest.json")
-    existing_manifest: dict = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            existing_manifest = json.load(f)
+    if not os.path.exists(manifest_path):
+        return None
 
-    prev_mcs = existing_manifest.get("min_cluster_size", ci.get("min_cluster_size", 50))
-    prev_umap = existing_manifest.get("umap_dims", ci.get("umap_dims", 10))
-    prev_hdbscan_sample = existing_manifest.get(
-        "hdbscan_sample",
-        ci.get("hdbscan_sample", 0),
-    )
+    with open(manifest_path) as f:
+        existing_manifest = json.load(f)
 
-    runs_dir = os.path.join(_res(), "runs")
-    os.makedirs(runs_dir, exist_ok=True)
-    n = _next_run_n(runs_dir)
-    now = _dt.now()
-    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{prev_mcs}_umap{prev_umap}"
-    run_dir = os.path.join(runs_dir, run_id)
-    os.makedirs(run_dir, exist_ok=True)
+    run_id = existing_manifest.get("run_id", "")
+    if not run_id:
+        return None
 
-    for fname in os.listdir(shared_dir):
-        src = os.path.join(shared_dir, fname)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(run_dir, fname))
-
-    # Compute noise_frac from existing label files
-    noise_frac = 0.0
-    try:
-        total_frames = 0
-        noise_frames = 0
-        for fname in os.listdir(shared_dir):
-            if fname.endswith("_labels.npy"):
-                lbl = np.load(os.path.join(shared_dir, fname))
-                total_frames += len(lbl)
-                noise_frames += int((lbl == -1).sum())
-        if total_frames > 0:
-            noise_frac = float(noise_frames / total_frames)
-    except Exception:
-        pass
-
-    manifest = {
-        "run_id": run_id,
-        "date": existing_manifest.get("date", now.strftime("%Y-%m-%d %H:%M")),
-        "min_cluster_size": int(prev_mcs),
-        "umap_dims": int(prev_umap),
-        "hdbscan_min_samples": int(existing_manifest.get("hdbscan_min_samples", 0)),
-        "hdbscan_sample": int(prev_hdbscan_sample),
-        "n_clusters": int(ci.get("n_clusters", 0)),
-        "mean_confidence": float(ci.get("mean_confidence", 0.0)),
-        "low_confidence_frac": float(ci.get("low_confidence_frac", 0.0)),
-        "noise_frac": round(noise_frac, 4),
-        "saved": False,
-    }
-    with open(os.path.join(run_dir, "run_manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
-
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    mgr = ClusterRunManager(_res(), config_path=cfg_path)
+    mgr.save_run(run_id)
     print(f"Auto-saved previous run to results/runs/{run_id}/")
     return run_id
+
+
+def _migrate_index_meta(meta: dict) -> dict:
+    """Normalize old _meta formats to the current schema in-memory.
+
+    - ``feature_count`` (old key) → ``n_features``
+    - ``use_wavelets`` absent → left as absent (not defaulted to True/False)
+
+    Does NOT write to disk; callers persist if needed.
+    """
+    if not isinstance(meta, dict):
+        return {}
+    out = dict(meta)
+    if "n_features" not in out and "feature_count" in out:
+        out["n_features"] = out["feature_count"]
+    return out
 
 
 def _write_current_run_manifest(
@@ -1029,33 +1136,66 @@ def _write_current_run_manifest(
     mean_conf: float,
     low_conf_frac: float,
     noise_frac: float,
+    *,
+    min_samples_requested: int = 0,
+    runtime_seconds: float = 0.0,
+    assignment_method: str = "",
 ) -> str:
     """Write results/shared/run_manifest.json and update config.json."""
-    from datetime import datetime as _dt
+    from cluster_run_manager import ClusterRunConfig, ClusterRunManager
 
-    runs_dir = os.path.join(_res(), "runs")
-    os.makedirs(runs_dir, exist_ok=True)
-    n = _next_run_n(runs_dir)
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    mgr = ClusterRunManager(_res(), config_path=cfg_path)
+    run_cfg = ClusterRunConfig(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples_requested,
+        umap_dims=umap_dims,
+        hdbscan_sample=hdbscan_sample,
+    )
+    run_id = mgr.create_run_id(run_cfg)
+
+    from datetime import datetime as _dt
     now = _dt.now()
-    run_id = f"run_{n:03d}_{now.strftime('%Y%m%d_%H%M')}_mcs{min_cluster_size}_umap{umap_dims}"
 
     manifest = {
         "run_id": run_id,
+        "status": "completed",
         "date": now.strftime("%Y-%m-%d %H:%M"),
+        "started_at": "",
+        "finished_at": now.isoformat(),
+        "runtime_seconds": round(runtime_seconds, 1),
         "min_cluster_size": min_cluster_size,
+        "min_samples_requested": min_samples_requested,
+        "min_samples_resolved": effective_min_samples,
         "umap_dims": umap_dims,
-        "hdbscan_min_samples": effective_min_samples,
         "hdbscan_sample": hdbscan_sample,
+        "hdbscan_min_samples": effective_min_samples,
         "n_clusters": n_found,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
         "noise_frac": round(noise_frac, 4),
+        "assignment_method": assignment_method,
         "saved": False,
     }
+
+    # Attach feature metadata so the manifest is self-contained.
+    _index_path = os.path.join(_res(), "features", "index.json")
+    if os.path.exists(_index_path):
+        try:
+            with open(_index_path) as _f:
+                _idx = json.load(_f)
+            _feat_meta = _migrate_index_meta(_idx.get("_meta", {}))
+            _nf = _feat_meta.get("n_features")
+            if _nf is not None:
+                manifest["n_features"] = int(_nf)
+            _uw = _feat_meta.get("use_wavelets")
+            manifest["use_wavelets"] = bool(_uw) if _uw is not None else None
+        except Exception:
+            pass
+
     with open(os.path.join(_res(), "shared", "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg_data: dict = {}
     if os.path.exists(cfg_path):
         try:
@@ -1069,6 +1209,75 @@ def _write_current_run_manifest(
         json.dump(cfg_data, f, indent=2)
 
     return run_id
+
+
+def _write_overview_summary(
+    summary: pd.DataFrame,
+    cluster_info: dict,
+    feature_index: dict,
+    *,
+    active_run_id: str | None = None,
+) -> None:
+    """Write the small Overview-only summary used by GUI startup."""
+    shared_dir = os.path.join(_res(), "shared")
+    os.makedirs(shared_dir, exist_ok=True)
+
+    n_states = int(cluster_info.get("n_clusters", 0) or 0)
+    state_cols = [
+        f"state_{i}_frac"
+        for i in range(n_states)
+        if f"state_{i}_frac" in summary.columns
+    ]
+    state_means = {
+        str(int(col.split("_")[1])): float(summary[col].mean())
+        for col in state_cols
+    }
+    noise_fraction = None
+    if state_cols:
+        noise_fraction = max(0.0, 1.0 - float(summary[state_cols].sum(axis=1).mean()))
+
+    total_frames = 0
+    if isinstance(feature_index, dict):
+        for key, value in feature_index.items():
+            if key == "_meta" or not isinstance(value, dict):
+                continue
+            total_frames += int(value.get("n_frames", 0) or 0)
+
+    run_manifest = {}
+    manifest_path = os.path.join(shared_dir, "run_manifest.json")
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                run_manifest = json.load(f)
+        except Exception:
+            run_manifest = {}
+
+    from datetime import datetime as _dt
+    now = _dt.now().isoformat()
+    overview = {
+        "schema_version": 1,
+        "generated_at": now,
+        "last_run_time": run_manifest.get("finished_at") or run_manifest.get("date") or now,
+        "active_run_id": active_run_id or run_manifest.get("run_id") or "",
+        "total_videos": int(len(summary)),
+        "total_frames": int(total_frames),
+        "n_states": n_states,
+        "noise_fraction": noise_fraction,
+        "state_means": state_means,
+        "markers": {
+            "features": os.path.exists(os.path.join(_res(), "features", "index.json")),
+            "clusters": os.path.exists(os.path.join(_res(), "shared", "cluster_info.json")),
+            "report": True,
+            "summary": True,
+            "motifs": (
+                os.path.exists(os.path.join(_res(), "comparison", "motifs.csv"))
+                or os.path.exists(os.path.join(_res(), "motifs", "motif_summary.csv"))
+            ),
+        },
+    }
+    with open(os.path.join(shared_dir, "overview_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(overview, f, indent=2)
+    print("Overview summary saved: results/shared/overview_summary.json")
 
 
 def _extract_hdbscan_outputs(clusterer_model) -> tuple[np.ndarray, np.ndarray]:
@@ -1184,8 +1393,73 @@ def _fit_cpu_hdbscan_with_assignment(
     return clusterer_model, all_raw_labels, all_probs
 
 
+def _assign_by_nearest_centroid(
+    fit_points: np.ndarray,
+    fit_labels: np.ndarray,
+    predict_points: np.ndarray,
+    noise_distance_factor: float = 3.0,
+    batch_size: int = 100_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign labels to non-sampled frames by nearest cluster centroid.
+
+    Used for GPU HDBSCAN where approximate_predict is unavailable.
+    Computes the centroid of each cluster in UMAP space, then assigns
+    each predict_point to its nearest centroid.
+    Points farther than noise_distance_factor * (median within-cluster radius)
+    are labelled -1 (noise) with probability 0.
+
+    Batches the distance computation to avoid OOM on large predict sets.
+    """
+    unique_labels = np.unique(fit_labels[fit_labels >= 0])
+    if len(unique_labels) == 0:
+        return (
+            np.full(len(predict_points), -1, dtype=np.int32),
+            np.zeros(len(predict_points), dtype=np.float32),
+        )
+
+    centroids = np.stack([
+        fit_points[fit_labels == lbl].mean(axis=0)
+        for lbl in unique_labels
+    ])  # (n_clusters, n_dims)
+
+    # Noise threshold: noise_distance_factor × median within-cluster radius
+    noise_threshold: float | None = None
+    if noise_distance_factor > 0:
+        intra_dists = []
+        for i, lbl in enumerate(unique_labels):
+            pts = fit_points[fit_labels == lbl]
+            if len(pts) > 1:
+                intra_dists.append(float(np.median(np.linalg.norm(pts - centroids[i], axis=1))))
+        if intra_dists:
+            noise_threshold = noise_distance_factor * float(np.median(intra_dists))
+
+    n_predict = len(predict_points)
+    pred_labels = np.full(n_predict, -1, dtype=np.int32)
+    pred_probs  = np.zeros(n_predict, dtype=np.float32)
+
+    for start in range(0, n_predict, batch_size):
+        end = min(start + batch_size, n_predict)
+        batch = predict_points[start:end]
+        diffs = batch[:, np.newaxis, :] - centroids[np.newaxis, :, :]
+        dists = np.linalg.norm(diffs, axis=-1)  # (batch, n_clusters)
+        nearest_idx  = np.argmin(dists, axis=1)
+        nearest_dist = dists[np.arange(len(batch)), nearest_idx]
+        batch_labels = unique_labels[nearest_idx].astype(np.int32)
+        batch_probs  = (1.0 / (1.0 + nearest_dist)).astype(np.float32)
+        if noise_threshold is not None:
+            noise_mask = nearest_dist > noise_threshold
+            batch_labels[noise_mask] = -1
+            batch_probs[noise_mask]  = 0.0
+        pred_labels[start:end] = batch_labels
+        pred_probs[start:end]  = batch_probs
+
+    return pred_labels, pred_probs
+
+
 def _mark_run_saved() -> None:
-    """Set saved=true in results/shared/run_manifest.json and config.json."""
+    """Set saved=true in results/shared/run_manifest.json, save to runs/, and update config.json."""
+    from cluster_run_manager import ClusterRunManager
+
     manifest_path = os.path.join(_res(), "shared", "run_manifest.json")
     if not os.path.exists(manifest_path):
         print("[warn] No run_manifest.json found — nothing to mark as saved.")
@@ -1195,6 +1469,12 @@ def _mark_run_saved() -> None:
     manifest["saved"] = True
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
+
+    run_id = manifest.get("run_id", "")
+    if run_id:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        mgr = ClusterRunManager(_res(), config_path=cfg_path)
+        mgr.save_run(run_id)
 
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg_data: dict = {}
@@ -1219,9 +1499,11 @@ def cmd_cluster(
     validate: bool = False,
     hdbscan_sample: int = 300000,
 ):
+    import time as _time
     import joblib
     from ml import BehaviorPreprocessor
 
+    _t0 = _time.perf_counter()
     hdbscan_sample = max(1, int(hdbscan_sample))
 
     if _detect_gpu():
@@ -1252,7 +1534,7 @@ def cmd_cluster(
         sys.exit("Index is empty. Run --extract first.")
 
     # ---- Validate feature dimension consistency ----
-    meta_info = index.get("_meta")
+    meta_info = _migrate_index_meta(index.get("_meta") or {}) or None
     if meta_info:
         expected_n_features = meta_info.get("n_features")
         expected_n_keypoints = meta_info.get("n_keypoints")
@@ -1448,7 +1730,10 @@ def cmd_cluster(
     # UMAP and HDBSCAN need separate sampling controls: UMAP can fit on a
     # subset and transform everything cheaply, but HDBSCAN still builds its
     # clustering structure on the embedding it is fit on.
-    effective_min_samples = min_samples if min_samples is not None else min_cluster_size
+    if min_samples is not None:
+        effective_min_samples = min_samples
+    else:
+        effective_min_samples = max(10, min(100, min_cluster_size // 10))
     if use_gpu and effective_min_samples > 1023:
         print(f"  [info] cuML HDBSCAN requires min_samples <= 1023; clamping {effective_min_samples} -> 1023.")
         effective_min_samples = 1023
@@ -1457,138 +1742,70 @@ def cmd_cluster(
         f"min_samples={effective_min_samples}, hdbscan_sample={hdbscan_sample})..."
     )
 
+    n_embedded = len(pooled_umap)
+
     if validate:
-        # Validation still fits only on the train partition; if needed, we
-        # subsample within that train partition before HDBSCAN fitting.
         train_fit_indices = np.asarray(train_indices, dtype=np.int64)
         test_indices = np.concatenate([
             np.arange(boundaries[s][0], boundaries[s][1]) for s in test_stems
         ]) if test_stems else np.array([], dtype=np.int64)
-        if use_gpu:
-            fit_indices = train_fit_indices
-            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} train frames...")
-        elif len(train_fit_indices) > hdbscan_sample:
-            rng = np.random.default_rng(42)
-            sampled_pos = np.sort(
-                rng.choice(len(train_fit_indices), hdbscan_sample, replace=False)
-            )
-            fit_indices = train_fit_indices[sampled_pos]
-            print(
-                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame train sample, "
-                f"then assigning remaining train/test frames..."
-            )
-        else:
-            fit_indices = train_fit_indices
-            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} train frames...")
-        actual_hdbscan_sample = int(len(fit_indices))
-
-        predict_mask = np.ones(len(pooled_umap), dtype=bool)
-        predict_mask[fit_indices] = False
-        predict_indices = np.flatnonzero(predict_mask)
-
-        if use_gpu:
-            clusterer_model = HDBSCANClass(
-                min_cluster_size=min_cluster_size,
-                min_samples=effective_min_samples,
-                cluster_selection_method="eom",
-            )
-            try:
-                clusterer_model.fit(pooled_umap[fit_indices])
-            except Exception as _gpu_err:
-                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
-                import hdbscan as _hdbscan_lib
-                use_gpu = False
-                HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                    HDBSCANClass,
-                    pooled_umap,
-                    fit_indices,
-                    predict_indices,
-                    min_cluster_size,
-                    effective_min_samples,
-                )
-            else:
-                fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
-                all_raw_labels = np.full(len(pooled_umap), -1, dtype=np.int32)
-                all_probs = np.zeros(len(pooled_umap), dtype=np.float32)
-                all_raw_labels[fit_indices] = fit_labels
-                all_probs[fit_indices] = fit_probs
-                if len(test_indices) > 0:
-                    try:
-                        test_result = clusterer_model.transform(pooled_umap[test_indices])
-                        if hasattr(test_result, "to_numpy"):
-                            test_result = test_result.to_numpy()
-                        elif hasattr(test_result, "get"):
-                            test_result = test_result.get()
-                        test_raw_labels = np.asarray(
-                            test_result[:, 0] if test_result.ndim > 1 else test_result,
-                            dtype=np.int32,
-                        )
-                        test_probs = np.ones(len(test_raw_labels), dtype=np.float32)
-                        test_probs[test_raw_labels < 0] = 0.0
-                    except Exception:
-                        test_raw_labels = np.full(len(test_indices), -1, dtype=np.int32)
-                        test_probs = np.zeros(len(test_indices), dtype=np.float32)
-                    all_raw_labels[test_indices] = test_raw_labels
-                    all_probs[test_indices] = test_probs
-        else:
-            clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                HDBSCANClass,
-                pooled_umap,
-                fit_indices,
-                predict_indices,
-                min_cluster_size,
-                effective_min_samples,
-            )
-
+        base_indices = train_fit_indices
     else:
-        all_indices = np.arange(len(pooled_umap), dtype=np.int64)
-        if use_gpu:
-            fit_indices = all_indices
-            print(f"  Fitting cuML HDBSCAN on all {len(fit_indices):,} embedded frames...")
-        elif len(all_indices) > hdbscan_sample:
-            rng = np.random.default_rng(42)
-            sampled_pos = np.sort(
-                rng.choice(len(all_indices), hdbscan_sample, replace=False)
-            )
-            fit_indices = all_indices[sampled_pos]
-            print(
-                f"  Fitting HDBSCAN on {len(fit_indices):,}-frame embedding sample, "
-                f"then assigning remaining frames..."
-            )
-        else:
-            fit_indices = all_indices
-            print(f"  Fitting HDBSCAN on all {len(fit_indices):,} embedded frames...")
-        actual_hdbscan_sample = int(len(fit_indices))
+        base_indices = np.arange(n_embedded, dtype=np.int64)
 
-        predict_mask = np.ones(len(pooled_umap), dtype=bool)
-        predict_mask[fit_indices] = False
-        predict_indices = np.flatnonzero(predict_mask)
+    # ---- Sampling (GPU and CPU both respect hdbscan_sample) ----
+    n_base = len(base_indices)
+    if n_base > hdbscan_sample:
+        rng = np.random.default_rng(42)
+        sampled_pos = np.sort(rng.choice(n_base, hdbscan_sample, replace=False))
+        fit_indices = base_indices[sampled_pos]
+        _partition = "train " if validate else ""
+        print(
+            f"  Fitting HDBSCAN on {len(fit_indices):,} sampled {_partition}frames "
+            f"out of {n_embedded:,} total embedded "
+            f"({n_base:,} {_partition}frames); "
+            f"full-frame HDBSCAN disabled."
+        )
+        print(
+            f"  Assigning remaining {n_embedded - len(fit_indices):,} frames "
+            f"using {'approximate_predict' if not use_gpu else 'nearest-centroid'} assignment."
+        )
+    else:
+        fit_indices = base_indices
+        print(
+            f"  Fitting HDBSCAN on all {len(fit_indices):,} "
+            f"{'train ' if validate else ''}embedded frames "
+            f"(total embedded: {n_embedded:,})."
+        )
 
-        if use_gpu:
-            clusterer_model = HDBSCANClass(
-                min_cluster_size=min_cluster_size,
-                min_samples=effective_min_samples,
-                cluster_selection_method="eom",
-            )
-            try:
-                clusterer_model.fit(pooled_umap[fit_indices])
-            except Exception as _gpu_err:
-                print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
-                import hdbscan as _hdbscan_lib
-                use_gpu = False
-                HDBSCANClass = _hdbscan_lib.HDBSCAN
-                clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
-                    HDBSCANClass,
-                    pooled_umap,
-                    fit_indices,
-                    predict_indices,
-                    min_cluster_size,
-                    effective_min_samples,
-                )
-            else:
-                all_raw_labels, all_probs = _extract_hdbscan_outputs(clusterer_model)
-        else:
+    # Safety guard: never silently fit on more frames than the sample limit.
+    if len(fit_indices) > hdbscan_sample:
+        raise RuntimeError(
+            f"HDBSCAN safety guard: about to fit on {len(fit_indices):,} frames "
+            f"but hdbscan_sample={hdbscan_sample:,}. "
+            "This would likely OOM. This is a code bug — please report it."
+        )
+
+    actual_hdbscan_sample = int(len(fit_indices))
+
+    predict_mask = np.ones(n_embedded, dtype=bool)
+    predict_mask[fit_indices] = False
+    predict_indices = np.flatnonzero(predict_mask)
+
+    # ---- GPU HDBSCAN ----
+    if use_gpu:
+        clusterer_model = HDBSCANClass(
+            min_cluster_size=min_cluster_size,
+            min_samples=effective_min_samples,
+            cluster_selection_method="eom",
+        )
+        try:
+            clusterer_model.fit(pooled_umap[fit_indices])
+        except Exception as _gpu_err:
+            print(f"  GPU HDBSCAN failed ({_gpu_err}); falling back to CPU…")
+            import hdbscan as _hdbscan_lib
+            use_gpu = False
+            HDBSCANClass = _hdbscan_lib.HDBSCAN
             clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
                 HDBSCANClass,
                 pooled_umap,
@@ -1597,7 +1814,39 @@ def cmd_cluster(
                 min_cluster_size,
                 effective_min_samples,
             )
+        else:
+            fit_labels, fit_probs = _extract_hdbscan_outputs(clusterer_model)
+            all_raw_labels = np.full(n_embedded, -1, dtype=np.int32)
+            all_probs = np.zeros(n_embedded, dtype=np.float32)
+            all_raw_labels[fit_indices] = fit_labels
+            all_probs[fit_indices] = fit_probs
+            if len(predict_indices) > 0:
+                print(f"  Assigning {len(predict_indices):,} non-sampled frames via nearest-centroid…")
+                pred_labels, pred_probs = _assign_by_nearest_centroid(
+                    pooled_umap[fit_indices],
+                    fit_labels,
+                    pooled_umap[predict_indices],
+                )
+                all_raw_labels[predict_indices] = pred_labels
+                all_probs[predict_indices] = pred_probs
 
+    # ---- CPU HDBSCAN ----
+    if not use_gpu:
+        clusterer_model, all_raw_labels, all_probs = _fit_cpu_hdbscan_with_assignment(
+            HDBSCANClass,
+            pooled_umap,
+            fit_indices,
+            predict_indices,
+            min_cluster_size,
+            effective_min_samples,
+        )
+
+    if len(predict_indices) == 0:
+        _assignment_method = "direct"
+    elif use_gpu:
+        _assignment_method = "nearest_centroid"
+    else:
+        _assignment_method = "approximate_predict"
     n_found = int(len(np.unique(all_raw_labels[all_raw_labels >= 0])))
     n_noise = int((all_raw_labels == -1).sum())
     print(f"  Behavioral states discovered: {n_found}")
@@ -1685,7 +1934,9 @@ def cmd_cluster(
     print(f"Per-video probabilities → results/shared/<stem>_probs.npy")
 
     # ---- Write run manifest for this run ----
+    _runtime = _time.perf_counter() - _t0
     _noise_frac = float(n_noise / len(all_raw_labels)) if len(all_raw_labels) > 0 else 0.0
+    _min_samples_requested = min_samples if min_samples is not None else 0
     _current_run_id = _write_current_run_manifest(
         min_cluster_size=min_cluster_size,
         umap_dims=umap_dims,
@@ -1695,6 +1946,9 @@ def cmd_cluster(
         mean_conf=mean_conf,
         low_conf_frac=low_conf_frac,
         noise_frac=_noise_frac,
+        min_samples_requested=_min_samples_requested,
+        runtime_seconds=_runtime,
+        assignment_method=_assignment_method,
     )
     print(f"Run manifest → results/shared/run_manifest.json  (run_id: {_current_run_id})")
 
@@ -1709,6 +1963,16 @@ def cmd_cluster(
     except Exception as _diag_err:
         print(f"[warn] Diagnostics generation failed: {_diag_err}")
 
+    # ---- Auto-save run to results/runs/ ----
+    try:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        _mgr.save_run(_current_run_id)
+        print(f"Run auto-saved → results/runs/{_current_run_id}/")
+    except Exception as _save_err:
+        print(f"[warn] Could not auto-save run: {_save_err}")
+
     # ---- Validation report ----
     if validate:
         _run_validation_report(
@@ -1721,6 +1985,33 @@ def cmd_cluster(
 # ---------------------------------------------------------------------------
 # Clustering diagnostics
 # ---------------------------------------------------------------------------
+
+def _compute_state_bouts(labels_1d: np.ndarray) -> dict[int, list[int]]:
+    """Return {state_id: [bout_len_frames, ...]} for one video. Skips noise (-1)."""
+    if len(labels_1d) == 0:
+        return {}
+    changes = np.where(np.diff(labels_1d) != 0)[0] + 1
+    starts = np.concatenate([[0], changes])
+    ends = np.concatenate([changes, [len(labels_1d)]])
+    bouts: dict[int, list[int]] = {}
+    for s, e in zip(starts, ends):
+        state = int(labels_1d[s])
+        if state >= 0:
+            bouts.setdefault(state, []).append(int(e - s))
+    return bouts
+
+
+def _gini(values: list[float]) -> float:
+    """Gini coefficient of a list of non-negative values. 0 = equal, 1 = maximal inequality."""
+    if not values or sum(values) == 0:
+        return 0.0
+    arr = sorted(values)
+    n = len(arr)
+    cumsum = 0.0
+    for i, v in enumerate(arr):
+        cumsum += (2 * (i + 1) - n - 1) * v
+    return cumsum / (n * sum(arr))
+
 
 def _generate_diagnostics(
     all_labels: np.ndarray | None = None,
@@ -1747,25 +2038,49 @@ def _generate_diagnostics(
     if n_clusters == 0:
         return {}
 
-    # ---- Load from disk if not passed ----
+    # ---- FPS for converting frames → seconds ----
+    try:
+        import vieb_config as _vc_diag
+        _cfg_diag = _vc_diag._load_config()
+        fps = float(_cfg_diag.get("fps", 30))
+    except Exception:
+        fps = 30.0
+    fps = max(1.0, fps)
+    min_short_frames = max(1, int(fps * 0.5))  # bouts shorter than 0.5 s are "short"
+
+    # ---- Load per-video label files; compute bout metrics in the same pass ----
+    all_bout_lists: dict[int, list[int]] = {}  # state → list of bout lengths (frames)
+    video_presence: dict[int, int] = {}
+    label_arrays_disk: list[np.ndarray] = []
+    prob_arrays_disk: list[np.ndarray] = []
+
+    for fname in sorted(os.listdir(shared_dir)):
+        if not fname.endswith("_labels.npy"):
+            continue
+        lbl = np.load(os.path.join(shared_dir, fname))
+        # video presence
+        present = set(int(s) for s in np.unique(lbl) if s >= 0)
+        for s in present:
+            video_presence[s] = video_presence.get(s, 0) + 1
+        # bout metrics (per-video, no cross-video artifacts)
+        for state, lengths in _compute_state_bouts(lbl).items():
+            all_bout_lists.setdefault(state, []).extend(lengths)
+        # for disk-load path
+        if all_labels is None:
+            label_arrays_disk.append(lbl)
+            stem = fname.replace("_labels.npy", "")
+            prob_path = os.path.join(shared_dir, f"{stem}_probs.npy")
+            if os.path.exists(prob_path):
+                prob_arrays_disk.append(np.load(prob_path))
+            else:
+                prob_arrays_disk.append(np.where(lbl >= 0, 1.0, 0.0).astype(np.float32))
+
     if all_labels is None:
-        label_arrays = []
-        prob_arrays = []
-        for fname in sorted(os.listdir(shared_dir)):
-            if fname.endswith("_labels.npy"):
-                label_arrays.append(np.load(os.path.join(shared_dir, fname)))
-                stem = fname.replace("_labels.npy", "")
-                prob_path = os.path.join(shared_dir, f"{stem}_probs.npy")
-                if os.path.exists(prob_path):
-                    prob_arrays.append(np.load(prob_path))
-                else:
-                    lbl = label_arrays[-1]
-                    prob_arrays.append(np.where(lbl >= 0, 1.0, 0.0).astype(np.float32))
-        if not label_arrays:
+        if not label_arrays_disk:
             print("[diagnostics] No label files found.")
             return {}
-        all_labels = np.concatenate(label_arrays)
-        all_probs = np.concatenate(prob_arrays)
+        all_labels = np.concatenate(label_arrays_disk)
+        all_probs = np.concatenate(prob_arrays_disk)
 
     if all_probs is None:
         all_probs = np.where(all_labels >= 0, 1.0, 0.0).astype(np.float32)
@@ -1776,16 +2091,6 @@ def _generate_diagnostics(
 
     # ---- State occupancy ----
     occ_rows = []
-    # Per-video presence counts
-    video_presence: dict[int, int] = {}
-    for fname in sorted(os.listdir(shared_dir)):
-        if not fname.endswith("_labels.npy"):
-            continue
-        lbl = np.load(os.path.join(shared_dir, fname))
-        present = set(int(s) for s in np.unique(lbl) if s >= 0)
-        for s in present:
-            video_presence[s] = video_presence.get(s, 0) + 1
-
     for k in range(-1, n_clusters):
         mask = all_labels == k
         count = int(mask.sum())
@@ -1808,23 +2113,75 @@ def _generate_diagnostics(
         state_fracs.append(float((all_labels == k).sum()) / max(1, total_frames))
     largest_frac = max(state_fracs) if state_fracs else 0.0
     smallest_frac = min(f for f in state_fracs if f > 0) if any(f > 0 for f in state_fracs) else 0.0
+    dominant_state_id = int(np.argmax(state_fracs)) if state_fracs else 0
 
     non_noise_probs = all_probs[valid_mask]
     mean_conf = float(non_noise_probs.mean()) if len(non_noise_probs) > 0 else 0.0
     low_conf_frac = float((non_noise_probs < 0.5).sum() / max(1, len(non_noise_probs)))
 
+    # ---- Bout metrics ----
+    # Global short-bout fraction: frames in short bouts / total non-noise frames
+    total_short_frames = 0
+    total_non_noise_frames = int(valid_mask.sum())
+    bout_metrics: dict[str, dict] = {}
+    dur_rows = []
+    for k in range(n_clusters):
+        lengths = all_bout_lists.get(k, [])
+        if not lengths:
+            continue
+        arr = np.array(lengths, dtype=np.float64)
+        short_count = int((arr < min_short_frames).sum())
+        total_short_frames += int((arr[arr < min_short_frames]).sum())
+        bm = {
+            "n_bouts": len(lengths),
+            "mean_dur_frames": round(float(arr.mean()), 2),
+            "mean_dur_s": round(float(arr.mean()) / fps, 3),
+            "median_dur_s": round(float(np.median(arr)) / fps, 3),
+            "std_dur_s": round(float(arr.std()) / fps, 3),
+            "short_bout_frac": round(short_count / max(1, len(lengths)), 4),
+        }
+        bout_metrics[str(k)] = bm
+        dur_rows.append({
+            "state": k,
+            "n_bouts": bm["n_bouts"],
+            "mean_dur_frames": bm["mean_dur_frames"],
+            "mean_dur_s": bm["mean_dur_s"],
+            "median_dur_s": bm["median_dur_s"],
+            "std_dur_s": bm["std_dur_s"],
+            "short_bout_frac": bm["short_bout_frac"],
+        })
+
+    global_short_frac = total_short_frames / max(1, total_non_noise_frames)
+
+    if dur_rows:
+        pd.DataFrame(dur_rows).to_csv(
+            os.path.join(diag_dir, "state_duration_summary.csv"), index=False
+        )
+
+    # ---- Cluster balance metrics ----
+    pos_fracs = [f for f in state_fracs if f > 0]
+    if len(pos_fracs) > 1:
+        import math
+        ent = -sum(f * math.log(f) for f in pos_fracs if f > 0)
+        max_ent = math.log(len(pos_fracs))
+        state_entropy = round(ent / max_ent, 4) if max_ent > 0 else 1.0
+    else:
+        state_entropy = 0.0
+    imbalance_score = round(_gini(pos_fracs), 4)
+
     # ---- Load index metadata for feature info ----
     index_path = os.path.join(_res(), "features", "index.json")
     n_features = 0
-    use_wavelets = True
+    use_wavelets = None  # None = unknown; never infer True/False when key is absent
     semantic_features: list[str] = []
     keypoint_groups: dict = {}
     if os.path.exists(index_path):
         with open(index_path) as f:
             idx = json.load(f)
-        meta = idx.get("_meta", {})
+        meta = _migrate_index_meta(idx.get("_meta", {}))
         n_features = int(meta.get("n_features", 0))
-        use_wavelets = bool(meta.get("use_wavelets", True))
+        _uw = meta.get("use_wavelets")
+        use_wavelets = bool(_uw) if _uw is not None else None
         semantic_features = meta.get("semantic_features", [])
         keypoint_groups = meta.get("keypoint_groups", {})
 
@@ -1860,6 +2217,39 @@ def _generate_diagnostics(
             "message": f"Largest state occupies {largest_frac*100:.1f}% of frames.",
             "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
         })
+    if noise_frac > 0.50:
+        warnings.append({
+            "level": "error",
+            "message": f"Over 50% of frames are noise ({noise_frac*100:.1f}%). HDBSCAN may be too aggressive.",
+            "action": f"python compare.py --cluster --min-cluster-size {max(10, min_cluster_size // 2)}",
+        })
+    if n_clusters > 15:
+        warnings.append({
+            "level": "warning",
+            "message": f"Many states discovered ({n_clusters}). Consider raising --min-cluster-size to merge similar states.",
+            "action": f"python compare.py --cluster --min-cluster-size {min_cluster_size * 2}",
+        })
+    if umap_dims < 5:
+        warnings.append({
+            "level": "warning",
+            "message": f"UMAP dimension is very low ({umap_dims}). May compress behavioral structure. Try --umap-dims 10.",
+            "action": "python compare.py --cluster --umap-dims 10",
+        })
+    if global_short_frac > 0.35:
+        warnings.append({
+            "level": "warning",
+            "message": f"More than 35% of frames are in very short bouts (<0.5 s). States may be over-split.",
+            "action": f"python compare.py --cluster --min-cluster-size {min_cluster_size * 2}",
+        })
+    if hdbscan_sample > 0 and hdbscan_sample < total_frames // 20:
+        warnings.append({
+            "level": "info",
+            "message": (
+                f"HDBSCAN fit on {hdbscan_sample:,} of {total_frames:,} frames. "
+                "Generalization may be limited."
+            ),
+            "action": "python compare.py --cluster --hdbscan-sample 0  (to use all frames)",
+        })
     if n_features > 0 and n_features < 20:
         warnings.append({
             "level": "warning",
@@ -1876,20 +2266,35 @@ def _generate_diagnostics(
                 "action": "Map keypoint groups in Settings > Column Mapping.",
             })
 
+    # ---- Health verdict ----
+    levels = {w["level"] for w in warnings}
+    if "error" in levels:
+        health_status = "failed"
+    elif "warning" in levels:
+        health_status = "suspicious"
+    else:
+        health_status = "good"
+
     diagnostics = {
         "n_states": n_clusters,
         "n_frames": total_frames,
         "noise_frac": round(noise_frac, 4),
         "largest_state_frac": round(largest_frac, 4),
         "smallest_state_frac": round(smallest_frac, 4),
+        "dominant_state_id": dominant_state_id,
         "mean_confidence": round(mean_conf, 4),
         "low_confidence_frac": round(low_conf_frac, 4),
+        "state_entropy": state_entropy,
+        "imbalance_score": imbalance_score,
+        "short_bout_frac": round(global_short_frac, 4),
+        "bout_metrics": bout_metrics,
         "n_features": n_features,
         "use_wavelets": use_wavelets,
         "umap_dims": umap_dims,
         "min_cluster_size": min_cluster_size,
         "hdbscan_sample": hdbscan_sample,
         "hdbscan_min_samples": hdbscan_min_samples,
+        "health_status": health_status,
         "warnings": warnings,
     }
 
@@ -1898,6 +2303,7 @@ def _generate_diagnostics(
 
     # ---- UMAP 2D sample for scatter visualization ----
     _save_umap_sample(all_labels, all_probs, pooled_umap, diag_dir, n_clusters)
+    _save_umap_embedding_plot(diag_dir)
 
     # ---- Overview plot ----
     _save_diagnostics_plot(diagnostics, occ_df, diag_dir)
@@ -1949,6 +2355,47 @@ def _save_umap_sample(
         "prob": sampled_probs,
     })
     sample_df.to_csv(os.path.join(diag_dir, "umap_sample.csv"), index=False)
+
+
+def _save_umap_embedding_plot(diag_dir: str) -> None:
+    """Save a standalone UMAP embedding visualization colored by state."""
+    umap_path = os.path.join(diag_dir, "umap_sample.csv")
+    if not os.path.exists(umap_path):
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+    except ImportError:
+        return
+
+    umap_df = pd.read_csv(umap_path)
+    if umap_df.empty:
+        return
+
+    valid = umap_df[umap_df["label"] >= 0]
+    noise = umap_df[umap_df["label"] < 0]
+    fig, ax = _plt.subplots(figsize=(7, 6))
+    if not noise.empty:
+        ax.scatter(
+            noise["umap_1"], noise["umap_2"],
+            c="#CCCCCC", s=1, alpha=0.25, rasterized=True, label="Noise",
+        )
+    if not valid.empty:
+        scatter = ax.scatter(
+            valid["umap_1"], valid["umap_2"],
+            c=valid["label"], cmap="tab20", s=1.2, alpha=0.55,
+            rasterized=True,
+        )
+        fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04, label="State")
+    ax.set_title("UMAP Embedding by State", fontsize=11, fontweight="bold")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(diag_dir, "umap_embedding_by_state.png"), dpi=150)
+    _plt.close(fig)
 
 
 def _save_diagnostics_plot(diagnostics: dict, occ_df: pd.DataFrame, diag_dir: str) -> None:
@@ -2419,6 +2866,34 @@ def _plot_animal_trajectories(df, state_cols, n_clusters):
     print(f"  Saved: {save_path}")
 
 
+def _save_state_occupancy_plot(df: pd.DataFrame, state_cols: list[str], save_path: str) -> None:
+    """Persist a compact global state occupancy figure for export/artifacts."""
+    if df.empty or not state_cols:
+        return
+    import matplotlib.pyplot as plt
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    means = df[state_cols].mean().fillna(0.0)
+    state_ids = [int(c.split("_")[1]) for c in state_cols]
+    fig_h = max(3.5, 0.24 * len(state_ids) + 1.4)
+    fig, ax = plt.subplots(figsize=(7.0, fig_h))
+    colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(state_ids))))
+    ax.barh(range(len(state_ids)), means.values * 100, color=colors, alpha=0.85)
+    ax.set_yticks(range(len(state_ids)))
+    ax.set_yticklabels([f"S{s}" for s in state_ids], fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("Mean session occupancy (%)")
+    ax.set_title("State Occupancy", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.xaxis.grid(True, color="#EEEEEE", zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> None:
     schema = _vc.get_metadata_schema()
     rows = []
@@ -2438,7 +2913,8 @@ def _write_configured_correlations(df: pd.DataFrame, state_cols: list[str]) -> N
                 valid = x.notna() & y.notna()
                 if valid.sum() < 3:
                     continue
-                r = float(np.corrcoef(x[valid], y[valid])[0, 1])
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    r = float(np.corrcoef(x[valid], y[valid])[0, 1])
                 rows.append({
                     "analysis": corr.get("name", "Configured correlations"),
                     "column": col,
@@ -2523,6 +2999,20 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
     os.makedirs(os.path.join(_res(), "comparison"), exist_ok=True)
     try:
+        from analysis_design import write_analysis_design
+        analysis_design = write_analysis_design(df, _res(), _vc._load_config())
+    except Exception as e:
+        print(f"[warn] Could not write analysis design: {e}")
+        analysis_design = {
+            "subject_col": "animal_id" if "animal_id" in df.columns else None,
+            "time_col": "day" if "day" in df.columns else None,
+            "time_order": sorted(df["day"].dropna().unique().tolist()) if "day" in df.columns else None,
+            "condition_cols": ["context"] if "context" in df.columns else [],
+            "group_cols": [],
+            "continuous_cols": [],
+            "detected_mode": "time_and_condition" if {"day", "context"}.issubset(df.columns) else "minimal",
+        }
+    try:
         import metadata_schema as _ms
         schema_report = _ms.metadata_schema_report(meta, _vc._load_config())
         schema_report["summary_rows"] = int(len(df))
@@ -2537,12 +3027,27 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
         print(f"[warn] Could not write metadata schema report: {e}")
     df.to_csv(os.path.join(_res(), "comparison", "summary_table.csv"), index=False)
     print(f"Summary table saved: results/comparison/summary_table.csv  ({len(df)} videos)")
+    _write_overview_summary(
+        df,
+        cluster_info,
+        index,
+        active_run_id=cluster_info.get("run_id") or cluster_info.get("active_run_id"),
+    )
 
     # ---- Characterization: bouts.csv + state_summary.csv ----
     char_dir = os.path.join(_res(), "characterization")
     os.makedirs(char_dir, exist_ok=True)
     all_bouts = []
-    meta_cols = [c for c in ["context", "animal_id", "day", "experiment"] if c in df.columns]
+    design_meta_cols = [
+        analysis_design.get("subject_col"),
+        analysis_design.get("time_col"),
+        *(analysis_design.get("condition_cols") or []),
+        *(analysis_design.get("group_cols") or []),
+    ]
+    meta_cols = []
+    for c in ["context", "animal_id", "day", "experiment", *design_meta_cols]:
+        if c and c in df.columns and c not in meta_cols:
+            meta_cols.append(c)
     for stem, row_df in df.groupby("stem"):
         labels_path = os.path.join(_res(), "shared", f"{stem}_labels.npy")
         if not os.path.exists(labels_path):
@@ -2572,6 +3077,18 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     )
     bouts_df.to_csv(os.path.join(char_dir, "bouts.csv"), index=False)
     print(f"Bouts saved: results/characterization/bouts.csv  ({len(bouts_df)} bouts)")
+
+    try:
+        from sequence_artifacts import build_sequence_artifacts
+        build_sequence_artifacts(
+            df,
+            analysis_design,
+            _res(),
+            fps=fps,
+            n_clusters=n_clusters,
+        )
+    except Exception as e:
+        print(f"[warn] Sequence artifact generation failed: {e}")
 
     # Per-state context fractions from summary_table
     ctx_fracs: dict[int, dict[str, float]] = {}
@@ -2611,11 +3128,17 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     ss_path = os.path.join(char_dir, "state_summary.csv")
     pd.DataFrame(ss_rows).to_csv(ss_path, index=False)
     print(f"State summary saved: results/characterization/state_summary.csv  ({n_clusters} states)")
+    _save_state_occupancy_plot(
+        df,
+        state_cols,
+        os.path.join(char_dir, "state_occupancy.png"),
+    )
 
     # ---- Transition matrix outputs ----
-    _trans_meta_cols = ["stem"] + [
-        c for c in ["context", "day", "animal_id", "experiment"] if c in meta.columns
-    ]
+    _trans_meta_cols = ["stem"]
+    for c in ["context", "day", "animal_id", "experiment", *design_meta_cols]:
+        if c and c in meta.columns and c not in _trans_meta_cols:
+            _trans_meta_cols.append(c)
     df_trans = pd.DataFrame(trans_rows).merge(
         meta[_trans_meta_cols].drop_duplicates("stem"),
         on="stem", how="left"
@@ -2627,6 +3150,18 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
     ).merge(meta, on="stem", how="left")
     df_trans_full.to_csv(os.path.join(_res(), "comparison", "transition_table.csv"), index=False)
     print(f"Transition table saved: results/comparison/transition_table.csv")
+
+    try:
+        from report_plots import generate_mode_driven_plots
+        generate_mode_driven_plots(
+            df,
+            df_trans_full,
+            bouts_df,
+            analysis_design,
+            _res(),
+        )
+    except Exception as e:
+        print(f"[warn] Mode-driven plot generation failed: {e}")
 
     analysis_groups = _vc.get_enabled_analysis_groups(df)
 
@@ -2676,7 +3211,7 @@ def cmd_report(fps: float = 30.0, min_confidence: float = 0.0):
 
         for ax, col in zip(axes, state_cols):
             data = [df[df[group_col] == g][col].dropna().values for g in groups]
-            bp = ax.boxplot(data, labels=[str(g) for g in groups], patch_artist=True)
+            bp = ax.boxplot(data, tick_labels=[str(g) for g in groups], patch_artist=True)
             colors = plt.cm.tab10(np.linspace(0, 0.5, len(groups)))
             for patch, color in zip(bp["boxes"], colors):
                 patch.set_facecolor(color)
@@ -2787,6 +3322,16 @@ def _format_motif(motif: tuple[int, ...]) -> str:
     return str(motif)
 
 
+def _is_degenerate_motif(motif: tuple[int, ...]) -> bool:
+    """True if every state in the tuple is identical, e.g. (48, 48), (3, 3, 3).
+
+    Such motifs encode bout duration (one state persisting), not sequence
+    structure, so they are excluded from motif ranking. Mixed tuples like
+    (12, 47) or (3, 3, 7) are not degenerate and are kept.
+    """
+    return len(set(motif)) <= 1
+
+
 def _pick_motif_contexts(context_values: list[str]) -> tuple[str, str]:
     available = sorted({str(v) for v in context_values if str(v) and str(v) != "nan"})
     if len(available) < 2:
@@ -2825,6 +3370,8 @@ def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> No
 
     mat = plot_df[["context_A_freq", "context_B_freq"]].to_numpy(dtype=float)
     labels = plot_df["motif"].astype(str).tolist()
+    group_a = str(plot_df["context_A"].iloc[0]) if "context_A" in plot_df.columns and not plot_df.empty else "Group A"
+    group_b = str(plot_df["context_B"].iloc[0]) if "context_B" in plot_df.columns and not plot_df.empty else "Group B"
 
     fig_h = max(4.0, 0.28 * len(plot_df) + 1.5)
     fig, ax = plt.subplots(figsize=(6.5, fig_h))
@@ -2832,9 +3379,9 @@ def _plot_motif_heatmap(df: pd.DataFrame, save_path: str, limit: int = 20) -> No
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Context A", "Context B"])
-    ax.set_title("Top Context-Enriched Motifs")
-    ax.set_xlabel("Frequency within context")
+    ax.set_xticklabels([group_a, group_b])
+    ax.set_title("Top Group-Enriched Motifs")
+    ax.set_xlabel("Frequency within group")
     for r in range(mat.shape[0]):
         for c in range(mat.shape[1]):
             ax.text(c, r, f"{mat[r, c]:.3f}", ha="center", va="center",
@@ -2923,6 +3470,10 @@ def cmd_motifs(
         total_a = totals[context_a][typ]
         total_b = totals[context_b][typ]
         for motif in motifs:
+            # Skip degenerate motifs (a single state repeating); these encode
+            # bout duration, reported separately in bout_duration_by_context.csv.
+            if _is_degenerate_motif(motif):
+                continue
             count_a = int(counts[context_a][typ].get(motif, 0))
             count_b = int(counts[context_b][typ].get(motif, 0))
             freq_a = count_a / total_a if total_a else 0.0
@@ -3091,7 +3642,66 @@ def _write_bout_motifs(
     enrichment_df.to_csv(os.path.join(motifs_dir, "motif_context_enrichment.csv"), index=False)
     print(f"  Context enrichment: results/motifs/motif_context_enrichment.csv ({len(enrichment_df)} rows)")
 
+    # ---- Bout Duration by Context (separate from sequence motifs) ----
+    # Repeated-state "motifs" really measure how long a single state persists.
+    # That is a legitimate but distinct analysis, reported here rather than as a
+    # sequence motif.
+    _write_bout_duration_by_context(bouts, meta_by_stem)
+
     print(f"Motifs → results/motifs/")
+
+
+def _write_bout_duration_by_context(bouts: pd.DataFrame, meta_by_stem: pd.DataFrame):
+    """Per-(state, context) bout-duration summary → comparison/bout_duration_by_context.csv."""
+    if bouts is None or bouts.empty or "state" not in bouts.columns:
+        return
+
+    df = bouts.copy()
+    # Ensure a context column (bouts.csv has it when context is in metadata;
+    # otherwise derive from metadata by stem).
+    if "context" not in df.columns or df["context"].isna().all():
+        df["context"] = df["stem"].map(
+            lambda s: str(meta_by_stem.loc[s, "context"])
+            if s in meta_by_stem.index and "context" in meta_by_stem.columns else ""
+        )
+    df["context"] = df["context"].fillna("").astype(str)
+    df = df[df["context"].str.strip() != ""]
+    if df.empty:
+        return
+
+    # Duration: prefer existing column, else derive from frames (1 frame == 1 unit
+    # if start/end frames are present; left in frames is fine for relative compare,
+    # but we keep duration_sec semantics when available).
+    if "duration_sec" not in df.columns:
+        df = df.assign(duration_sec=df.get("end_frame", 0) - df.get("start_frame", 0) + 1)
+    df["duration_sec"] = pd.to_numeric(df["duration_sec"], errors="coerce")
+    df = df.dropna(subset=["duration_sec"])
+    if df.empty:
+        return
+
+    global_mean = df.groupby("state")["duration_sec"].mean()
+    rows = []
+    for (state, ctx), grp in df.groupby(["state", "context"]):
+        g_mean = float(global_mean.get(state, float("nan")))
+        ctx_mean = float(grp["duration_sec"].mean())
+        rows.append({
+            "state_id": int(state),
+            "context": ctx,
+            "bout_count": int(len(grp)),
+            "mean_bout_dur_sec": round(ctx_mean, 4),
+            "median_bout_dur_sec": round(float(grp["duration_sec"].median()), 4),
+            "global_mean_dur_sec": round(g_mean, 4) if g_mean == g_mean else float("nan"),
+            "duration_enrichment": (
+                round(ctx_mean / g_mean, 4) if g_mean and g_mean == g_mean else float("nan")
+            ),
+        })
+
+    out_df = pd.DataFrame(rows).sort_values(["state_id", "context"])
+    out_dir = os.path.join(_res(), "comparison")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "bout_duration_by_context.csv")
+    out_df.to_csv(out_path, index=False)
+    print(f"  Bout duration by context: results/comparison/bout_duration_by_context.csv ({len(out_df)} rows)")
 
 
 def cmd_summarize():
@@ -3163,6 +3773,45 @@ def cmd_event_align(min_confidence: float = 0.0):
                   f"  {info['dominant_state_A']}       {info['dominant_state_B']}")
 
 
+def _save_contrast_vector_comparison_plot(contrast_df: pd.DataFrame, save_path: str) -> None:
+    """Persist a comparison figure for per-cohort or per-animal contrast vectors."""
+    if contrast_df is None or contrast_df.empty or "contrast_magnitude" not in contrast_df.columns:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    plot_df = contrast_df.copy()
+    plot_df = plot_df[plot_df["contrast_magnitude"].notna()]
+    if plot_df.empty:
+        return
+    label_col = "cohort_label" if "cohort_label" in plot_df.columns else "animal_id"
+    if label_col not in plot_df.columns:
+        return
+
+    plot_df[label_col] = plot_df[label_col].astype(str)
+    plot_df = plot_df.sort_values("contrast_magnitude", ascending=True)
+    fig_h = max(3.5, 0.28 * len(plot_df) + 1.5)
+    fig, ax = plt.subplots(figsize=(8, fig_h))
+    colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(plot_df))))
+    ax.barh(plot_df[label_col].values, plot_df["contrast_magnitude"].astype(float).values, color=colors, alpha=0.85)
+    ax.set_xlabel("Contrast magnitude")
+    ax.set_ylabel("Cohort" if label_col == "cohort_label" else "Animal")
+    ax.set_title("Behavioral Contrast Vector Comparison", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.xaxis.grid(True, color="#EEEEEE", zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     """Build master_table.csv via quantify.py."""
     try:
@@ -3171,6 +3820,8 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
     except ImportError:
         sys.exit("[ERROR] quantify.py not found in project directory.")
 
+    from quantify import coerce_id_column
+
     print("\nComputing behavioral contrast vectors...")
     try:
         contrast_df = compute_contrast_vector(
@@ -3178,12 +3829,16 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
             output_dir=os.path.join(_res(), "quantification"),
             cohort_csv=cohort,
         )
+        _save_contrast_vector_comparison_plot(
+            contrast_df,
+            os.path.join(_res(), "comparison", "contrast_vector_comparison.png"),
+        )
 
         master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and "animal_id" in contrast_df.columns:
             master = pd.read_csv(master_path)
-            master["animal_id"] = master["animal_id"].astype(str)
-            contrast_df["animal_id"] = contrast_df["animal_id"].astype(str)
+            master = coerce_id_column(master)
+            contrast_df = coerce_id_column(contrast_df)
             master = master.merge(
                 contrast_df[["animal_id", "contrast_magnitude",
                              "dominant_fear_state", "dominant_safety_state"]],
@@ -3205,9 +3860,8 @@ def cmd_quantify(cohort: str | None = None, min_confidence: float = 0.0):
         master_path = os.path.join(_res(), "quantification", "master_table.csv")
         if os.path.exists(master_path) and not lr_df.empty:
             master = pd.read_csv(master_path)
-            master["animal_id"] = master["animal_id"].astype(str)
-            lr_reset = lr_df.reset_index()
-            lr_reset["animal_id"] = lr_reset["animal_id"].astype(str)
+            master = coerce_id_column(master)
+            lr_reset = coerce_id_column(lr_df.reset_index())
             keep_cols = ["animal_id", "fear_learning_rate", "fear_learning_r2"]
             keep_cols = [c for c in keep_cols if c in lr_reset.columns]
             master = master.merge(lr_reset[keep_cols], on="animal_id", how="left")
@@ -3263,6 +3917,10 @@ def main():
                         help="Re-extract only videos whose feature dimension doesn't match "
                              "the current config.json settings (resolves --extract/--no-wavelets "
                              "mismatches without a full re-extraction)")
+    parser.add_argument("--backfill-video-paths", action="store_true",
+                        help="Re-resolve missing video_path fields in results/features/index.json "
+                             "for H5-extracted entries, using the H5 manifest's video-path column "
+                             "or a raw_videos_dir extension match (does not re-extract features)")
     parser.add_argument("--cluster", action="store_true",
                         help="Fit shared UMAP+HDBSCAN clusterer across all videos")
     parser.add_argument("--report", action="store_true",
@@ -3312,6 +3970,10 @@ def main():
                         help="Cohort CSV/Excel for --quantify (auto-detected if omitted)")
     parser.add_argument("--save-run", action="store_true",
                         help="Mark the cluster run as saved after --cluster completes")
+    parser.add_argument("--set-active", metavar="RUN_ID", default=None,
+                        help="Set a saved run as the active clustering run")
+    parser.add_argument("--list-runs", action="store_true",
+                        help="List all saved clustering runs")
     parser.add_argument("--event-align", action="store_true",
                         help="Peri-event behavioral state analysis (discrete experiments only)")
     parser.add_argument("--diagnostics", action="store_true",
@@ -3324,20 +3986,62 @@ def main():
                         help="Max clips per motif (default: 5)")
     parser.add_argument("--clip-padding-sec", type=float, default=1.0,
                         help="Padding in seconds around motif clip boundaries (default: 1.0)")
+    parser.add_argument("--repair-paths", action="store_true",
+                        help="Automatically rewrite config.json when a resolved metadata/results/"
+                             "raw_videos path looks like a doubled pre-refactor path. Without this "
+                             "flag, only a warning + suggested fix is printed.")
     args = parser.parse_args()
 
-    if not any([args.extract, args.fix_features, args.cluster, args.collapse, args.diagnose,
+    if not any([args.extract, args.fix_features, args.backfill_video_paths, args.cluster,
+                args.collapse, args.diagnose,
                 args.report, args.summarize, args.quantify, args.motifs, args.save_run,
-                args.event_align, args.diagnostics, args.motif_clips]):
+                args.event_align, args.diagnostics, args.motif_clips,
+                args.set_active, args.list_runs, args.repair_paths]):
         parser.print_help()
         sys.exit(1)
 
     _print_hardware_banner()
+    try:
+        _print_project_path_diagnostics(repair=args.repair_paths)
+    except Exception as exc:
+        sys.exit(str(exc))
+
+    if args.list_runs:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        _runs = _mgr.list_runs()
+        _active = _mgr.get_active_run()
+        if not _runs:
+            print("No saved clustering runs.")
+        else:
+            print(f"{'Run ID':<55} {'States':>6} {'Noise':>7} {'MCS':>6} {'MS':>4} {'UMAP':>5} {'Status':<10} {'Active'}")
+            print("-" * 105)
+            for _m in _runs:
+                _act = " *" if _m.run_id == _active else ""
+                print(
+                    f"{_m.run_id:<55} {_m.n_clusters:>6} "
+                    f"{_m.noise_frac * 100:>6.1f}% {_m.min_cluster_size:>6} "
+                    f"{_m.min_samples_resolved:>4} {_m.umap_dims:>5} "
+                    f"{_m.status:<10}{_act}"
+                )
+
+    if args.set_active:
+        from cluster_run_manager import ClusterRunManager
+        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        _mgr = ClusterRunManager(_res(), config_path=_cfg_path)
+        try:
+            _mgr.set_active_run(args.set_active)
+            print(f"Active run set to: {args.set_active}")
+        except FileNotFoundError:
+            sys.exit(f"Run not found: {args.set_active}")
 
     if args.extract:
         cmd_extract(fps=args.fps, use_wavelets=not args.no_wavelets)
     if args.fix_features:
         cmd_fix_features(fps=args.fps)
+    if args.backfill_video_paths:
+        cmd_backfill_video_paths()
     if args.diagnose:
         mcs_list = None
         if args.diagnose_mcs:

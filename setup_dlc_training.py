@@ -291,9 +291,10 @@ def analyze_videos():
     import deeplabcut
 
     video_files = glob.glob(os.path.join(_get_raw_videos_dir(), "*.mp4"))
-    print(f"\nAnalyzing {len(video_files)} video(s)...")
+    total = len(video_files)
+    print(f"\nAnalyzing {total} video(s)...", flush=True)
     if HW.get("device") == "cuda":
-        print("Using CUDA device 0 for pose estimation.")
+        print("Using CUDA device 0 for pose estimation.", flush=True)
     with prevent_sleep():
         _call_with_supported_kwargs(
             deeplabcut.analyze_videos,
@@ -304,7 +305,7 @@ def analyze_videos():
             batchsize=HW["batch_size"],
             **_gpu_kwargs(),
         )
-    print("Analysis complete. CSV outputs saved alongside videos.")
+    print("Analysis complete. CSV outputs saved alongside videos.", flush=True)
 
 
 def main():

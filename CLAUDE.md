@@ -2,9 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Decision Log
+
+Before making any architecture, UX, or naming decision, read `docs/DECISIONS.md`. It contains numbered prior decisions and their rationale — do not re-litigate or silently contradict a numbered decision without flagging it to the user first. When you make a new meaningful decision (architecture choice, root-cause finding, deferred feature, naming convention), add a new numbered entry at the bottom of `docs/DECISIONS.md` following the existing format (Decision/finding, Why, Related). Keep entries short — link to commit hashes or `prompts/` files rather than re-explaining implementation details.
+
+## Commit Policy
+
+After finishing each user-requested task in this repository, stage and commit the changes made for that task before ending the turn (unless the user says otherwise). This repo is frequently edited by multiple concurrent sessions in the same checkout — before committing, run `git status`/`git diff` and stage only the files that belong to the current task; never `git add -A`/`git add -u`. If a file mixes your changes with another session's unrelated, uncommitted work, flag it to the user rather than silently committing or discarding either side.
+
 ## Project Overview
 
-VIEB (Video Interpreter for Experimental Behavior) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.
+VIEB (Video Interpreter Excluding Bias) analyzes mouse fear-conditioning videos. It takes DeepLabCut pose-tracking output (CSV files with 8 keypoints per frame) and runs an unsupervised ML pipeline to discover and compare behavioral states across 222 videos.
 
 ## Installation
 
@@ -99,6 +107,27 @@ Stateless pipeline that transforms `(T, K, 2)` pose arrays into behavioral label
 
 Shared models saved in `results/shared/`: `preprocessor.pkl`, `umap_reducer.pkl`, `clusterer.pkl`, `cluster_info.json`. Per-video labels in `results/shared/<stem>_labels.npy` (int32, -1 = noise). Per-video soft probabilities in `results/shared/<stem>_probs.npy` (float32, 0–1; 0 for noise frames).
 
+### state_characterizer.py — Per-state characterization outputs
+
+`state_characterizer.py` computes interpretable per-state summaries and saves them to `results/characterization/`. It can be run as a CLI script or imported as a module.
+
+```bash
+python state_characterizer.py     # reads active project config, computes all outputs
+```
+
+Public API:
+- `run(results_dir, shared_dir, features_dir, metadata_path=None, fps=30)` → `{"n_states", "saved_files", "errors"}`
+- `load_outputs(results_dir)` → `{"feature_profiles", "feature_zscores", "duration_summary", "group_enrichment", "characterization"}`
+
+Outputs saved in `results/characterization/`:
+- `state_feature_zscores.csv` — per-state feature z-scores (cluster center values in standardized space; value = std above global mean)
+- `state_feature_profiles.csv` — raw feature means per state (denormalized via preprocessor.pkl if available)
+- `state_duration_summary.csv` — per-state bout count, mean/median/P5/P25/P75/P95 duration
+- `state_group_enrichment.csv` — fractional enrichment by metadata groups (context, day, animal_id, experiment)
+- `state_characterization.json` — combined summary: n_states, feature names, top positive/negative features per state
+
+The "Run Characterization" button in the State Characterization tab calls `state_characterizer.py`. Run after `compare.py --cluster` and optionally after `compare.py --report` (which generates bouts.csv needed for duration stats).
+
 ### characterize.py — Clip Reviewer data layer
 
 `characterize.py` is **not a pipeline script** — it is a pure Python module providing the backend API for the Clip Reviewer GUI. It has no CLI entry point. Do not try to run it directly.
@@ -133,7 +162,7 @@ Public API:
 
 ### generate_clips.py — Clip generation pipeline stage
 
-`generate_clips.py` is a standalone CLI script (pipeline stage 11). It is the extracted clip-generation logic, copied verbatim from the old `characterize.py --clips` functionality.
+`generate_clips.py` is a standalone CLI script (pipeline stage 8). It is the extracted clip-generation logic, copied verbatim from the old `characterize.py --clips` functionality.
 
 For each state 0..N-1:
 - Longest bouts of consecutive frames labeled as that state → `longest_NN.mp4`
@@ -169,27 +198,68 @@ Requires `results/characterization/bouts.csv` (or builds it on the fly) and `res
 - `characterize.train_classifier()` requires `results/shared/cluster_info.json` and optionally `results/shared/umap_reducer.pkl`. If the UMAP reducer is missing it falls back to standardized cluster centers.
 - `classifier.pkl` in `results/annotations/` stores `{"clf": RandomForestClassifier, "state_features": dict, "classes": list}`. Check `saved["classes"]` to detect category drift between sessions.
 
+### cluster_run_manager.py — Cluster run versioning
+
+`cluster_run_manager.py` is a pure Python module (no Qt dependencies) that manages versioned clustering experiment runs. Each run captures the clustering parameters, output files, and diagnostic metrics.
+
+Public API:
+
+| Class | Role |
+|-------|------|
+| `ClusterRunConfig` | Dataclass: `min_cluster_size`, `min_samples` (0 = auto), `umap_dims`, `hdbscan_sample`. `resolve_min_samples()` returns the effective value. |
+| `ClusterRunManifest` | Dataclass: enriched run metadata — `run_id`, `status`, `date`, `n_clusters`, `noise_pct`, `mean_confidence`, `runtime_seconds`, `health_status`, `warnings`, `assignment_method`. `from_legacy()` auto-converts old-format manifests. |
+| `ClusterRunManager` | `save_run()` — copies `results/shared/` to `results/runs/<run_id>/`, enriches manifest with diagnostics. `list_runs()` — reads all run manifests. `set_active_run()` — restores a saved run to `results/shared/` and updates `config.json`. `delete_run()` — removes a run directory. `comparison_table()` — returns a list of dicts for all runs, suitable for tabular display. |
+| `ClusterRunQueue` | Sequential queue of `ClusterRunConfig` objects for batch execution. `stop_after_current()` and `cancel()` controls. |
+
+Run manifests are stored as `results/runs/<run_id>/run_manifest.json`. The active run ID is stored in `config.json` as `"active_cluster_run"`.
+
+```bash
+python compare.py --list-runs              # List all saved clustering runs
+python compare.py --set-active <run_id>    # Restore a saved run as the active clustering
+```
+
 ### GUI architecture (`user_interface.py`)
 
 The main GUI is `user_interface.py` (standalone, run directly). The sidebar order is:
 
 1. Overview — dashboard with stat cards
 2. Pipeline — staged pipeline runner
-3. Browse States — state explorer with clips
-4. **Analysis** — consolidated analysis hub (`views/analysis.py`)
-5. **Validation** — frame labeling + Clip Reviewer (`views/validation.py`)
-6. Settings — config editor
+3. Cluster Runs — run queue, comparison table, saved runs (`views/cluster_runs.py`)
+4. Browse States — state explorer with clips
+5. **Analysis** — consolidated analysis hub (`views/analysis.py`)
+6. Results — artifact browser (`views/artifacts.py`)
+7. **Validation** — frame labeling + Clip Reviewer (`views/validation.py`)
+8. Settings — full config editor (`views/settings.py`)
 
-`views/analysis.py` contains `AnalysisView` with a vertical tab bar (six tabs):
+All views are constructed lazily on first visit via `_ensure_view()`. Analysis tabs are also lazy — built on first tab selection via `_ensure_tab_built()`.
+
+**Stage 0 — Onboarding** (`Stage0ReadinessPanel` in `user_interface.py`): A summary card showing project name, status badge ("Ready" / "Needs Setup" / "Detected"), data summary, and next-action guidance. One dynamic primary button ("Onboard Project" / "Choose Project" / "Use This Project" / "Fix Setup" / "Continue") routes to existing workflows. Detailed validation checks are hidden behind a collapsible "Show details" toggle. Does not scan large directories, does not expose settings parameters. If metadata is missing but a source is detected, generation runs in a `QThread`. Later stages block until onboarding passes.
+
+**Artifacts view** (`views/artifacts.py`): Scans use `ArtifactScanWorker` (a `QThread`) so the UI never blocks during directory scanning. The `refresh()` method accepts an optional pre-loaded data dict; the worker calls `_on_scan_done` / `_on_scan_failed` on completion. Row insertion is batched via `_insert_next_rows`.
+
+`views/analysis.py` contains `AnalysisView` with a vertical tab bar (ten tabs) split into two labeled sections:
+
+**CORE ANALYSIS**
 
 | Tab | Command | Data source |
 |-----|---------|-------------|
-| Comparison Report | `compare.py --report` | `results/comparison/summary_table.csv` |
-| State Characterization | *(no longer from characterize.py)* | `results/characterization/state_summary.csv` + clips/ |
+| State Characterization | `state_characterizer.py` | `results/characterization/state_summary.csv` + `state_feature_zscores.csv` + `state_duration_summary.csv` + `state_group_enrichment.csv` + clips/ |
+| State Comparison | `compare.py --report` | `results/comparison/summary_table.csv` |
+| Transitions & Motifs | `compare.py --motifs` | `results/comparison/motifs.csv` |
+| Diagnostics | *(inline)* | `results/shared/cluster_info.json` |
+
+**OPTIONAL ANALYSIS**
+
+| Tab | Command | Data source |
+|-----|---------|-------------|
 | Cohort Analysis | `cohort_analysis.py --groupby X` | `results/cohort/` |
 | Quantification | `compare.py --quantify` | `results/quantification/master_table.csv` |
-| Fear Index | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
+| [metric label] | `fear_index.py --cohort X` | `results/quantification/fear_index.csv` |
 | Jess Correlation | `compare.py --jess` | `results/quantification/jess_correlations.csv` |
+| Event Alignment | `compare.py --event-align` | `results/comparison/` |
+| Column Mapping | *(inline)* | project `config.json` |
+
+The tab list uses section headers (non-selectable rows) and a `_row_to_stack` dict mapping list row → stack index, since header rows do not correspond to stack pages.
 
 `views/validation.py` — `ValidationView` has three tabs:
 
@@ -213,23 +283,41 @@ Config keys for Clip Reviewer (in `config.json`):
 - `reviewer_categories`: list of category name strings (restored on app load)
 - `reviewer_seed`: int (0 = random)
 
-`AnalysisView` emits `worker_running(bool)` connected to `MainWindow._set_running()` so the status-bar pulse indicator reflects running analysis commands.
+`AnalysisView` emits `worker_running(bool)` connected to `MainWindow._set_running()` so the status-bar pulse indicator reflects running analysis commands. When a cluster run is active, the Analysis view shows a banner with the run ID, number of states, noise %, and resolved `min_samples`.
 
-### Pipeline stages (in `_utils.py` and `user_interface.py` STAGES list)
+**Cluster Runs view** (`views/cluster_runs.py`): GUI for `ClusterRunManager`. Three sections:
+- **Run Queue** — editable table of `ClusterRunConfig` objects (Add/Duplicate/Remove rows, "Auto" for min_samples). "Start Queue" runs configs sequentially via `ClusterQueueWorker` (a `QThread` in `_workers.py`).
+- **Current Run** — card showing the active run in `results/shared/` with Save/Rename/Delete buttons.
+- **Comparison Table** — read-only table of all saved runs with Set Active button, color-coded health status, and active run highlighting.
+
+**Settings view** (`views/settings.py`): Full project configuration editor. Exposes:
+- Arena bounds (x/y min/max)
+- Directories (results, raw videos)
+- DLC Python interpreter path
+- Metadata CSV + column mapping (opens `MetadataMapperWidget` dialog) + metadata generation + validation
+- Cohort file (CSV/Excel)
+- Pose data source (CSV or H5 with H5 file/manifest/key/column/detect)
+- Context groups and descriptions
+- Experiment labels (Condition A/B, primary metric)
+- FPS, UMAP dimensions, HDBSCAN min_samples
+- Learning curves panel configuration
+
+### Pipeline stages (in `_utils.py` STAGES list)
 
 | ID | Name | Script |
 |----|------|--------|
-| 1 | Pose Estimation (DLC) | `setup_dlc_training.py --analyze` |
+| 0 | Onboarding | *(readiness check, no command)* |
+| 1 | Pose Estimation / DLC Analysis | `setup_dlc_training.py --analyze` |
 | 2 | Feature Extraction | `compare.py --extract` |
-| 3–6 | Preprocessing → HMM Smoothing | `compare.py --cluster` |
-| 7 | State Collapsing (optional) | `compare.py --collapse` |
-| 8 | Report Generation | `compare.py --report` |
-| 9 | Per-Animal Scalars | `compare.py --summarize` |
-| 10 | Motif Discovery | `compare.py --motifs` |
-| 11 | **Generate Clips** | `generate_clips.py` |
-| 12 | Event Alignment (optional) | `compare.py --event-align` |
+| 3 | Preprocessing · UMAP · Clustering · Smoothing | `compare.py --cluster` |
+| 4 | State Collapsing (optional) | `compare.py --collapse` |
+| 5 | Report Generation | `compare.py --report` |
+| 6 | Per-Animal Scalars | `compare.py --summarize` |
+| 7 | Motif Discovery | `compare.py --motifs` |
+| 8 | Generate Clips | `generate_clips.py` |
+| 9 | Add Videos | *(opens add-videos workflow)* |
 
-Stage 11 completion is detected by checking whether the `clips/` directory exists and is non-empty.
+Stage 8 completion is detected by checking whether the `clips/` directory exists and is non-empty. After each `--cluster` run, `compare.py` auto-saves a run manifest via `ClusterRunManager`.
 
 ### DLC project structure
 
@@ -255,7 +343,7 @@ results/
   features/              # From compare.py --extract
     <stem>_features.npy  # float32 (T, 51) per video
     index.json
-  shared/                # From compare.py --cluster
+  shared/                # From compare.py --cluster (active run)
     preprocessor.pkl          # joblib BehaviorPreprocessor (standardizer, no PCA)
     umap_reducer.pkl          # joblib UMAP reducer (10 components)
     clusterer.pkl             # joblib HDBSCAN model
@@ -263,6 +351,16 @@ results/
     <stem>_labels.npy         # int32 (T,) per video; -1 = noise frame
     <stem>_probs.npy          # float32 (T,) per video; HDBSCAN soft probabilities 0-1
     validation_report.json    # from --cluster --validate: generalization score, train/test split
+    run_manifest.json         # auto-saved after each --cluster run
+  runs/                  # From ClusterRunManager (saved clustering experiments)
+    <run_id>/
+      run_manifest.json       # enriched manifest: config, diagnostics, health_status, warnings
+      cluster_info.json       # snapshot of cluster_info.json at save time
+      clusterer.pkl           # snapshot of HDBSCAN model
+      preprocessor.pkl        # snapshot of preprocessor
+      umap_reducer.pkl        # snapshot of UMAP reducer
+      <stem>_labels.npy       # snapshot of per-video labels
+      <stem>_probs.npy        # snapshot of per-video probabilities
   comparison/            # From compare.py --report and --summarize
     summary_table.csv         # 222 rows: state fracs + metadata (fracs may not sum to 1)
     transition_table.csv      # summary_table + flattened per-video transition matrices
@@ -281,9 +379,15 @@ results/
     motif_sequences.csv       # every n-gram occurrence per video
     motif_summary.csv         # global motif frequency table
     motif_context_enrichment.csv  # enrichment ratio per motif per context
-  characterization/      # Legacy outputs (no longer regenerated by characterize.py)
-    bouts.csv                 # all bouts — still used by generate_clips.py as input
-    context_report.csv        # still used by generate_clips.py for context-specific clips
+  characterization/      # From compare.py --report + state_characterizer.py
+    bouts.csv                 # all bouts — used by generate_clips.py and state_characterizer.py
+    context_report.csv        # used by generate_clips.py for context-specific clips
+    state_summary.csv         # per-state kinematic profiles + bout stats (from compare.py --report)
+    state_feature_zscores.csv # per-state z-scores for all features (from state_characterizer.py)
+    state_feature_profiles.csv # per-state raw feature means (from state_characterizer.py)
+    state_duration_summary.csv # per-state bout duration percentiles (from state_characterizer.py)
+    state_group_enrichment.csv # enrichment by context/day/animal_id (from state_characterizer.py)
+    state_characterization.json # combined summary: feature names, top features per state
 clips/                   # From generate_clips.py (pipeline stage 11)
   state_<id>/
     longest_NN.mp4            # longest bouts per state

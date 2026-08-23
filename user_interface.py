@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""VIEB GUI - Video Interpreter for Experimental Behavior."""
+"""VIEB GUI - Video Interpreter Excluding Bias."""
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +23,27 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import project_manager as _pm
+
+_STARTUP_T0 = time.perf_counter()
+
+
+def _perf(label: str, start: float | None = None) -> float:
+    now = time.perf_counter()
+    if start is None:
+        print(f"[startup] {label}: {(now - _STARTUP_T0) * 1000:.1f} ms")
+    else:
+        print(f"[timing] {label}: {(now - start) * 1000:.1f} ms")
+    return now
+
+
+def _running_status_text(command: str | None, max_chars: int = 80) -> str:
+    command = (command or "").strip()
+    if not command:
+        return "running"
+    text = f"running: {command}"
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
 
 try:
     from PyQt5.QtCore import QFileSystemWatcher, QObject, QThread, QTimer, Qt, pyqtSignal
@@ -50,6 +73,7 @@ try:
         QProgressBar,
         QRadioButton,
         QScrollArea,
+        QSizePolicy,
         QSlider,
         QSpinBox,
         QStackedWidget,
@@ -143,31 +167,6 @@ def _refresh_global_paths() -> None:
     RESULTS = _results_path()
     CLIPS = _clips_path()
     VALIDATION_DIR = _validation_path()
-
-try:
-    from views.analysis import AnalysisView as _AnalysisView
-    _HAS_ANALYSIS_VIEW = True
-except Exception:
-    _AnalysisView = None
-    _HAS_ANALYSIS_VIEW = False
-
-try:
-    from views.cluster_runs import ClusterRunsView as _ClusterRunsView
-    _HAS_CLUSTER_RUNS_VIEW = True
-except Exception:
-    _ClusterRunsView = None
-    _HAS_CLUSTER_RUNS_VIEW = False
-
-try:
-    from views.artifacts import ArtifactsView as _ArtifactsView
-    _HAS_ARTIFACTS_VIEW = True
-except Exception:
-    _ArtifactsView = None
-    _HAS_ARTIFACTS_VIEW = False
-
-from views.help import HelpView
-from views.dlc_setup import DLCSetupView
-from views.add_videos import AddVideosView
 
 # ---------------------------------------------------------------------------
 # WSL2 / Linux GPU detection - cached at first use
@@ -278,18 +277,6 @@ def _wsl_check_installed() -> bool:
     try:
         r = subprocess.run(["wsl", "--version"], capture_output=True, timeout=8)
         return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _probe_torch_cuda() -> bool:
-    """Return True if torch is installed and reports a usable CUDA GPU.
-
-    Used on Linux/macOS instead of the WSL2 + cuML probe.
-    """
-    try:
-        import torch
-        return torch.cuda.is_available()
     except Exception:
         return False
 
@@ -533,70 +520,9 @@ def safe_infer_target_state(
     return target, ""
 
 
-STAGES = [
-    {
-        "id": 0,
-        "name": "Onboarding",
-        "desc": "Choose a project, import a session-defining data source, and prepare metadata.",
-        "cmd": "onboard project",
-    },
-    {
-        "id": 1,
-        "name": "Pose Estimation / DLC Analysis",
-        "desc": "Run DeepLabCut analysis to generate pose CSV files for videos.",
-        "cmd": "python setup_dlc_training.py --analyze",
-    },
-    {
-        "id": 2,
-        "name": "Feature Extraction",
-        "desc": "Extract frame-level behavioral features from tracked keypoints.",
-        "cmd": "python compare.py --extract [--no-wavelets]",
-    },
-    {
-        "id": 3,
-        "name": "Preprocessing · UMAP · Clustering · Smoothing",
-        "desc": "Standardize features, reduce with UMAP, cluster with HDBSCAN, then smooth labels with HMM.",
-        "cmd": "python compare.py --cluster --min-cluster-size N --umap-dims N [--hdbscan-min-samples N] [--validate]",
-    },
-    {
-        "id": 4,
-        "name": "State Collapsing (optional)",
-        "desc": "Merge states whose centroids exceed a cosine similarity threshold in full feature space.",
-        "cmd": "python compare.py --collapse --collapse-threshold 0.5",
-    },
-    {
-        "id": 5,
-        "name": "Report Generation",
-        "desc": "Build summary tables, transition outputs, and group comparison plots.",
-        "cmd": "python compare.py --report",
-    },
-    {
-        "id": 6,
-        "name": "Per-Animal Scalars",
-        "desc": "Compute freeze AUC and discrimination metrics for each animal.",
-        "cmd": "python compare.py --summarize",
-    },
-    {
-        "id": 7,
-        "name": "Motif Discovery",
-        "desc": "Find enriched bigram/trigram motifs between contexts.",
-        "cmd": "python compare.py --motifs",
-    },
-    {
-        "id": 8,
-        "name": "Generate Clips",
-        "desc": "Export exemplar video clips for each behavioral state.",
-        "cmd": "python generate_clips.py",
-    },
-    {
-        "id": 9,
-        "name": "Add Videos",
-        "desc": "Add more videos to the active project after a first pass or when expanding the dataset.",
-        "cmd": "open add videos",
-    },
-]
-
-_STAGE_BY_ID = {s["id"]: s for s in STAGES}
+# Stage registry: single source of truth in the dependency-free _stages module
+# (imported here, not from _utils, to avoid eagerly loading matplotlib at startup).
+from _stages import STAGES, _STAGE_BY_ID  # noqa: E402
 
 _DEFAULT_CFG = {
     "arena_bounds": {"x_min": 0, "y_min": 0, "x_max": 1280, "y_max": 960},
@@ -693,8 +619,9 @@ _SPINNER = ["|", "/", "-", "\\"]
 _NAV_VIEWS = [
     "Overview",
     "Pipeline",
+    "Cluster Runs",
     "Analysis",
-    "Results",
+    "Artifacts",
     "Settings",
     "Help",
 ]
@@ -707,7 +634,7 @@ _NAV_ICONS = {
     "State Characterization": "▣",
     "Analysis":               "◈",
     "Validation":             "✓",
-    "Results":                "◪",
+    "Artifacts":              "◪",
     "Settings":               "≡",
     "Help":                   "?",
 }
@@ -722,10 +649,18 @@ def _save_app_config(app_cfg: dict) -> None:
 
 
 def _get_project_config_path() -> Path | None:
-    """Return the config.json path for the currently active project."""
+    """Return config.json path for the active project without running the validation scan."""
     try:
-        return _pm.get_active_project(ROOT, APP_CONFIG_PATH) / "config.json"
-    except _pm.ProjectSelectionError:
+        app_cfg = _pm.load_app_config(APP_CONFIG_PATH)
+        active_raw = app_cfg.get("active_project") or ""
+        if not active_raw:
+            return None
+        project = Path(active_raw)
+        if not project.is_absolute():
+            project = ROOT / project
+        project = project.resolve()
+        return project / "config.json" if project.is_dir() else None
+    except Exception:
         return None
 
 
@@ -759,6 +694,34 @@ def _fmt_ts(ts):
     if isinstance(ts, str):
         return ts
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _summary_mtime_text(data: dict) -> str:
+    overview = data.get("overview_summary")
+    if isinstance(overview, dict):
+        value = overview.get("last_run_time") or overview.get("generated_at")
+        if value:
+            return _fmt_ts(value)
+    p = RESULTS / "comparison" / "summary_table.csv"
+    if p.exists():
+        return _fmt_ts(p.stat().st_mtime)
+    return "-"
+
+
+def _overview_state_means(overview: dict | None) -> tuple[list[int], list[float]]:
+    if not isinstance(overview, dict):
+        return [], []
+    raw = overview.get("state_means")
+    if not isinstance(raw, dict):
+        return [], []
+    pairs = []
+    for key, value in raw.items():
+        try:
+            pairs.append((int(key), float(value)))
+        except (TypeError, ValueError):
+            continue
+    pairs.sort(key=lambda item: item[0])
+    return [sid for sid, _ in pairs], [val for _, val in pairs]
 
 
 def _state_key(stage_id):
@@ -804,6 +767,22 @@ def _open_file(parent, title: str, start: str, filter_str: str = "All files (*)"
         filter_str,
         options=QFileDialog.DontUseNativeDialog,
     )
+
+
+_LIGHT_MENU_QSS = (
+    "QMenu#lightPopupMenu{background:#FFFFFF;color:#1A1A1A;"
+    "border:1px solid #DADCE0;border-radius:4px;padding:4px;}"
+    "QMenu#lightPopupMenu::item{background:transparent;color:#1A1A1A;"
+    "padding:6px 28px 6px 12px;border-radius:3px;}"
+    "QMenu#lightPopupMenu::item:selected{background:#E8F0FE;color:#0B57D0;}"
+    "QMenu#lightPopupMenu::separator{height:1px;background:#E5E5E5;margin:4px 6px;}"
+)
+
+
+def _style_light_menu(menu: QMenu) -> QMenu:
+    menu.setObjectName("lightPopupMenu")
+    menu.setStyleSheet(_LIGHT_MENU_QSS)
+    return menu
 
 
 class _Capture(QObject):
@@ -856,59 +835,183 @@ class DataLoader(QThread):
     loaded = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, cohort_csv_path: str = ""):
+    def __init__(self, cohort_csv_path: str = "", lightweight: bool = False):
         super().__init__()
         self._cohort_path = cohort_csv_path
+        self._lightweight = lightweight
 
     def run(self):
-        data = {}
+        t0 = time.perf_counter()
+        data = {"_lightweight": self._lightweight}
         try:
+            try:
+                resolved_results = _pm.resolve_project_path("results", ROOT, APP_CONFIG_PATH)
+            except Exception as exc:
+                data["project_warning"] = (
+                    "Previous results found but could not be loaded. "
+                    f"Active project results path is not ready: {exc}"
+                )
+                data["markers"] = {
+                    "metadata": False,
+                    "features": False,
+                    "clusters": False,
+                    "summary": False,
+                    "report": False,
+                    "motifs": False,
+                    "clips": False,
+                }
+                self.loaded.emit(data)
+                return
+            results_dir = Path(resolved_results)
+            clips_dir = results_dir.parent / "clips"
+
             def _csv(rel):
-                p = RESULTS / rel
+                p = results_dir / rel
                 return pd.read_csv(p) if p.exists() else None
 
             def _json(rel):
-                p = RESULTS / rel
-                return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+                p = results_dir / rel
+                if not p.exists():
+                    return None
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    data.setdefault("load_errors", []).append(f"{rel}: {exc}")
+                    return None
 
-            data["summary"] = _csv("comparison/summary_table.csv")
-            data["state_summary"] = _csv("characterization/state_summary.csv")
-            data["context_report"] = _csv("characterization/context_report.csv")
-            data["transition_table"] = _csv("comparison/transition_table.csv")
-            data["bouts"] = _csv("characterization/bouts.csv")
-            data["motifs"] = _csv("comparison/motifs.csv")
+            def _total_frames_from_index(feature_index):
+                total = 0
+                if isinstance(feature_index, dict):
+                    for key, value in feature_index.items():
+                        if key == "_meta" or not isinstance(value, dict):
+                            continue
+                        total += int(value.get("n_frames", 0) or 0)
+                elif isinstance(feature_index, list):
+                    for value in feature_index:
+                        if isinstance(value, dict):
+                            total += int(value.get("n_frames", 0) or 0)
+                return total
+
+            def _small_summary_from_csv(path: Path, cluster_info, feature_index, run_manifest):
+                max_bytes = 1_000_000
+                if not path.exists() or path.stat().st_size > max_bytes:
+                    return None
+                try:
+                    with path.open(newline="", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        fields = reader.fieldnames or []
+                        n_states = int((cluster_info or {}).get("n_clusters", 0) or 0)
+                        if n_states > 0:
+                            state_cols = [f"state_{i}_frac" for i in range(n_states) if f"state_{i}_frac" in fields]
+                        else:
+                            state_cols = [name for name in fields if name.startswith("state_") and name.endswith("_frac")]
+                        totals = {col: 0.0 for col in state_cols}
+                        rows = 0
+                        for row in reader:
+                            rows += 1
+                            for col in state_cols:
+                                try:
+                                    totals[col] += float(row.get(col) or 0.0)
+                                except ValueError:
+                                    pass
+                    state_means = {
+                        str(int(col.split("_")[1])): (totals[col] / rows if rows else 0.0)
+                        for col in state_cols
+                    }
+                    noise_fraction = None
+                    if rows and state_cols:
+                        noise_fraction = max(0.0, 1.0 - sum(state_means.values()))
+                    return {
+                        "schema_version": 1,
+                        "generated_at": _fmt_ts(path.stat().st_mtime),
+                        "last_run_time": _fmt_ts(path.stat().st_mtime),
+                        "active_run_id": (run_manifest or {}).get("run_id", ""),
+                        "total_videos": rows,
+                        "total_frames": _total_frames_from_index(feature_index),
+                        "n_states": int((cluster_info or {}).get("n_clusters", len(state_cols)) or len(state_cols)),
+                        "noise_fraction": noise_fraction,
+                        "state_means": state_means,
+                        "markers": {"summary": True, "report": True},
+                        "source": "summary_table_small_csv",
+                    }
+                except Exception as exc:
+                    data.setdefault("load_errors", []).append(f"comparison/summary_table.csv: {exc}")
+                    return None
+
+            _t = time.perf_counter()
+            import vieb_config as _vc_dl
+            try:
+                metadata_path = Path(_vc_dl.get_metadata_path())
+            except Exception:
+                metadata_path = None
+            print(f"[timing]   DL: vieb_config + metadata_path: {(time.perf_counter() - _t) * 1000:.1f} ms")
+            _t = time.perf_counter()
+            marker_paths = {
+                "metadata": metadata_path,
+                "features": results_dir / "features" / "index.json",
+                "clusters": results_dir / "shared" / "cluster_info.json",
+                "summary": results_dir / "comparison" / "summary_table.csv",
+                "report": results_dir / "comparison" / "summary_table.csv",
+                "motifs": results_dir / "comparison" / "motifs.csv",
+                "clips": clips_dir,
+            }
+            data["markers"] = {
+                key: bool(path and path.exists())
+                for key, path in marker_paths.items()
+            }
+            print(f"[timing]   DL: marker checks: {(time.perf_counter() - _t) * 1000:.1f} ms")
+            _t = time.perf_counter()
             data["cluster_info"] = _json("shared/cluster_info.json")
             data["feature_index"] = _json("features/index.json")
-            data["animal_scalars"] = _csv("comparison/animal_scalars.csv")
-            data["fingerprints"] = _csv("comparison/behavioral_fingerprints.csv")
-            data["deviation_scores"] = _csv("comparison/deviation_scores.csv")
-            data["reverse_results"] = (
-                json.loads((RESULTS / "comparison" / "reverse_model_results.json")
-                           .read_text(encoding="utf-8"))
-                if (RESULTS / "comparison" / "reverse_model_results.json").exists()
-                else None
-            )
-            data["labels_per_frame"] = _csv("characterization/labels_per_frame.csv")
-            data["validation_labels"] = _csv("validation/frame_labels.csv")
-            data["validation_sample"] = _csv("validation/current_sample.csv")
-            import vieb_config as _vc_dl
-            meta_p = Path(_vc_dl.get_metadata_path())
-            data["metadata"] = pd.read_csv(meta_p) if meta_p.exists() else None
-            data["cohort"] = None
-            if self._cohort_path:
-                cp = Path(self._cohort_path)
-                if cp.exists():
-                    try:
-                        if cp.suffix.lower() in (".xlsx", ".xls", ".xlsm"):
-                            from cohort_loader import load_cohort_excel
-                            data["cohort"] = load_cohort_excel(str(cp))
-                        else:
-                            data["cohort"] = pd.read_csv(cp)
-                    except Exception:
-                        pass
+            data["diagnostics"] = _json("diagnostics/cluster_diagnostics.json")
+            data["run_manifest"] = _json("shared/run_manifest.json")
+            data["overview_summary"] = _json("shared/overview_summary.json")
+            if data["overview_summary"] is None:
+                data["overview_summary"] = _small_summary_from_csv(
+                    results_dir / "comparison" / "summary_table.csv",
+                    data.get("cluster_info"),
+                    data.get("feature_index"),
+                    data.get("run_manifest"),
+                )
+            print(f"[timing]   DL: JSON reads: {(time.perf_counter() - _t) * 1000:.1f} ms")
+            if not self._lightweight:
+                data["summary"] = _csv("comparison/summary_table.csv")
+                data["state_summary"] = _csv("characterization/state_summary.csv")
+                data["context_report"] = _csv("characterization/context_report.csv")
+                data["feature_profiles"] = _csv("characterization/state_feature_profiles.csv")
+                data["feature_zscores"] = _csv("characterization/state_feature_zscores.csv")
+                data["duration_summary"] = _csv("characterization/state_duration_summary.csv")
+                data["state_duration_summary"] = _csv("diagnostics/state_duration_summary.csv")
+                data["group_enrichment"] = _csv("characterization/state_group_enrichment.csv")
+                data["transition_table"] = _csv("comparison/transition_table.csv")
+                data["bouts"] = _csv("characterization/bouts.csv")
+                data["motifs"] = _csv("comparison/motifs.csv")
+                data["animal_scalars"] = _csv("comparison/animal_scalars.csv")
+                data["fingerprints"] = _csv("comparison/behavioral_fingerprints.csv")
+                data["deviation_scores"] = _csv("comparison/deviation_scores.csv")
+                data["reverse_results"] = (
+                    json.loads((results_dir / "comparison" / "reverse_model_results.json")
+                               .read_text(encoding="utf-8"))
+                    if (results_dir / "comparison" / "reverse_model_results.json").exists()
+                    else None
+                )
+                data["validation_sample"] = _csv("validation/current_sample.csv")
+                data["cohort"] = None
+                if self._cohort_path:
+                    cp = Path(self._cohort_path)
+                    if cp.exists():
+                        try:
+                            if cp.suffix.lower() in (".xlsx", ".xls", ".xlsm"):
+                                from cohort_loader import load_cohort_excel
+                                data["cohort"] = load_cohort_excel(str(cp))
+                            else:
+                                data["cohort"] = pd.read_csv(cp)
+                        except Exception:
+                            pass
         except Exception as e:
             self.error.emit(str(e))
             return
+        print(f"[timing] DataLoader({'light' if self._lightweight else 'full'}): {(time.perf_counter() - t0) * 1000:.1f} ms")
         self.loaded.emit(data)
 
 
@@ -948,13 +1051,18 @@ class PipelineRunner(QThread):
         )
         self._proc = p
         assert p.stdout is not None
+        tail: list[str] = []
         for line in p.stdout:
             if self._stop_flag:
                 p.terminate()
                 break
             self.log.emit(line)
+            tail.append(line.rstrip())
+            if len(tail) > 30:
+                tail.pop(0)
         rc = p.wait()
         self._proc = None
+        self._last_tail = tail if rc != 0 else []
         return rc == 0 and not self._stop_flag
 
     def _run_cluster_wsl(self, fps: float, mcs: int) -> bool:
@@ -1036,7 +1144,11 @@ class PipelineRunner(QThread):
                         if ok:
                             self.stage_done.emit(3, True)
                         else:
-                            raise RuntimeError("Clustering subprocess returned non-zero exit code.")
+                            tail = getattr(self, "_last_tail", [])
+                            tail_str = "\n".join(tail[-15:]) if tail else "(no output captured)"
+                            raise RuntimeError(
+                                f"Clustering subprocess failed.\n\n--- last output ---\n{tail_str}"
+                            )
                     except Exception:
                         self.log.emit(traceback.format_exc())
                         self.stage_done.emit(3, False)
@@ -1262,8 +1374,9 @@ class VideoPlayer(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self._display = QLabel("No video loaded", alignment=Qt.AlignCenter)
         self._display.setMinimumSize(320, 220)
+        self._display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._display.setStyleSheet("background:#111;color:#999;")
-        lay.addWidget(self._display)
+        lay.addWidget(self._display, stretch=1)
 
         ctrl = QHBoxLayout()
         self._btn_play = QPushButton("Play")
@@ -1280,7 +1393,7 @@ class VideoPlayer(QWidget):
 
         ctrl.addWidget(QLabel("Speed"))
         self._speed_combo = QComboBox()
-        self._speed_combo.addItems(["0.25x", "0.5x", "1x"])
+        self._speed_combo.addItems(["0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x"])
         self._speed_combo.setCurrentText("1x")
         self._speed_combo.currentTextChanged.connect(self._set_speed)
         ctrl.addWidget(self._speed_combo)
@@ -1358,6 +1471,11 @@ class VideoPlayer(QWidget):
     def seek(self, idx):
         self.pause()
         self._show(idx)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._cap and not self._playing:
+            self._show(self._cur)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Space:
@@ -1647,7 +1765,6 @@ class DiagnoseDialog(QDialog):
 
 class OverviewView(QWidget):
     export_requested = pyqtSignal()
-    load_previous_requested = pyqtSignal()
     cohort_path_changed = pyqtSignal(str)
     navigate_help = pyqtSignal(str)
 
@@ -1658,17 +1775,6 @@ class OverviewView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
-
-        self._prev_banner = QFrame()
-        self._prev_banner.setStyleSheet("QFrame{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;}")
-        pb = QHBoxLayout(self._prev_banner)
-        self._prev_lbl = QLabel("Previous analysis results available.")
-        pb.addWidget(self._prev_lbl, stretch=1)
-        self._prev_load_btn = QPushButton("Load Previous Session")
-        self._prev_load_btn.clicked.connect(self.load_previous_requested.emit)
-        pb.addWidget(self._prev_load_btn)
-        self._prev_banner.hide()
-        lay.addWidget(self._prev_banner)
 
         top = QHBoxLayout()
         title = QLabel("Overview")
@@ -1712,18 +1818,18 @@ class OverviewView(QWidget):
 
         box = QGroupBox("Mean State Occupancy")
         bl = QVBoxLayout(box)
+        self._occupancy_layout = bl
         chk_row = QHBoxLayout()
         chk_row.addStretch()
         self._hide_leading = QCheckBox("Hide leading state and rescale")
         self._hide_leading.toggled.connect(self._render_state_occupancy)
         chk_row.addWidget(self._hide_leading)
         bl.addLayout(chk_row)
-        if _init_mpl():
-            self._canvas = MplCanvas(figsize=(8, 4))
-            bl.addWidget(self._canvas)
-        else:
-            self._canvas = None
-            bl.addWidget(QLabel("Install matplotlib to view charts."))
+        self._canvas = None
+        self._canvas_placeholder = QLabel("Load summary data to view state occupancy.")
+        self._canvas_placeholder.setAlignment(Qt.AlignCenter)
+        self._canvas_placeholder.setStyleSheet("color:#888;font-style:italic;padding:20px;")
+        bl.addWidget(self._canvas_placeholder)
         lay.addWidget(box)
 
         self._run_lbl = QLabel("Last run: -")
@@ -1740,17 +1846,44 @@ class OverviewView(QWidget):
         summary = data.get("summary")
         ci = data.get("cluster_info")
         fi = data.get("feature_index")
+        overview = data.get("overview_summary")
+        total = 0
+        if isinstance(fi, dict):
+            records = fi.values()
+            for v in records:
+                if isinstance(v, dict):
+                    total += int(v.get("n_frames", 0) or 0)
+        elif isinstance(fi, list):
+            for v in fi:
+                if isinstance(v, dict):
+                    total += int(v.get("n_frames", 0) or 0)
+
         if summary is None:
+            if isinstance(overview, dict):
+                videos = overview.get("total_videos")
+                frames = overview.get("total_frames") or total
+                states = overview.get("n_states")
+                if states is None and ci:
+                    states = ci.get("n_clusters", 0)
+                noise = overview.get("noise_fraction")
+                self._c_videos.set(videos if videos is not None else "-")
+                self._c_states.set(states if states is not None else "-")
+                self._c_frames.set(f"{int(frames):,}" if frames else "-")
+                self._c_noise.set(f"{float(noise) * 100:.1f}%" if noise is not None else "-")
+                self._run_lbl.setText(f"Last run: {_summary_mtime_text(data)}")
+                self._render_state_occupancy()
+                return
             self._c_videos.set("-")
+            self._c_states.set(ci.get("n_clusters", 0) if ci else "-")
+            self._c_frames.set(f"{total:,}" if total else "-")
+            self._c_noise.set("-")
+            run_text = _summary_mtime_text(data)
+            if run_text != "-":
+                self._run_lbl.setText(f"Last run: {run_text}")
             return
         self._c_videos.set(len(summary))
         self._c_states.set(ci.get("n_clusters", 0) if ci else "-")
 
-        total = 0
-        if isinstance(fi, dict):
-            for v in fi.values():
-                if isinstance(v, dict):
-                    total += int(v.get("n_frames", 0))
         self._c_frames.set(f"{total:,}" if total else "-")
 
         state_cols = [c for c in summary.columns if c.startswith("state_") and c.endswith("_frac")]
@@ -1759,22 +1892,41 @@ class OverviewView(QWidget):
             noise = (1 - float(mean_sum)) * 100
             self._c_noise.set(f"{noise:.1f}%")
             self._render_state_occupancy()
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if p.exists():
-            self._run_lbl.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
+        self._run_lbl.setText(f"Last run: {_summary_mtime_text(data)}")
 
     def _render_state_occupancy(self):
-        if not self._canvas:
-            return
         summary = self._data.get("summary")
         ci = self._data.get("cluster_info")
+        overview = self._data.get("overview_summary")
+        overview_ids, overview_vals = _overview_state_means(overview)
+        if (summary is not None or overview_ids) and self._canvas is None:
+            if not _init_mpl():
+                self._canvas_placeholder.setText("Install matplotlib to view charts.")
+                return
+            self._canvas_placeholder.hide()
+            self._canvas = MplCanvas(figsize=(8, 4))
+            self._occupancy_layout.addWidget(self._canvas)
+        if not self._canvas:
+            return
         self._canvas.ax.clear()
-        if summary is None or ci is None:
+        if summary is None and overview_ids:
+            state_ids = overview_ids
+            vals = overview_vals
+            lead = state_ids[int(np.argmax(vals))] if vals else None
+            if self._hide_leading.isChecked() and lead is not None:
+                kept = [(sid, val) for sid, val in zip(state_ids, vals) if sid != lead]
+                state_ids = [sid for sid, _ in kept]
+                vals = [val for _, val in kept]
+                total = sum(vals)
+                if total > 0:
+                    vals = [v / total for v in vals]
+        elif summary is None or ci is None:
             self._canvas.ax.text(0.5, 0.5, "No summary data", ha="center", va="center")
             self._canvas.draw()
             return
-        n = int(ci.get("n_clusters", 0))
-        state_ids, vals, lead = _state_means(summary, n, self._hide_leading.isChecked())
+        else:
+            n = int(ci.get("n_clusters", 0))
+            state_ids, vals, lead = _state_means(summary, n, self._hide_leading.isChecked())
         colors = mpl_cm.tab20(np.linspace(0, 1, max(1, len(state_ids))))
         self._canvas.ax.bar(state_ids, vals, color=colors)
         self._canvas.ax.set_xlabel("State ID")
@@ -1786,13 +1938,8 @@ class OverviewView(QWidget):
         self._canvas.fig.tight_layout()
         self._canvas.draw()
 
-    def show_load_banner(self, has_results: bool):
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if has_results and p.exists():
-            self._prev_lbl.setText(f"Results from {_fmt_ts(p.stat().st_mtime)} available on disk.")
-            self._prev_banner.show()
-        else:
-            self._prev_banner.hide()
+    def show_load_banner(self, has_results: bool, data: dict | None = None):
+        pass
 
     def _upload_cohort_csv(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1924,6 +2071,11 @@ class StageRow(QFrame):
         "error":   ("#ffebee", "#ef9a9a", "#c62828"),
     }
     _ICONS = {"done": "✓", "running": "▶", "pending": "○", "error": "✕"}
+    _ARROW_STYLE = (
+        "QToolButton{color:#5f6368;background:transparent;border:none;"
+        "padding:0;margin:0;}"
+        "QToolButton:hover{background:#edf2f7;border-radius:3px;}"
+    )
 
     def __init__(self, stage: dict, cfg: dict):
         super().__init__()
@@ -1982,10 +2134,12 @@ class StageRow(QFrame):
         )
         hl.addWidget(self._eta)
 
-        self._arrow = QLabel("▸")
-        self._arrow.setStyleSheet(
-            "color:#999;background:transparent;border:none;"
-        )
+        self._arrow = QToolButton()
+        self._arrow.setArrowType(Qt.RightArrow)
+        self._arrow.setCursor(Qt.PointingHandCursor)
+        self._arrow.setFixedSize(18, 18)
+        self._arrow.setStyleSheet(self._ARROW_STYLE)
+        self._arrow.clicked.connect(self._toggle)
         hl.addWidget(self._arrow)
 
         outer.addWidget(header)
@@ -2151,11 +2305,13 @@ class StageRow(QFrame):
 
         self.set_status("pending")
 
-    def _toggle(self):
-        expanded = not self._body.isVisible()
+    def _set_expanded(self, expanded: bool):
         self._body.setVisible(expanded)
         self._desc.setVisible(expanded)
-        self._arrow.setText("▾" if expanded else "▸")
+        self._arrow.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _toggle(self):
+        self._set_expanded(not self._body.isVisible())
 
     def set_eta(self, text):
         self._eta.setText(f"ETA: {text}")
@@ -2171,14 +2327,7 @@ class StageRow(QFrame):
             f"background:transparent;border:none;font-size:13px;"
             f"font-weight:bold;color:{icon_color};"
         )
-        if status == "running":
-            self._body.setVisible(True)
-            self._desc.setVisible(True)
-            self._arrow.setText("▾")
-        else:
-            self._body.setVisible(False)
-            self._desc.setVisible(False)
-            self._arrow.setText("▸")
+        self._set_expanded(status == "running")
         self._done_cb.blockSignals(True)
         self._done_cb.setChecked(status == "done")
         self._done_cb.blockSignals(False)
@@ -2226,179 +2375,170 @@ class StageRow(QFrame):
         self._from_btn.setEnabled(enabled)
 
 
-class ProjectOnboardingPanel(QFrame):
+class _ReadinessChecker(QThread):
+    """Runs _determine_state() off the main thread to avoid UI stalls."""
+    done = pyqtSignal(object)  # emits the (state, selected, validation, ctx) tuple
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception:
+            result = ("no_project", None, None, {})
+        self.done.emit(result)
+
+
+class Stage0ReadinessPanel(QFrame):
     project_changed = pyqtSignal()
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self._path_inputs: dict[str, QLineEdit] = {}
-        self._setting_inputs: dict[str, QWidget] = {}
-        self.setObjectName("projectOnboarding")
+        self._meta_worker = None
+        self._checker = None
+        self._refresh_pending = False
+        self.setObjectName("stage0Panel")
         self.setStyleSheet(
-            "QFrame#projectOnboarding{background:transparent;border:none;}"
-            "QLabel[muted='true']{color:#667085;}"
+            "QFrame#stage0Panel{background:transparent;border:none;}"
+            "QPushButton#stage0Primary{background:#1A73E8;color:#fff;border:none;"
+            "border-radius:4px;padding:8px 20px;font-weight:bold;font-size:13px;}"
+            "QPushButton#stage0Primary:hover{background:#1565C0;}"
+            "QPushButton#stage0Secondary{background:#fff;color:#202124;"
+            "border:1px solid #d0d5dd;border-radius:4px;padding:5px 10px;font-size:11px;}"
+            "QPushButton#stage0Secondary:hover{background:#f8fafc;}"
         )
         self._build()
-        self.refresh()
+        QTimer.singleShot(0, self.refresh)
 
     def _build(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(10)
 
-        header = QHBoxLayout()
-        self._primary_btn = QPushButton("Onboard Project")
-        self._primary_btn.setMinimumHeight(34)
-        self._primary_btn.setProperty("primary", "true")
-        self._primary_btn.clicked.connect(self._onboard_project)
-        header.addWidget(self._primary_btn)
-        header.addStretch()
-        lay.addLayout(header)
-
-        self._project_label = QLabel("")
-        self._project_label.setWordWrap(True)
-        self._project_label.setProperty("muted", "true")
-        lay.addWidget(self._project_label)
-
-        self._source_help = QLabel(
-            "Stage 0 detects projects in projects/, validates the active project, "
-            "and prepares metadata when session data is available."
+        # A. Summary card
+        summary = QFrame()
+        summary.setObjectName("stage0Summary")
+        summary.setStyleSheet(
+            "QFrame#stage0Summary{background:#fafafa;border:1px solid #e0e0e0;"
+            "border-radius:6px;padding:12px;}"
         )
-        self._source_help.setWordWrap(True)
-        self._source_help.setProperty("muted", "true")
-        lay.addWidget(self._source_help)
+        card = QVBoxLayout(summary)
+        card.setContentsMargins(12, 10, 12, 10)
+        card.setSpacing(6)
+
+        name_row = QHBoxLayout()
+        self._project_name_label = QLabel("No project selected")
+        self._project_name_label.setStyleSheet(
+            "font-weight:bold;font-size:14px;color:#202124;"
+            "border:none;background:transparent;"
+        )
+        name_row.addWidget(self._project_name_label)
+        self._status_badge = QLabel("")
+        self._status_badge.setStyleSheet("border:none;background:transparent;")
+        name_row.addWidget(self._status_badge)
+        name_row.addStretch()
+        card.addLayout(name_row)
+
+        self._data_summary = QLabel("")
+        self._data_summary.setWordWrap(True)
+        self._data_summary.setStyleSheet(
+            "color:#667085;font-size:12px;border:none;background:transparent;"
+        )
+        card.addWidget(self._data_summary)
+
+        self._next_action = QLabel("")
+        self._next_action.setWordWrap(True)
+        self._next_action.setStyleSheet(
+            "color:#475467;font-weight:600;font-size:12px;"
+            "border:none;background:transparent;"
+        )
+        card.addWidget(self._next_action)
+
+        lay.addWidget(summary)
+
+        # B. Primary action button
+        self._primary_btn = QPushButton("Onboard Project")
+        self._primary_btn.setObjectName("stage0Primary")
+        self._primary_btn.setMinimumHeight(36)
+        self._primary_btn.setCursor(Qt.PointingHandCursor)
+        lay.addWidget(self._primary_btn)
+
+        # C. Collapsible "More options" section
+        self._options_toggle = QPushButton("More options  ▾")
+        self._options_toggle.setFlat(True)
+        self._options_toggle.setCursor(Qt.PointingHandCursor)
+        self._options_toggle.setStyleSheet(
+            "color:#555;font-size:11px;text-align:left;padding:2px 0;"
+            "border:none;background:transparent;"
+        )
+        self._options_toggle.clicked.connect(self._toggle_options)
+        lay.addWidget(self._options_toggle)
+
+        self._options_container = QWidget()
+        self._options_container.setStyleSheet("background:transparent;")
+        opts_lay = QVBoxLayout(self._options_container)
+        opts_lay.setContentsMargins(0, 0, 0, 0)
+        opts_lay.setSpacing(8)
 
         actions = QHBoxLayout()
-        self._create_btn = QPushButton("Create New Project")
+        actions.setSpacing(8)
+        self._create_btn = QPushButton("Create Project")
+        self._create_btn.setObjectName("stage0Secondary")
         self._create_btn.clicked.connect(self._create_project)
-        self._open_btn = QPushButton("Open Existing Project")
+        self._open_btn = QPushButton("Open Project")
+        self._open_btn.setObjectName("stage0Secondary")
         self._open_btn.clicked.connect(self._open_existing)
-        self._detect_btn = QPushButton("Change Project")
-        self._detect_btn.clicked.connect(self._auto_detect)
-        self._set_btn = QPushButton("Add Data Source")
-        self._set_btn.clicked.connect(self._import_data_source)
-        self._set_btn.setToolTip(
-            "Optional: choose raw videos, pose CSVs, an H5 file, or metadata CSV "
-            "when VIEB cannot infer sessions from the project."
-        )
-        for btn in (self._create_btn, self._open_btn, self._detect_btn, self._set_btn):
+        self._change_btn = QPushButton("Change Project")
+        self._change_btn.setObjectName("stage0Secondary")
+        self._change_btn.clicked.connect(self._change_project)
+        self._source_btn = QPushButton("Add Data Source")
+        self._source_btn.setObjectName("stage0Secondary")
+        self._source_btn.clicked.connect(self._add_data_source)
+        for btn in (self._create_btn, self._open_btn, self._change_btn, self._source_btn):
+            btn.setMinimumHeight(28)
             actions.addWidget(btn)
         actions.addStretch()
-        lay.addLayout(actions)
+        opts_lay.addLayout(actions)
 
-        self._active_path = QLineEdit()
-        self._active_path.setPlaceholderText("Project folder path")
-        browse = QPushButton("Browse...")
-        browse.clicked.connect(lambda: self._browse_dir(self._active_path))
-        self._path_row = QWidget()
-        row = QHBoxLayout(self._path_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("Project:"))
-        row.addWidget(self._active_path, stretch=1)
-        row.addWidget(browse)
-        lay.addWidget(self._path_row)
-        self._path_row.hide()
+        self._details_toggle = QPushButton("Show details  ▾")
+        self._details_toggle.setFlat(True)
+        self._details_toggle.setCursor(Qt.PointingHandCursor)
+        self._details_toggle.setStyleSheet(
+            "color:#555;font-size:11px;text-align:left;padding:2px 0;"
+            "border:none;background:transparent;"
+        )
+        self._details_toggle.clicked.connect(self._toggle_details)
+        opts_lay.addWidget(self._details_toggle)
 
+        self._details_container = QWidget()
+        self._details_container.setStyleSheet("background:transparent;")
+        details_lay = QVBoxLayout(self._details_container)
+        details_lay.setContentsMargins(0, 0, 0, 0)
+        details_lay.setSpacing(4)
         self._checklist = QVBoxLayout()
-        lay.addLayout(self._checklist)
+        details_lay.addLayout(self._checklist)
+        self._details_container.hide()
+        opts_lay.addWidget(self._details_container)
 
-        self._suggested = QLabel("")
-        self._suggested.setWordWrap(True)
-        self._suggested.setStyleSheet("color:#475467;font-weight:600;")
-        lay.addWidget(self._suggested)
+        self._options_container.hide()
+        lay.addWidget(self._options_container)
 
-        paths_box = QGroupBox("Project Paths")
-        self._paths_box = paths_box
-        form = QFormLayout(paths_box)
-        for key, label, is_file in (
-            ("raw_videos", "Raw video folder", False),
-            ("pose_files", "Pose CSV folder", False),
-            ("pose_h5", "Shared H5 pose file", True),
-            ("metadata", "Metadata CSV", True),
-            ("results", "Results folder", False),
-            ("external_data_root", "External data root", False),
-        ):
-            le = QLineEdit()
-            btn = QPushButton("Browse...")
-            btn.clicked.connect(lambda _=False, target=le, file_mode=is_file: self._browse_file_or_dir(target, file_mode))
-            wrap = QWidget()
-            h = QHBoxLayout(wrap)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.addWidget(le)
-            h.addWidget(btn)
-            form.addRow(label + ":", wrap)
-            self._path_inputs[key] = le
-        lay.addWidget(paths_box)
-        paths_box.hide()
+    def _toggle_options(self):
+        visible = not self._options_container.isVisible()
+        self._options_container.setVisible(visible)
+        self._options_toggle.setText(
+            "Fewer options  ▴" if visible else "More options  ▾"
+        )
 
-        self._meta_actions_widget = QWidget()
-        meta_actions = QHBoxLayout(self._meta_actions_widget)
-        meta_actions.setContentsMargins(0, 0, 0, 0)
-        for text, cb in (
-            ("Add Data Source", self._import_data_source),
-            ("Create Metadata From Filenames", self._create_metadata_from_manifest),
-            ("Create Metadata From Video/Pose Manifest", self._create_metadata_from_manifest),
-            ("Open Metadata Mapper", self._open_metadata_mapper),
-        ):
-            btn = QPushButton(text)
-            btn.clicked.connect(cb)
-            meta_actions.addWidget(btn)
-        meta_actions.addStretch()
-        lay.addWidget(self._meta_actions_widget)
-        self._meta_actions_widget.hide()
-
-        settings_box = QGroupBox("Core Settings")
-        self._settings_box = settings_box
-        sform = QFormLayout(settings_box)
-        self._fps = QDoubleSpinBox()
-        self._fps.setRange(1, 1000)
-        self._fps.setValue(float(self.cfg.get("fps", 30)))
-        self._confidence = QDoubleSpinBox()
-        self._confidence.setRange(0, 1)
-        self._confidence.setSingleStep(0.05)
-        self._confidence.setValue(float(self.cfg.get("min_confidence", 0.7)))
-        self._wavelets = QCheckBox("Enabled")
-        self._wavelets.setChecked(bool(self.cfg.get("use_wavelets", True)))
-        self._umap_dims = QSpinBox()
-        self._umap_dims.setRange(2, 100)
-        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
-        self._min_cluster = QSpinBox()
-        self._min_cluster.setRange(2, 1000000)
-        self._min_cluster.setValue(int(self.cfg.get("min_cluster_size", 2000)))
-        self._min_samples = QSpinBox()
-        self._min_samples.setRange(0, 1000000)
-        self._min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
-        self._sample_size = QSpinBox()
-        self._sample_size.setRange(0, 10000000)
-        self._sample_size.setValue(int(self.cfg.get("hdbscan_sample_size", 0)))
-        self._groups = QLineEdit(",".join(self.cfg.get("enabled_analysis_groups", [])))
-        self._panels = QLineEdit(",".join(k for k, v in (self.cfg.get("ui_panels") or {}).items() if isinstance(v, dict) and v.get("enabled")))
-        for label, widget in (
-            ("FPS", self._fps),
-            ("Confidence threshold", self._confidence),
-            ("Use wavelets", self._wavelets),
-            ("UMAP dims", self._umap_dims),
-            ("HDBSCAN min cluster size", self._min_cluster),
-            ("HDBSCAN min samples", self._min_samples),
-            ("HDBSCAN sample size", self._sample_size),
-            ("Enabled analysis groups", self._groups),
-            ("Enabled optional panels", self._panels),
-        ):
-            sform.addRow(label + ":", widget)
-        lay.addWidget(settings_box)
-        settings_box.hide()
-
-        self._save_row_widget = QWidget()
-        save_row = QHBoxLayout(self._save_row_widget)
-        save_row.setContentsMargins(0, 0, 0, 0)
-        save_row.addStretch()
-        save = QPushButton("Save Project Setup")
-        save.setProperty("primary", "true")
-        save.clicked.connect(self._save_setup)
-        save_row.addWidget(save)
-        lay.addWidget(self._save_row_widget)
-        self._save_row_widget.hide()
+    def _toggle_details(self):
+        visible = not self._details_container.isVisible()
+        self._details_container.setVisible(visible)
+        self._details_toggle.setText(
+            "Hide details  ▴" if visible else "Show details  ▾"
+        )
 
     def _clear_checklist(self):
         while self._checklist.count():
@@ -2415,128 +2555,320 @@ class ProjectOnboardingPanel(QFrame):
         bg, fg = colors.get(check.status, colors["yellow"])
         row = QLabel(f"{check.label}: {check.message}")
         row.setWordWrap(True)
-        row.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:5px 8px;")
+        row.setStyleSheet(
+            f"background:{bg};color:{fg};border-radius:4px;"
+            f"padding:5px 8px;border:none;"
+        )
         self._checklist.addWidget(row)
 
-    def refresh(self):
+    def _determine_state(self):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        if not selected.active_project:
+            if selected.action == "picker_required":
+                return ("picker_required", selected, None, {})
+            return ("no_project", selected, None, {})
+        # One validation pass; reuse the resolved paths + session-source status
+        # it already computed instead of recomputing them below.
+        validation = _pm.validate_project(selected.active_project, ROOT)
+        ctx = {}
+        if selected.action == "auto_selected" and not _pm.onboarding_complete(
+            selected.active_project
+        ):
+            return ("auto_detected", selected, validation, ctx)
+
+        paths = validation.paths or _pm.resolve_project_paths_for_project(
+            selected.active_project, validation.config, ROOT
+        )
+        ctx["paths"] = paths
+        if any(
+            info.origin == "invalid_repo_root_fallback"
+            for info in paths.values()
+        ):
+            return ("legacy_paths", selected, validation, ctx)
+
+        source = validation.source or _pm.session_source_status(
+            selected.active_project, validation.config, ROOT
+        )
+        ctx["source"] = source
+        has_raw = source.get("raw_videos", 0) > 0
+        has_pose = source.get("pose_csvs", 0) > 0 or bool(source.get("h5"))
+        if not has_raw and not has_pose:
+            return ("needs_data", selected, validation, ctx)
+
+        meta = paths["metadata"].path
+        if not meta.exists():
+            return ("needs_metadata", selected, validation, ctx)
+
+        mapping = _pm.column_mapping_status(
+            selected.active_project, validation.config
+        )
+        ctx["mapping"] = mapping
+        if not mapping.get("mapped"):
+            return ("needs_column_mapping", selected, validation, ctx)
+
+        if not _pm.onboarding_complete(selected.active_project):
+            return ("incomplete", selected, validation, ctx)
+        if has_raw and not has_pose:
+            return ("ready_for_stage1", selected, validation, ctx)
+        return ("ready_for_stage2", selected, validation, ctx)
+
+    def _update_primary_button(self, state):
+        try:
+            self._primary_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        configs = {
+            "no_project": ("Onboard Project", self._create_project),
+            "picker_required": ("Choose Project", self._change_project),
+            "auto_detected": ("Use This Project", self._use_detected_project),
+            "legacy_paths": ("Continue Onboarding", self._migrate_legacy_paths),
+            "needs_data": ("Continue Onboarding", self._add_data_source),
+            "needs_metadata": ("Continue Onboarding", self._generate_metadata_for_project),
+            "needs_column_mapping": ("Continue Onboarding", self._open_column_mapping),
+            "incomplete": ("Continue Onboarding", self._fix_setup),
+            "ready_for_stage1": ("Continue to Stage 1", self._continue_ready),
+            "ready_for_stage2": ("Continue to Stage 2", self._continue_ready),
+        }
+        label, handler = configs.get(state, ("Check", self._check_readiness))
+        self._primary_btn.setText(label)
+        self._primary_btn.clicked.connect(handler)
+
+    def refresh(self):
+        if self._checker and self._checker.isRunning():
+            self._refresh_pending = True
+            return
+        self._status_badge.setText("checking…")
+        self._status_badge.setStyleSheet(
+            "background:#F5F5F5;color:#888;border-radius:4px;"
+            "padding:2px 8px;font-weight:600;font-size:11px;border:none;"
+        )
+        self._status_badge.show()
+        self._primary_btn.setEnabled(False)
+        self._checker = _ReadinessChecker(self._determine_state)
+        self._checker.done.connect(self._on_readiness_done)
+        self._checker.start()
+
+    def _on_readiness_done(self, result) -> None:
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._checker = _ReadinessChecker(self._determine_state)
+            self._checker.done.connect(self._on_readiness_done)
+            self._checker.start()
+            return
+        self._primary_btn.setEnabled(True)
+        state, selected, validation, ctx = result
+        self._apply_readiness(state, selected, validation, ctx)
+
+    def _apply_readiness(self, state, selected, validation, ctx):
         self._clear_checklist()
-        if selected.active_project:
-            validation = _pm.validate_project(selected.active_project)
-            self._active_path.setText(str(selected.active_project))
-            self._project_label.setText(f"{validation.project_name}\n{validation.path}")
+
+        if validation:
+            self._project_name_label.setText(validation.project_name)
+            source = ctx.get("source") or validation.source or _pm.session_source_status(
+                validation.path, validation.config
+            )
+            self._data_summary.setText(source["message"])
             for check in validation.checks:
                 self._add_check(check)
-            if _pm.onboarding_complete(validation.path):
-                self._suggested.setText("Onboarding complete. Continue with Stage 1 if you need pose estimation, or skip to Stage 2 if pose data is already available.")
-            else:
-                self._suggested.setText("Project detected. Add a data source only if metadata or session detection is missing.")
-            cfg = validation.config
-            for key, le in self._path_inputs.items():
-                value = (cfg.get("paths") or {}).get(key, "")
-                le.setText("" if value is None else str(value))
         else:
-            self._project_label.setText("No valid project selected.")
-            self._add_check(_pm.Check("active_project", "active project exists", "red", "No valid project selected."))
-            if selected.action == "picker_required":
-                self._suggested.setText("Suggested next action: choose one of the detected projects or set a project path explicitly.")
-            else:
-                self._suggested.setText("Suggested next action: create a new project or open an existing project.")
+            self._project_name_label.setText("No project selected")
+            self._data_summary.setText("")
+            self._add_check(
+                _pm.Check(
+                    "active_project", "active project exists", "red",
+                    "No valid project selected.",
+                )
+            )
 
-    def _onboard_project(self):
+        badge_config = {
+            "ready_for_stage1": ("Ready", "#ECFDF3", "#027A48"),
+            "ready_for_stage2": ("Ready", "#ECFDF3", "#027A48"),
+            "incomplete": ("Needs Setup", "#FFFAEB", "#B54708"),
+            "needs_data": ("Needs Data", "#FFFAEB", "#B54708"),
+            "needs_metadata": ("Needs Metadata", "#FFFAEB", "#B54708"),
+            "needs_column_mapping": ("Needs Mapping", "#FFFAEB", "#B54708"),
+            "legacy_paths": ("Path Issue", "#FEF3F2", "#B42318"),
+            "auto_detected": ("Detected", "#E3F2FD", "#1565C0"),
+        }
+        badge = badge_config.get(state)
+        if badge:
+            text, bg, fg = badge
+            self._status_badge.setText(text)
+            self._status_badge.setStyleSheet(
+                f"background:{bg};color:{fg};border-radius:4px;"
+                f"padding:2px 8px;font-weight:600;font-size:11px;border:none;"
+            )
+            self._status_badge.show()
+        else:
+            self._status_badge.hide()
+
+        action_text = {
+            "no_project":
+                "No project selected. Choose or create a project to begin.",
+            "picker_required":
+                "Multiple projects detected. Choose one to continue.",
+            "auto_detected":
+                "A project was detected. Activate it to continue.",
+            "legacy_paths":
+                "This project points to old repo-root metadata/results. "
+                "VIEB can migrate those into the project and keep raw videos external.",
+            "needs_data":
+                "No session-defining data source was found. "
+                "Add raw videos, pose CSVs, H5 pose data, or a metadata manifest.",
+            "needs_metadata":
+                "Metadata is missing. VIEB can create it from detected session files.",
+            "needs_column_mapping":
+                "Metadata was found but the session identifier column "
+                "could not be determined.",
+            "incomplete":
+                "Check the project config to complete readiness.",
+            "ready_for_stage1":
+                "Project ready for pose estimation. Continue to Stage 1.",
+            "ready_for_stage2":
+                "Pose-tracking data and metadata are ready. You can skip Stage 1.",
+        }
+        self._next_action.setText(action_text.get(state, ""))
+        self._update_primary_button(state)
+
+    def _use_detected_project(self):
         selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
         if selected.active_project:
-            _pm.ensure_project_metadata(selected.active_project)
+            _pm.set_active_project(
+                selected.active_project, ROOT, APP_CONFIG_PATH
+            )
             self.project_changed.emit()
             self.refresh()
-            return
-        if selected.action == "picker_required":
-            self._auto_detect()
-            return
-        self._create_project()
 
-    def _ensure_active_project_for_import(self) -> Path | None:
+    def _fix_setup(self):
         try:
-            return _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
         except _pm.ProjectSelectionError:
-            selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
-            if selected.action == "picker_required":
-                self._auto_detect()
-                try:
-                    return _pm.get_active_project(ROOT, APP_CONFIG_PATH)
-                except _pm.ProjectSelectionError:
-                    return None
-            reply = QMessageBox.question(
-                self,
-                "Project Required",
-                "Choose or create a project before importing data.",
-                QMessageBox.Open | QMessageBox.Save | QMessageBox.Cancel,
-                QMessageBox.Open,
-            )
-            if reply == QMessageBox.Open:
-                self._open_existing()
-            elif reply == QMessageBox.Save:
-                self._create_project()
-            else:
-                return None
-            try:
-                return _pm.get_active_project(ROOT, APP_CONFIG_PATH)
-            except _pm.ProjectSelectionError:
-                return None
-
-    def _import_data_source(self):
-        project = self._ensure_active_project_for_import()
-        if project is None:
+            self._create_project()
             return
-        choices = [
-            ("Raw videos", "raw_videos"),
-            ("Pose CSVs", "pose_csvs"),
-            ("H5 pose file", "pose_h5"),
-            ("Existing metadata CSV", "metadata"),
-        ]
-        menu = QMenu(self)
-        action_to_source = {}
-        for label, source_type in choices:
-            action_to_source[menu.addAction(label)] = source_type
-        picked = menu.exec_(self._set_btn.mapToGlobal(self._set_btn.rect().bottomLeft()))
-        if picked is None:
-            return
-        source_type = action_to_source[picked]
-        if source_type in ("raw_videos", "pose_csvs"):
-            title = "Select Raw Videos Folder" if source_type == "raw_videos" else "Select Pose CSV Folder"
-            source = _existing_directory(self, title, str(project))
-        elif source_type == "pose_h5":
-            source, _ = _open_file(self, "Select H5 Pose File", str(project), "H5 files (*.h5 *.hdf5);;All files (*)")
+        validation = _pm.validate_project(project)
+        cfg = validation.config
+        meta = Path(cfg.get("metadata_csv_path", ""))
+        source = _pm.session_source_status(project, cfg)
+        if not source["valid"]:
+            self._add_data_source()
+        elif not meta.exists():
+            self._generate_metadata_async(project)
         else:
-            source, _ = _open_file(self, "Select Metadata CSV", str(project), "CSV files (*.csv);;All files (*)")
-        if not source:
-            return
+            self._add_data_source()
+
+    def _generate_metadata_for_project(self):
         try:
-            result = _pm.import_data_source(project, source_type, source)
-        except Exception as exc:
-            QMessageBox.warning(self, "Add Data Source", f"Could not add data source:\n{exc}")
-            self.refresh()
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
             return
+        self._generate_metadata_async(project)
+
+    def _open_column_mapping(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        validation = _pm.validate_project(project)
+        cfg = _pm.normalize_project_config(validation.config, validation.path)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Metadata Column Mapping")
+        dlg.resize(920, 720)
+        lay = QVBoxLayout(dlg)
+        from views.metadata_mapper import MetadataMapperWidget
+
+        mapper = MetadataMapperWidget(cfg, dlg)
+        mapper.mapping_saved.connect(lambda _schema: self._on_column_mapping_saved(dlg))
+        lay.addWidget(mapper)
+        dlg.exec_()
+
+    def _on_column_mapping_saved(self, dlg):
         self.project_changed.emit()
         self.refresh()
-        if result.get("valid"):
-            QMessageBox.information(self, "Add Data Source", "Data source added and metadata is ready.")
-        else:
-            messages = "\n".join(result.get("messages") or ["Metadata needs attention."])
-            QMessageBox.information(self, "Add Data Source", f"Data source saved, but metadata needs attention:\n{messages}")
+        dlg.accept()
 
-    def _browse_dir(self, le: QLineEdit):
-        d = _existing_directory(self, "Select Folder", le.text() or str(ROOT))
-        if d:
-            le.setText(d)
+    def _migrate_legacy_paths(self):
+        try:
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+        except _pm.ProjectSelectionError:
+            self._create_project()
+            return
+        answer = QMessageBox.question(
+            self,
+            "Migrate Legacy Paths",
+            "Update this project so repo-root metadata, raw videos, and results paths are treated as explicit external paths?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        migrated = _pm.migrate_legacy_project(
+            ROOT, APP_CONFIG_PATH, name=project.name
+        )
+        _pm.set_active_project(migrated, ROOT, APP_CONFIG_PATH)
+        self.project_changed.emit()
+        self.refresh()
 
-    def _browse_file_or_dir(self, le: QLineEdit, file_mode: bool):
-        if file_mode:
-            p, _ = _open_file(self, "Select File", le.text() or str(ROOT), "All files (*)")
-            if p:
-                le.setText(p)
-        else:
-            self._browse_dir(le)
+    def _continue_ready(self):
+        self.project_changed.emit()
+        self.refresh()
+
+    def _check_readiness(self):
+        """Primary action: lightweight readiness check only."""
+        selected = _pm.select_startup_project(ROOT, APP_CONFIG_PATH)
+        if not selected.active_project:
+            if selected.action == "picker_required":
+                self._change_project()
+            else:
+                self._create_project()
+            self.refresh()
+            return
+        project = selected.active_project
+        validation = _pm.validate_project(project)
+        cfg = validation.config
+        results = (
+            (cfg.get("paths") or {}).get("results")
+            or str(project / "results")
+        )
+        Path(results).mkdir(parents=True, exist_ok=True)
+        meta = (
+            (cfg.get("paths") or {}).get("metadata")
+            or str(project / "metadata.csv")
+        )
+        if not Path(meta).exists():
+            source = _pm.session_source_status(project, cfg)
+            if (
+                source.get("valid")
+                or source.get("raw_videos", 0) > 0
+                or source.get("pose_csvs", 0) > 0
+                or source.get("h5")
+            ):
+                self._generate_metadata_async(project)
+                return
+        self.project_changed.emit()
+        self.refresh()
+
+    def _generate_metadata_async(self, project: Path):
+        class _MetaWorker(QThread):
+            done = pyqtSignal()
+            def __init__(self, proj):
+                super().__init__()
+                self._proj = proj
+            def run(self):
+                try:
+                    _pm.ensure_project_metadata(self._proj)
+                except Exception:
+                    pass
+                self.done.emit()
+
+        self._meta_worker = _MetaWorker(project)
+        self._meta_worker.done.connect(self._on_metadata_ready)
+        self._meta_worker.start()
+
+    def _on_metadata_ready(self):
+        self.project_changed.emit()
+        self.refresh()
 
     def _create_project(self):
         from views.project_selector import NewProjectDialog
@@ -2546,111 +2878,110 @@ class ProjectOnboardingPanel(QFrame):
             self.refresh()
 
     def _open_existing(self):
-        d = _existing_directory(self, "Open Existing Project", str(ROOT / "projects"))
-        if d:
-            self._active_path.setText(d)
-            self._set_active_from_field()
+        d = _existing_directory(
+            self, "Open Existing Project", str(ROOT / "projects")
+        )
+        if not d:
+            return
+        path = Path(d)
+        validation = _pm.validate_project(path)
+        if not validation.valid:
+            QMessageBox.warning(
+                self, "Open Project",
+                "That folder is not a valid VIEB project.",
+            )
+            return
+        _pm.set_active_project(validation.path, ROOT, APP_CONFIG_PATH)
+        self.project_changed.emit()
+        self.refresh()
 
-    def _auto_detect(self):
-        detected = _pm.detect_projects(repo_root=ROOT, app_config_path=APP_CONFIG_PATH)
+    def _change_project(self):
+        detected = _pm.detect_projects(
+            repo_root=ROOT, app_config_path=APP_CONFIG_PATH
+        )
         if len(detected) == 1:
             _pm.set_active_project(detected[0].path, ROOT, APP_CONFIG_PATH)
-            _pm.ensure_project_metadata(detected[0].path)
             self.project_changed.emit()
         elif len(detected) > 1:
             from views.project_selector import ProjectSelectorDialog
             app_cfg = _load_app_config()
-            app_cfg["projects"] = [{"name": d.project_name, "path": str(d.path), "last_opened": ""} for d in detected]
+            app_cfg["projects"] = [
+                {
+                    "name": d.project_name,
+                    "path": str(d.path),
+                    "last_opened": "",
+                }
+                for d in detected
+            ]
             dlg = ProjectSelectorDialog(app_cfg, self)
             if dlg.exec_() == QDialog.Accepted:
                 self.project_changed.emit()
         else:
-            QMessageBox.information(self, "Auto-detect Projects", "No valid projects were found.")
+            QMessageBox.information(
+                self, "Change Project",
+                "No other valid projects were found.",
+            )
         self.refresh()
 
-    def _set_active_from_field(self):
-        path = Path(self._active_path.text().strip()).expanduser()
-        validation = _pm.validate_project(path)
-        if not validation.valid:
-            QMessageBox.warning(self, "Set Active Project", "That folder is not a valid VIEB project yet.")
-            self.refresh()
-            return
-        _pm.set_active_project(validation.path, ROOT, APP_CONFIG_PATH)
-        _pm.ensure_project_metadata(validation.path)
-        self.project_changed.emit()
-        self.refresh()
-
-    def _save_setup(self):
+    def _add_data_source(self):
         try:
             project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
         except _pm.ProjectSelectionError:
-            QMessageBox.warning(self, "Project Setup", "No valid project selected. Complete Stage 0: Onboarding before running the pipeline.")
+            QMessageBox.warning(
+                self, "Add Data Source",
+                "No active project. Create or open a project first.",
+            )
             return
-        cfg = _pm.load_active_project_config(ROOT, APP_CONFIG_PATH)
-        paths = cfg.setdefault("paths", {})
-        for key, le in self._path_inputs.items():
-            text = le.text().strip()
-            paths[key] = text or None
-        cfg["fps"] = self._fps.value()
-        cfg["min_confidence"] = self._confidence.value()
-        cfg["use_wavelets"] = self._wavelets.isChecked()
-        cfg["umap_dims"] = self._umap_dims.value()
-        cfg["min_cluster_size"] = self._min_cluster.value()
-        cfg["hdbscan_min_samples"] = self._min_samples.value()
-        cfg["hdbscan_sample_size"] = self._sample_size.value()
-        cfg["enabled_analysis_groups"] = [x.strip() for x in self._groups.text().split(",") if x.strip()]
-        cfg["pipeline_settings"] = {
-            "fps": cfg["fps"],
-            "confidence_threshold": cfg["min_confidence"],
-            "use_wavelets": cfg["use_wavelets"],
-            "umap_dims": cfg["umap_dims"],
-            "hdbscan_min_cluster_size": cfg["min_cluster_size"],
-            "hdbscan_min_samples": cfg["hdbscan_min_samples"],
-            "hdbscan_sample_size": cfg["hdbscan_sample_size"],
+        choices = [
+            ("Raw videos folder", "raw_videos"),
+            ("Pose CSV folder", "pose_csvs"),
+            ("H5 pose file", "pose_h5"),
+            ("Metadata CSV", "metadata"),
+        ]
+        menu = _style_light_menu(QMenu(self))
+        action_to_source = {
+            menu.addAction(label): src for label, src in choices
         }
-        _pm.write_project_config(project, cfg)
+        picked = menu.exec_(
+            self._source_btn.mapToGlobal(
+                self._source_btn.rect().bottomLeft()
+            )
+        )
+        if picked is None:
+            return
+        source_type = action_to_source[picked]
+        if source_type in ("raw_videos", "pose_csvs"):
+            title = (
+                "Select Raw Videos Folder"
+                if source_type == "raw_videos"
+                else "Select Pose CSV Folder"
+            )
+            source = _existing_directory(self, title, str(project))
+        elif source_type == "pose_h5":
+            source, _ = _open_file(
+                self, "Select H5 Pose File", str(project),
+                "H5 files (*.h5 *.hdf5);;All files (*)",
+            )
+        else:
+            source, _ = _open_file(
+                self, "Select Metadata CSV", str(project),
+                "CSV files (*.csv);;All files (*)",
+            )
+        if not source:
+            return
+        try:
+            _pm.import_data_source(project, source_type, source)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Add Data Source",
+                f"Could not add data source:\n{exc}",
+            )
         self.project_changed.emit()
         self.refresh()
-
-    def _create_metadata_from_manifest(self):
-        try:
-            from metadata_generator import generate_metadata_template, write_metadata_csv
-            raw = self._path_inputs["raw_videos"].text().strip() or None
-            h5 = self._path_inputs["pose_h5"].text().strip() or None
-            pose_files = self._path_inputs["pose_files"].text().strip() or None
-            df = generate_metadata_template(raw_videos_dir=raw, pose_files_dir=pose_files, h5_path=h5)
-            target = self._path_inputs["metadata"].text().strip()
-            if not target:
-                project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
-                target = str(project / "metadata.csv")
-                self._path_inputs["metadata"].setText(target)
-            write_metadata_csv(df, target)
-            QMessageBox.information(self, "Metadata", f"Metadata template created with {len(df)} row(s).")
-        except Exception as exc:
-            QMessageBox.warning(self, "Metadata", f"Could not create metadata:\n{exc}")
-
-    def _open_metadata_mapper(self):
-        try:
-            from views.metadata_mapper import MetadataMapperWidget
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Metadata Mapper")
-            dlg.resize(860, 620)
-            lay = QVBoxLayout(dlg)
-            widget = MetadataMapperWidget(self.cfg, dlg)
-            lay.addWidget(widget)
-            btns = QDialogButtonBox(QDialogButtonBox.Close)
-            btns.rejected.connect(dlg.reject)
-            lay.addWidget(btns)
-            dlg.exec_()
-            self.project_changed.emit()
-            self.refresh()
-        except Exception as exc:
-            QMessageBox.information(self, "Metadata Mapper", f"Metadata mapper is unavailable:\n{exc}")
-
-
 class RunPipelineView(QWidget):
     pipeline_done = pyqtSignal()
     worker_running = pyqtSignal(bool)
+    worker_command = pyqtSignal(str)
     navigate_dlc = pyqtSignal()
     navigate_add_videos = pyqtSignal()
     navigate_cluster_runs = pyqtSignal()
@@ -2663,12 +2994,14 @@ class RunPipelineView(QWidget):
         self.cfg = cfg
         self._rows: dict[int, StageRow] = {}
         self._worker = None
+        self._running_command = ""
         self._active_stages = set()
         self._wsl_thread = None
         self._build()
         QTimer.singleShot(800, self._probe_gpu_async)
 
     def _build(self):
+        self.setUpdatesEnabled(False)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(12)
@@ -2678,6 +3011,9 @@ class RunPipelineView(QWidget):
         t.setFont(QFont("Arial", 18, QFont.Bold))
         top.addWidget(t)
         top.addStretch()
+        self._expand_all_btn = QPushButton("Expand All")
+        self._expand_all_btn.clicked.connect(self._toggle_expand_all)
+        top.addWidget(self._expand_all_btn)
         self._run_full = QPushButton("Run Full Pipeline")
         self._run_full.clicked.connect(self.run_full_pipeline)
         top.addWidget(self._run_full)
@@ -2709,14 +3045,18 @@ class RunPipelineView(QWidget):
         scroll.setWidgetResizable(True)
         holder = QWidget()
         v = QVBoxLayout(holder)
+        _t_stages = time.perf_counter()
         for stage in STAGES:
+            _t_sr = time.perf_counter()
             row = StageRow(stage, self.cfg)
             if stage["id"] == 0:
-                self._project_panel = ProjectOnboardingPanel(self.cfg, self)
+                _t_s0 = time.perf_counter()
+                self._project_panel = Stage0ReadinessPanel(self.cfg, self)
+                _perf("    Stage0ReadinessPanel", _t_s0)
                 self._project_panel.project_changed.connect(self.project_changed.emit)
                 row._body.layout().insertWidget(0, self._project_panel)
-                row.run_stage.connect(lambda _: self._project_panel._onboard_project())
-                row._run_btn.setText("Onboard Project")
+                row.run_stage.connect(lambda _: self._project_panel._check_readiness())
+                row._run_btn.setText("Check Project Readiness")
                 row._from_btn.hide()
                 row._done_cb.hide()
             elif stage["id"] == 1:
@@ -2740,6 +3080,9 @@ class RunPipelineView(QWidget):
                 row.navigate_cluster_runs.connect(self.navigate_cluster_runs.emit)
             self._rows[stage["id"]] = row
             v.addWidget(row)
+            _perf(f"    StageRow {stage['id']}", _t_sr)
+        _perf("  all StageRows", _t_stages)
+
         v.addStretch()
         scroll.setWidget(holder)
         lay.addWidget(scroll)
@@ -2761,6 +3104,7 @@ class RunPipelineView(QWidget):
         log_hdr.addStretch()
         lay.addLayout(log_hdr)
         lay.addWidget(self._global_log)
+        self.setUpdatesEnabled(True)
 
     def _probe_gpu_async(self):
         class _ProbeThread(QThread):
@@ -2855,6 +3199,12 @@ class RunPipelineView(QWidget):
             dlg.exec_()
             self._probe_gpu_async()
 
+    def _toggle_expand_all(self):
+        any_expanded = any(row._body.isVisible() for row in self._rows.values())
+        for row in self._rows.values():
+            row._set_expanded(not any_expanded)
+        self._expand_all_btn.setText("Collapse All" if not any_expanded else "Expand All")
+
     def _param_changed(self, key, value):
         self.cfg[key] = value
 
@@ -2920,10 +3270,10 @@ class RunPipelineView(QWidget):
 
     def _stage0_project_detected(self) -> bool:
         try:
-            _pm.get_active_project(ROOT, APP_CONFIG_PATH)
-            return True
+            project = _pm.get_active_project(ROOT, APP_CONFIG_PATH)
+            return _pm.onboarding_complete(project)
         except _pm.ProjectSelectionError:
-            return bool(_pm.detect_projects(repo_root=ROOT, app_config_path=APP_CONFIG_PATH))
+            return False
 
     def _toggle_log(self):
         visible = not self._global_log.isVisible()
@@ -2975,10 +3325,13 @@ class RunPipelineView(QWidget):
         self._worker.stage_done.connect(self._on_stage_done)
         self._worker.all_done.connect(self._on_all_done)
         self._set_buttons(False)
+        self._running_command = "pipeline"
         self.worker_running.emit(True)
         self._worker.start()
 
     def _on_stage_started(self, sid):
+        self._running_command = str(_STAGE_BY_ID[sid].get("cmd") or _STAGE_BY_ID[sid]["name"])
+        self.worker_command.emit(self._running_command)
         self._rows[sid].set_status("running")
         self._status.setText(f"Running stage {sid}: {_STAGE_BY_ID[sid]['name']}")
 
@@ -2998,6 +3351,7 @@ class RunPipelineView(QWidget):
         stopped = self._worker is not None and getattr(self._worker, "_stop_flag", False)
         self._set_buttons(True)
         self.worker_running.emit(False)
+        self._running_command = ""
         if stopped:
             self._status.setText("Pipeline stopped.")
         else:
@@ -3017,6 +3371,7 @@ class RunPipelineView(QWidget):
         means = summary[state_cols].mean()
         dom_col = means.idxmax()
         row.set_cluster_quality(float(means[dom_col]), int(dom_col.split("_")[1]))
+
 
     def _run_diagnose(self):
         dlg = DiagnoseDialog(self)
@@ -3063,12 +3418,14 @@ class RunPipelineView(QWidget):
 
         self._status.setText(label)
         self._set_buttons(False)
+        self._running_command = " ".join(str(a) for a in cmd)
         self.worker_running.emit(True)
         self._cmd_thread = _CmdThread(cmd)
         self._cmd_thread.log.connect(self._append_log)
         self._cmd_thread.done.connect(lambda ok: (
             self._set_buttons(True),
             self.worker_running.emit(False),
+            setattr(self, "_running_command", ""),
             self._status.setText("Done." if ok else "Failed."),
             self.pipeline_done.emit() if ok else None,
         ))
@@ -3985,7 +4342,13 @@ class MotifsView(QWidget):
     def __init__(self):
         super().__init__()
         self._data = {}
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 24, 24, 24)
         t = QLabel("Motifs")
         t.setFont(QFont("Arial", 18, QFont.Bold))
@@ -4024,6 +4387,9 @@ class MotifsView(QWidget):
         self._heat_lbl.setAlignment(Qt.AlignCenter)
         self._heat_lbl.hide()
         lay.addWidget(self._heat_lbl)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     def update_data(self, data):
         self._data = data
@@ -4541,211 +4907,6 @@ class QuantificationView(QWidget):
         self._lc_canvas.draw()
 
 
-class SettingsView(QWidget):
-    settings_changed = pyqtSignal(dict)
-    navigate_help = pyqtSignal(str)
-
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        _set_top = QHBoxLayout()
-        t = QLabel("Settings")
-        t.setFont(QFont("Arial", 18, QFont.Bold))
-        _set_top.addWidget(t)
-        _set_hbtn = QPushButton("?")
-        _set_hbtn.setFixedSize(20, 20)
-        _set_hbtn.setFlat(True)
-        _set_hbtn.setToolTip("Open Help for Settings")
-        _set_hbtn.setCursor(Qt.PointingHandCursor)
-        _set_hbtn.setStyleSheet(
-            "QPushButton{border:1px solid #aaa;border-radius:10px;color:#555;"
-            "background:#f5f5f5;font-size:10px;font-weight:bold;}"
-            "QPushButton:hover{background:#e8f0fe;color:#1a73e8;border-color:#1a73e8;}"
-        )
-        _set_hbtn.clicked.connect(lambda: self.navigate_help.emit("settings"))
-        _set_top.addWidget(_set_hbtn)
-        _set_top.addStretch()
-        lay.addLayout(_set_top)
-        form = QGridLayout()
-        r = 0
-
-        def row(label, widget):
-            nonlocal r
-            form.addWidget(QLabel(label), r, 0)
-            form.addWidget(widget, r, 1)
-            r += 1
-
-        ab = cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
-        self._xmin = QSpinBox(); self._xmin.setRange(0, 9999); self._xmin.setValue(ab["x_min"])
-        self._ymin = QSpinBox(); self._ymin.setRange(0, 9999); self._ymin.setValue(ab["y_min"])
-        self._xmax = QSpinBox(); self._xmax.setRange(0, 9999); self._xmax.setValue(ab["x_max"])
-        self._ymax = QSpinBox(); self._ymax.setRange(0, 9999); self._ymax.setValue(ab["y_max"])
-        row("Arena x_min", self._xmin)
-        row("Arena y_min", self._ymin)
-        row("Arena x_max", self._xmax)
-        row("Arena y_max", self._ymax)
-
-        def dir_row(label, key):
-            nonlocal r
-            le = QLineEdit(self.cfg.get(key, ""))
-            b = QPushButton("Browse...")
-            b.clicked.connect(lambda: self._browse(le))
-            h = QHBoxLayout()
-            h.addWidget(le)
-            h.addWidget(b)
-            form.addWidget(QLabel(label), r, 0)
-            form.addLayout(h, r, 1)
-            r += 1
-            return le
-
-        self._results = dir_row("Results directory", "results_dir")
-        self._raw = dir_row("Raw videos directory", "raw_videos_dir")
-
-        # Metadata CSV file picker
-        self._meta_le = QLineEdit(self.cfg.get("metadata_csv_path", ""))
-        meta_browse = QPushButton("Browse...")
-        meta_browse.clicked.connect(lambda: self._browse_file(self._meta_le))
-        meta_h = QHBoxLayout()
-        meta_h.addWidget(self._meta_le)
-        meta_h.addWidget(meta_browse)
-        form.addWidget(QLabel("Metadata CSV file"), r, 0)
-        form.addLayout(meta_h, r, 1)
-        r += 1
-
-        self._cohort_le = QLineEdit(self.cfg.get("cohort_csv_path", ""))
-        cohort_browse = QPushButton("Browse...")
-        cohort_browse.clicked.connect(lambda: self._browse_file(self._cohort_le,
-            "Data files (*.csv *.xlsx *.xls);;All files (*.*)"))
-        cohort_h = QHBoxLayout()
-        cohort_h.addWidget(self._cohort_le)
-        cohort_h.addWidget(cohort_browse)
-        form.addWidget(QLabel("Cohort file"), r, 0)
-        form.addLayout(cohort_h, r, 1)
-        r += 1
-
-        self._ctx_groups = QLineEdit(str(self.cfg.get("context_groups", "A,B,C")))
-        row("Context groups (comma-separated)", self._ctx_groups)
-
-        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
-        if not isinstance(lc_cfg, dict):
-            lc_cfg = {}
-        self._lc_enabled = QCheckBox("Enable configured learning curve panel")
-        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
-        form.addWidget(QLabel("Learning curves"), r, 0)
-        form.addWidget(self._lc_enabled, r, 1)
-        r += 1
-        self._lc_group_col = QLineEdit(str(lc_cfg.get("group_column", "context") or ""))
-        row("Learning group column", self._lc_group_col)
-        self._lc_baseline = QLineEdit("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
-        row("Learning baseline group", self._lc_baseline)
-        self._lc_comparison = QLineEdit("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
-        row("Learning comparison group", self._lc_comparison)
-        self._lc_order_col = QLineEdit(str(lc_cfg.get("order_column", "day") or ""))
-        row("Learning order column", self._lc_order_col)
-        self._lc_target_state = QLineEdit(str(lc_cfg.get("target_state", "auto") or "auto"))
-        row("Learning target state", self._lc_target_state)
-
-        self._fps = QSpinBox()
-        self._fps.setRange(1, 256)
-        self._fps.setValue(int(self.cfg.get("fps", 30)))
-        row("FPS", self._fps)
-
-        _umap_tip = (
-            "Number of UMAP output dimensions before HDBSCAN clustering.\n"
-            "Lower values (3–5) run faster and produce coarser clusters.\n"
-            "Higher values (10–15) preserve more structure. Default: 10."
-        )
-        self._umap_dims = QSpinBox()
-        self._umap_dims.setRange(2, 50)
-        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
-        self._umap_dims.setToolTip(_umap_tip)
-        row("UMAP dimensions", self._umap_dims)
-
-        _hms_tip = (
-            "HDBSCAN min_samples controls how conservative cluster borders are.\n"
-            "0 = use the same value as min_cluster_size (recommended default).\n"
-            "Lower values produce more clusters with softer borders."
-        )
-        self._hdbscan_min_samples = QSpinBox()
-        self._hdbscan_min_samples.setRange(0, 500)
-        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
-        self._hdbscan_min_samples.setToolTip(_hms_tip)
-        row("HDBSCAN min_samples", self._hdbscan_min_samples)
-
-        lay.addLayout(form)
-
-        save = QPushButton("Save Settings")
-        save.clicked.connect(self._save)
-        lay.addWidget(save)
-        lay.addStretch()
-
-    def load_from_cfg(self):
-        """Repopulate widgets from self.cfg (e.g. after switching projects)."""
-        ab = self.cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
-        self._xmin.setValue(ab["x_min"])
-        self._ymin.setValue(ab["y_min"])
-        self._xmax.setValue(ab["x_max"])
-        self._ymax.setValue(ab["y_max"])
-        self._results.setText(self.cfg.get("results_dir", ""))
-        self._raw.setText(self.cfg.get("raw_videos_dir", ""))
-        self._meta_le.setText(self.cfg.get("metadata_csv_path", ""))
-        self._cohort_le.setText(self.cfg.get("cohort_csv_path", ""))
-        self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
-        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
-        if not isinstance(lc_cfg, dict):
-            lc_cfg = {}
-        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
-        self._lc_group_col.setText(str(lc_cfg.get("group_column", "context") or ""))
-        self._lc_baseline.setText("" if lc_cfg.get("baseline_group") is None else str(lc_cfg.get("baseline_group")))
-        self._lc_comparison.setText("" if lc_cfg.get("comparison_group") is None else str(lc_cfg.get("comparison_group")))
-        self._lc_order_col.setText(str(lc_cfg.get("order_column", "day") or ""))
-        self._lc_target_state.setText(str(lc_cfg.get("target_state", "auto") or "auto"))
-        self._fps.setValue(int(self.cfg.get("fps", 30)))
-        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
-        self._hdbscan_min_samples.setValue(int(self.cfg.get("hdbscan_min_samples", 0)))
-
-    def _browse(self, le):
-        d = QFileDialog.getExistingDirectory(self, "Select Directory", le.text())
-        if d:
-            le.setText(d)
-
-    def _browse_file(self, le, filter_str="CSV files (*.csv)"):
-        path, _ = QFileDialog.getOpenFileName(self, "Select File", le.text(), filter_str)
-        if path:
-            le.setText(path)
-
-    def _save(self):
-        self.cfg["arena_bounds"] = {
-            "x_min": self._xmin.value(),
-            "y_min": self._ymin.value(),
-            "x_max": self._xmax.value(),
-            "y_max": self._ymax.value(),
-        }
-        self.cfg["results_dir"] = self._results.text()
-        self.cfg["raw_videos_dir"] = self._raw.text()
-        self.cfg["metadata_csv_path"] = self._meta_le.text()
-        self.cfg["cohort_csv_path"] = self._cohort_le.text().strip()
-        self.cfg["context_groups"] = self._ctx_groups.text().strip() or "A,B,C"
-        ui_panels = self.cfg.setdefault("ui_panels", {})
-        ui_panels["learning_curves"] = {
-            "enabled": self._lc_enabled.isChecked(),
-            "group_column": self._lc_group_col.text().strip() or "context",
-            "baseline_group": self._lc_baseline.text().strip() or None,
-            "comparison_group": self._lc_comparison.text().strip() or None,
-            "order_column": self._lc_order_col.text().strip() or "day",
-            "subject_column": "animal_id",
-            "target_state": self._lc_target_state.text().strip() or "auto",
-        }
-        self.cfg["fps"] = self._fps.value()
-        self.cfg["umap_dims"] = self._umap_dims.value()
-        self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()
-        _save_cfg(self.cfg)
-        self.settings_changed.emit(self.cfg)
-        QMessageBox.information(self, "Settings", "Saved.")
-
-
 class NavBtn(QPushButton):
     """Sidebar navigation button styled to match the design spec."""
 
@@ -4977,10 +5138,16 @@ def export_pdf_report():
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        _t = time.perf_counter()
         self._init_project()
+        _perf("  _init_project", _t)
+        _t = time.perf_counter()
         _refresh_global_paths()
+        _perf("  _refresh_global_paths", _t)
+        _t = time.perf_counter()
         self.cfg = _load_cfg()
-        self.setWindowTitle("VIEB - Video Interpreter for Experimental Behavior")
+        _perf("  _load_cfg", _t)
+        self.setWindowTitle("VIEB - Video Interpreter Excluding Bias")
         self.setMinimumSize(1024, 768)
         w, h = self.cfg.get("window_size", [1280, 800])
         self.resize(w, h)
@@ -4988,23 +5155,47 @@ class MainWindow(QMainWindow):
         self._running = False
         self._pipeline_running = False
         self._clip_running = False
+        self._running_command = ""
+        self._pipeline_command = ""
+        self._clip_command = ""
         self._clip_worker = None
         self._clip_log_buf: list[str] = []
         self._initial_load_done = False
         self._cached_data = None
+        self._cached_data_full = False
+        self._label_checkers = set()
         self._crv = None
+        self._dlc = None
+        self._adv = None
+        self._pv = None
+        self._sv = None
+        self._av = None
+        self._vv = None
+        self._qv = None
+        self._artv = None
+        self._setv = None
+        self._hv = None
         self._pulse_timer = QTimer(self)
         self._pulse_timer.timeout.connect(self._pulse)
         self._reload_timer = QTimer(self)
         self._reload_timer.setSingleShot(True)
-        self._reload_timer.timeout.connect(self._load_data)
+        self._reload_timer.timeout.connect(self._reload_for_current_view)
+        t_build = time.perf_counter()
         self._build()
-        self._load_data()
+        self.setUpdatesEnabled(True)
+        _perf("main window construction", t_build)
+        QTimer.singleShot(0, self._load_lightweight_data)
         self._start_file_watcher()
         QTimer.singleShot(200, self._maybe_onboarding)
         QTimer.singleShot(300, self._check_dlc_setup)
+        QTimer.singleShot(500,  lambda: self._preload_one("Pipeline"))
+        QTimer.singleShot(900,  lambda: self._preload_one("Cluster Runs"))
+        QTimer.singleShot(1300, lambda: self._preload_one("Analysis"))
+        QTimer.singleShot(1700, lambda: self._preload_one("Artifacts"))
+        QTimer.singleShot(2100, lambda: self._preload_one("Settings"))
 
     def _build(self):
+        self.setUpdatesEnabled(False)
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -5136,10 +5327,9 @@ class MainWindow(QMainWindow):
         self._sb_footer.setWordWrap(True)
         sl.addWidget(self._sb_footer)
 
-        self._reload_btn = QPushButton("⟳  Reload data")
+        self._reload_btn = QPushButton("⟳  Reload Data")
         self._reload_btn.setToolTip(
-            "Re-run comparison report and refresh all views with latest results.\n"
-            "Use this after changing cluster parameters or completing a new pipeline stage."
+            "Run compare.py --report, then refresh all views from disk."
         )
         self._reload_btn.setStyleSheet(
             "QPushButton {"
@@ -5163,81 +5353,26 @@ class MainWindow(QMainWindow):
             self._views[name] = widget
             self._stack.addWidget(widget)
 
+        _t_ov = time.perf_counter()
         self._ov = OverviewView()
         self._ov.export_requested.connect(self._show_export_dialog)
-        self._ov.load_previous_requested.connect(self._load_session)
         self._ov.cohort_path_changed.connect(self._on_cohort_path_changed)
         self._ov.navigate_help.connect(self._navigate_to_help)
         add("Overview", self._ov)
+        _perf("  OverviewView construction", _t_ov)
 
-        self._dlc = DLCSetupView(self.cfg)
-        self._dlc.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
-        self._dlc.navigate_settings.connect(lambda: self._switch("Settings"))
-        self._views["DLC Setup"] = self._dlc
-        self._stack.addWidget(self._dlc)
-
-        self._adv = AddVideosView(self.cfg)
-        self._adv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
-        self._adv.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
-        self._adv.worker_running.connect(self._set_running)
-        self._adv.pipeline_done.connect(self._load_data)
-        add("Add Videos", self._adv)
-
-        self._pv = RunPipelineView(self.cfg)
-        self._pv.pipeline_done.connect(self._load_data)
-        self._pv.worker_running.connect(self._set_running)
-        self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
-        self._pv.navigate_add_videos.connect(lambda: self._switch("Add Videos"))
-        self._pv.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
-        self._pv.cluster_finished.connect(self._show_cluster_runs)
-        self._pv.navigate_help.connect(self._navigate_to_help)
-        self._pv.project_changed.connect(self._on_project_changed)
-        add("Pipeline", self._pv)
-
-        if _HAS_CLUSTER_RUNS_VIEW:
-            self._crv = _ClusterRunsView(self.cfg)
-            self._crv.run_activated.connect(self._manual_reload)
-            self._crv.cluster_changed.connect(self._on_cluster_changed)
-            add("Cluster Runs", self._crv)
-        else:
-            self._crv = None
-
-        self._sv = BrowseStatesView(self.cfg)
-        self._sv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
-        self._sv.request_clip_generation.connect(self._start_background_clip_generation)
-        add("Browse States", self._sv)
-
-        if _HAS_ANALYSIS_VIEW:
-            self._av = _AnalysisView(self.cfg)
-            self._av.worker_running.connect(self._set_running)
-            add("Analysis", self._av)
-        else:
-            self._av = None
-
-        self._vv = ValidationView(self.cfg)
-        self._vv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
-        self._vv.navigate_help.connect(self._navigate_to_help)
-        add("Validation", self._vv)
-
-        self._qv = QuantificationView(self.cfg)
-        add("Quantification", self._qv)
-
-        if _HAS_ARTIFACTS_VIEW:
-            self._artv = _ArtifactsView(self.cfg)
-            self._artv.worker_running.connect(self._set_running)
-            add("Results", self._artv)
-        else:
-            self._artv = None
-
-        self._setv = SettingsView(self.cfg)
-        self._setv.settings_changed.connect(self._settings_changed)
-        self._setv.navigate_help.connect(self._navigate_to_help)
-        add("Settings", self._setv)
-
-        self._hv = HelpView()
-        add("Help", self._hv)
+        for lazy_name in (
+            "Pipeline", "Analysis", "Artifacts", "Settings", "Help",
+            "DLC Setup", "Add Videos", "Cluster Runs", "Browse States",
+            "Validation", "Quantification",
+        ):
+            placeholder = QLabel(f"Loading {lazy_name}...")
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setStyleSheet("color:#777;font-style:italic;padding:24px;")
+            add(lazy_name, placeholder)
 
         self._build_status_bar()
+        _perf("  _build total", _t_ov)
 
         if getattr(self, "_is_new_project", False):
             pose_source = getattr(self, "_new_project_pose_source", "none")
@@ -5256,11 +5391,14 @@ class MainWindow(QMainWindow):
         else:
             _REMOVED_VIEW_MAP = {
                 "Add Videos": "Pipeline",
-                "Cluster Runs": "Pipeline",
                 "State Characterization": "Analysis",
+                "Results": "Artifacts",
             }
             saved = self.cfg.get("last_view", "Overview")
-            self._switch(_REMOVED_VIEW_MAP.get(saved, saved))
+            startup_view = _REMOVED_VIEW_MAP.get(saved, saved)
+            if startup_view != "Overview":
+                startup_view = "Overview"
+            self._switch(startup_view)
 
     def _toggle_sidebar(self):
         self._sidebar_collapsed = not self._sidebar_collapsed
@@ -5282,7 +5420,7 @@ class MainWindow(QMainWindow):
 
         if collapsed:
             self._reload_btn.setText("⟳")
-            self._reload_btn.setToolTip("Reload data")
+            self._reload_btn.setToolTip("Reload Data")
             self._reload_btn.setStyleSheet(
                 "QPushButton {"
                 "  background:transparent; border:none; color:#9B9B9B;"
@@ -5291,11 +5429,8 @@ class MainWindow(QMainWindow):
                 "QPushButton:hover { color:#1a73e8; background:#EBEBEB; }"
             )
         else:
-            self._reload_btn.setText("⟳  Reload data")
-            self._reload_btn.setToolTip(
-                "Re-run comparison report and refresh all views with latest results.\n"
-                "Use this after changing cluster parameters or completing a new pipeline stage."
-            )
+            self._reload_btn.setText("⟳  Reload Data")
+            self._reload_btn.setToolTip("Run compare.py --report, then refresh all views from disk.")
             self._reload_btn.setStyleSheet(
                 "QPushButton {"
                 "  background:transparent; border:none; color:#9B9B9B;"
@@ -5339,7 +5474,7 @@ class MainWindow(QMainWindow):
         self._sb_stop.setToolTip("Stop running process")
         self._sb_stop.setStyleSheet(
             "QPushButton{border:none;background:transparent;color:#c62828;"
-            "font-size:14px;padding:0;}"
+            "font-size:14px;padding:0 0 3px 0;}"
             "QPushButton:hover{color:#e53935;}"
         )
         self._sb_stop.setCursor(Qt.PointingHandCursor)
@@ -5364,16 +5499,36 @@ class MainWindow(QMainWindow):
     def _settings_changed(self, cfg):
         self.cfg = cfg
         _save_cfg(self.cfg)
+        _pm.invalidate_project_cache()
+        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         self._refresh_view_labels()
-        self._load_data()
+        self._reload_for_current_view()
 
-    def _on_project_changed(self):
+    def _reload_after_project_change(self, validation=None):
+        """Shared reload body for the two project-switch entry points.
+
+        Both _do_switch (sidebar menu / open / auto-detect / new project) and
+        _on_project_changed (Stage 0 onboarding 'project_changed' signal) rebuild
+        in-memory state after the active project changes; they differ only in the
+        steps that wrap this body (see each caller). Kept as one helper so the
+        reload — and its cache invalidation — stays identical for both.
+        """
+        _pm.invalidate_project_cache()
+        import vieb_config as _vc_ui; _vc_ui.invalidate_path_cache()
         _refresh_global_paths()
         self.cfg = _load_cfg()
         self._propagate_cfg()
-        self._refresh_project_label()
-        self._load_data()
-        if hasattr(self._pv, "_project_panel"):
+        self._cached_data = None
+        self._cached_data_full = False
+        self._load_lightweight_data()
+        self._refresh_project_label(validation)
+
+    def _on_project_changed(self):
+        # Triggered by the Stage 0 panel's project_changed signal after an
+        # onboarding action activates/updates a project (the handler already
+        # persisted the active project via set_active_project).
+        self._reload_after_project_change()
+        if self._pv is not None and hasattr(self._pv, "_project_panel"):
             self._pv._project_panel.refresh()
 
     def _refresh_view_labels(self) -> None:
@@ -5388,23 +5543,51 @@ class MainWindow(QMainWindow):
         _save_cfg(self.cfg)
         self._load_data()
 
-    def _set_running(self, running: bool):
+    def _set_running(self, running: bool, command: str | None = None):
         self._pipeline_running = running
+        if running:
+            self._pipeline_command = command if command is not None else self._pipeline_command
+        else:
+            self._pipeline_command = ""
         self._sync_running()
+
+    def _set_running_from_source(self, running: bool, source, fallback: str = ""):
+        command = getattr(source, "_running_command", "") or fallback
+        self._set_running(running, command if running else None)
+
+    def _set_running_command(self, command: str):
+        if self._pipeline_running:
+            self._pipeline_command = command
+        else:
+            self._running_command = command
+        if self._running:
+            self._sb_stage.setText(_running_status_text(command))
+            self._sb_stage.setToolTip(command)
 
     def _sync_running(self):
         self._running = self._pipeline_running or self._clip_running
+        self._running_command = (
+            self._pipeline_command
+            if self._pipeline_running
+            else self._clip_command if self._clip_running else ""
+        )
         self._sb_stop.setVisible(self._running)
         self._sb_stop.setEnabled(self._running)
         if self._running:
             self._pulse_timer.start(300)
+            self._sb_stage.setText(_running_status_text(self._running_command))
+            self._sb_stage.setToolTip(self._running_command)
         else:
             self._pulse_timer.stop()
             self._sb_dot.setStyleSheet("color:#999;")
+            self._sb_stage.setText("idle")
+            self._sb_stage.setToolTip("")
 
     def _stop_all(self):
         if hasattr(self._pv, '_stop_pipeline'):
             self._pv._stop_pipeline()
+        if hasattr(self._dlc, 'stop_worker'):
+            self._dlc.stop_worker()
         if hasattr(self._adv, 'stop_worker'):
             self._adv.stop_worker()
         if hasattr(self._av, 'stop_worker'):
@@ -5422,6 +5605,7 @@ class MainWindow(QMainWindow):
         self._clip_worker.log.connect(self._on_clip_log)
         self._clip_worker.done.connect(self._on_clip_done)
         self._clip_running = True
+        self._clip_command = f"python generate_clips.py --fps {self.cfg.get('fps', 30)}"
         self._sync_running()
         self.statusBar().showMessage("Background clip generation started.", 5000)
         self._clip_worker.start()
@@ -5433,6 +5617,7 @@ class MainWindow(QMainWindow):
 
     def _on_clip_done(self, ok):
         self._clip_running = False
+        self._clip_command = ""
         self._sync_running()
         if ok:
             self.statusBar().showMessage("Clip generation complete.", 7000)
@@ -5457,28 +5642,171 @@ class MainWindow(QMainWindow):
         if not self._running:
             self._sb_dot.setStyleSheet(mono + "color:#9B9B9B;")
             self._sb_stage.setText("idle")
+            self._sb_stage.setToolTip("")
             return
         self._pulse_idx = (self._pulse_idx + 1) % 2
         color = "#27AE60" if self._pulse_idx else "#6FCF97"
         self._sb_dot.setStyleSheet(mono + f"color:{color};")
-        self._sb_stage.setText("running")
+        self._sb_stage.setText(_running_status_text(self._running_command))
+        self._sb_stage.setToolTip(self._running_command)
 
     def _show_cluster_runs(self):
+        self._ensure_view("Cluster Runs")
         if self._crv is not None:
             self._crv.refresh()
         self._switch("Cluster Runs")
 
+    def _replace_view(self, name: str, widget: QWidget) -> None:
+        old = self._views.get(name)
+        if old is not None:
+            idx = self._stack.indexOf(old)
+            self._stack.removeWidget(old)
+            old.deleteLater()
+            self._stack.insertWidget(idx, widget)
+        else:
+            self._stack.addWidget(widget)
+        self._views[name] = widget
+
+    def _preload_one(self, name: str) -> None:
+        """Warm-load a view shell in idle time without navigating to it."""
+        current = self._views.get(name)
+        if current is None or not isinstance(current, QLabel):
+            return  # not registered, or already built by a user click
+        t0 = time.perf_counter()
+        self._ensure_view(name)
+        _perf(f"[preload] {name}", t0)
+        if self._cached_data:
+            if name == "Pipeline" and self._pv is not None:
+                self._pv.estimate_times(self._cached_data)
+                self._pv.update_from_cfg()
+                self._pv.update_cluster_quality(self._cached_data)
+            elif name == "Analysis" and self._av is not None:
+                self._av.update_data(self._cached_data)
+
+    def _ensure_view(self, name: str) -> None:
+        current = self._views.get(name)
+        if current is not None and not isinstance(current, QLabel):
+            return
+        t0 = time.perf_counter()
+        self._stack.setUpdatesEnabled(False)
+
+        if name == "Pipeline":
+            self._pv = RunPipelineView(self.cfg)
+            self._pv.pipeline_done.connect(self._load_data)
+            self._pv.worker_running.connect(lambda running: self._set_running_from_source(running, self._pv))
+            self._pv.worker_command.connect(self._set_running_command)
+            self._pv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
+            self._pv.navigate_add_videos.connect(lambda: self._switch("Add Videos"))
+            self._pv.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
+            self._pv.cluster_finished.connect(self._show_cluster_runs)
+            self._pv.navigate_help.connect(self._navigate_to_help)
+            self._pv.project_changed.connect(self._on_project_changed)
+            self._replace_view(name, self._pv)
+        elif name == "Analysis":
+            from views.analysis import AnalysisView
+            self._av = AnalysisView(self.cfg)
+            self._av.worker_running.connect(lambda running: self._set_running_from_source(running, self._av))
+            self._av.navigate_cluster_runs.connect(lambda: self._switch("Cluster Runs"))
+            self._av.navigate_artifacts_category.connect(self._navigate_to_artifacts_category)
+            self._replace_view(name, self._av)
+        elif name == "Artifacts":
+            from views.artifacts import ArtifactsView
+            self._artv = ArtifactsView(self.cfg)
+            self._artv.worker_running.connect(lambda running: self._set_running_from_source(running, self._artv))
+            self._replace_view(name, self._artv)
+        elif name == "Settings":
+            from views.settings import SettingsView
+            self._setv = SettingsView(self.cfg)
+            self._setv.settings_changed.connect(self._settings_changed)
+            self._setv.navigate_help.connect(self._navigate_to_help)
+            self._replace_view(name, self._setv)
+        elif name == "Help":
+            from views.help import HelpView
+            self._hv = HelpView()
+            self._replace_view(name, self._hv)
+        elif name == "DLC Setup":
+            from views.dlc_setup import DLCSetupView
+            self._dlc = DLCSetupView(self.cfg)
+            self._dlc.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
+            self._dlc.navigate_settings.connect(lambda: self._switch("Settings"))
+            self._dlc.worker_running.connect(lambda running: self._set_running_from_source(running, self._dlc))
+            self._dlc.worker_command.connect(self._set_running_command)
+            self._replace_view(name, self._dlc)
+        elif name == "Add Videos":
+            from views.add_videos import AddVideosView
+            self._adv = AddVideosView(self.cfg)
+            self._adv.navigate_dlc.connect(lambda: self._switch("DLC Setup"))
+            self._adv.navigate_pipeline.connect(lambda: self._switch("Pipeline"))
+            self._adv.worker_running.connect(lambda running: self._set_running_from_source(running, self._adv))
+            self._adv.pipeline_done.connect(self._load_data)
+            self._replace_view(name, self._adv)
+        elif name == "Cluster Runs":
+            from views.cluster_runs import ClusterRunsView
+            self._crv = ClusterRunsView(self.cfg)
+            self._crv.run_activated.connect(self._manual_reload)
+            self._crv.cluster_changed.connect(self._on_cluster_changed)
+            self._replace_view(name, self._crv)
+        elif name == "Browse States":
+            self._sv = BrowseStatesView(self.cfg)
+            self._sv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
+            self._sv.request_clip_generation.connect(self._start_background_clip_generation)
+            self._replace_view(name, self._sv)
+        elif name == "Validation":
+            self._vv = ValidationView(self.cfg)
+            self._vv.navigate_to_pipeline.connect(lambda: self._switch("Pipeline"))
+            self._vv.navigate_help.connect(self._navigate_to_help)
+            self._replace_view(name, self._vv)
+        elif name == "Quantification":
+            self._qv = QuantificationView(self.cfg)
+            self._replace_view(name, self._qv)
+
+        self._stack.setUpdatesEnabled(True)
+        _perf(f"construct view {name}", t0)
+
     def _switch(self, name):
         if name not in self._views:
             return
+        self._ensure_view(name)
         for n, b in self._nav.items():
             b.setChecked(n == name)
         self._stack.setCurrentWidget(self._views[name])
         self.cfg["last_view"] = name
+        if name in self._FULL_DATA_VIEWS and not self._cached_data_full:
+            self._load_data()
+        if name == "Artifacts" and self._artv is not None:
+            self._artv.refresh()
+        if name == "Cluster Runs" and self._crv is not None:
+            self._crv.refresh()
+
+    _FULL_DATA_VIEWS = {"Analysis", "Browse States", "Validation", "Quantification"}
+
+    def _current_view_name(self) -> str:
+        current = self._stack.currentWidget()
+        for name, widget in self._views.items():
+            if widget is current:
+                return name
+        return ""
+
+    def _reload_for_current_view(self) -> None:
+        if self._current_view_name() == "Cluster Runs":
+            if self._crv is not None:
+                self._crv.refresh()
+            self.statusBar().showMessage("Data reloaded", 3000)
+            return
+        if self._current_view_name() in self._FULL_DATA_VIEWS:
+            self._load_data()
+        else:
+            self._load_lightweight_data()
 
     def _navigate_to_help(self, section_id: str):
         self._switch("Help")
-        self._hv.scroll_to_section(section_id)
+        if self._hv is not None:
+            self._hv.scroll_to_section(section_id)
+
+    def _navigate_to_artifacts_category(self, category: str):
+        self._switch("Artifacts")
+        if self._artv is not None:
+            self._artv.select_category(category)
 
     # ── File watcher — auto-refresh when pipeline writes new results ──────────
 
@@ -5524,17 +5852,59 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == regen_btn:
             self._run_report_regen()
         else:
+            self.statusBar().showMessage("Reloading view data...", 2000)
             self._load_data()
-            self.statusBar().showMessage("Reloading results from disk…", 2000)
 
     def _on_cluster_changed(self) -> None:
         """Reload cfg after the active cluster run changes."""
         self.cfg = _load_cfg()
         self._watch_result_files()
+        self._propagate_cfg()
+        if getattr(self, "_av", None) is not None:
+            self._av.notify_cluster_changed()
+
+    # --- Cluster queue ---
+
+    def _start_cluster_queue(self, configs: list) -> None:
+        from _workers import ClusterQueueWorker
+        self._cluster_queue_worker = ClusterQueueWorker(configs, self.cfg)
+        self._cluster_queue_worker.log.connect(self._on_queue_log)
+        self._cluster_queue_worker.run_started.connect(self._on_queue_run_started)
+        self._cluster_queue_worker.run_finished.connect(self._on_queue_run_finished)
+        self._cluster_queue_worker.queue_done.connect(self._on_queue_done)
+        if self._crv:
+            self._crv.set_queue_running(True)
+            self._crv._queue_worker = self._cluster_queue_worker
+        self._set_running(True, f"cluster queue: {len(configs)} runs")
+        self._cluster_queue_worker.start()
+
+    def _on_queue_log(self, text: str) -> None:
+        pass
+
+    def _on_queue_run_started(self, index: int, label: str) -> None:
+        total = len(self._cluster_queue_worker.configs) if self._cluster_queue_worker else 0
+        self._set_running_command(f"cluster queue: {index + 1}/{total} ({label})")
+        self.statusBar().showMessage(f"Cluster queue: running {index + 1}/{total} ({label})")
+        if self._crv:
+            self._crv.set_queue_progress(index, total)
+
+    def _on_queue_run_finished(self, index: int, label: str, ok: bool) -> None:
+        status = "completed" if ok else "failed"
+        self.statusBar().showMessage(f"Cluster queue: run {index + 1} {status}", 3000)
+        if self._crv:
+            self._crv.refresh()
+
+    def _on_queue_done(self) -> None:
+        self._set_running(False)
+        if self._crv:
+            self._crv.set_queue_running(False)
+            self._crv.clear_queue_progress()
+            self._crv.refresh()
+        self._load_data()
+        self.statusBar().showMessage("Cluster queue finished.", 5000)
 
     def _on_reload_clicked(self) -> None:
-        """Re-run compare.py --report and refresh all views with the latest results."""
-        self.statusBar().showMessage("Reloading…", 2000)
+        self.statusBar().showMessage("Running report…", 2000)
         self._run_report_regen()
 
     def _run_report_regen(self) -> None:
@@ -5552,6 +5922,7 @@ class MainWindow(QMainWindow):
     def _on_report_done(self, ok: bool) -> None:
         self._reload_btn.setEnabled(True)
         if ok:
+            self._post_report_reload = True
             self._load_data()
             self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
         else:
@@ -5559,24 +5930,37 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Report Generation Failed", last)
             self.statusBar().showMessage("Report generation failed — see error above.", 6000)
 
-    def _load_data(self):
-        self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""))
+    def _load_lightweight_data(self):
+        self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""), lightweight=True)
         self._loader.loaded.connect(self._on_loaded)
-        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Load error: {e}", 6000))
+        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Reload failed: {e}", 6000))
+        self._loader.start()
+
+    def _load_data(self):
+        self._loader = DataLoader(self.cfg.get("cohort_csv_path", ""), lightweight=False)
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.error.connect(lambda e: self.statusBar().showMessage(f"Reload failed: {e}", 6000))
         self._loader.start()
 
     def _on_loaded(self, data):
         self._watch_result_files()   # add any newly created result files
         summary = data.get("summary")
         ci = data.get("cluster_info")
+        markers = data.get("markers", {})
+        overview = data.get("overview_summary")
         self._cached_data = data
+        self._cached_data_full = not bool(data.get("_lightweight"))
         if summary is not None:
             self._sb_vid.setText(f"Videos: {len(summary)}")
+        elif isinstance(overview, dict) and overview.get("total_videos") is not None:
+            self._sb_vid.setText(f"Videos: {overview.get('total_videos')}")
         if ci:
             self._sb_states.setText(f"States: {ci.get('n_clusters', '-')}")
-        p = RESULTS / "comparison" / "summary_table.csv"
-        if p.exists():
-            self._sb_run.setText(f"Last run: {_fmt_ts(p.stat().st_mtime)}")
+        elif isinstance(overview, dict) and overview.get("n_states") is not None:
+            self._sb_states.setText(f"States: {overview.get('n_states')}")
+        run_text = _summary_mtime_text(data)
+        if run_text != "-":
+            self._sb_run.setText(f"Last run: {run_text}")
         if summary is not None:
             state_cols = [c for c in summary.columns if c.startswith("state_") and c.endswith("_frac")]
             if state_cols:
@@ -5589,35 +5973,55 @@ class MainWindow(QMainWindow):
                 f"Project\n{self.cfg.get('project_name', 'VIEB')}\n"
                 f"{n_animals} animals · {n_days} days"
             )
+        elif isinstance(overview, dict):
+            noise = overview.get("noise_fraction")
+            if noise is not None:
+                self._sb_noise.setText(f"Noise: {float(noise) * 100:.1f}%")
+            self._sb_footer.setText(
+                f"Project\n{self.cfg.get('project_name', 'VIEB')}\n"
+                f"{overview.get('total_videos', '—')} videos"
+            )
 
-        self._pv.estimate_times(data)
-        self._pv.update_from_cfg()
-        self._pv.update_cluster_quality(data)
-        self._pv.update_diagnostics(data)
+        if self._pv is not None:
+            self._pv.estimate_times(data)
+            self._pv.update_from_cfg()
+            self._pv.update_cluster_quality(data)
         if not self._initial_load_done:
             self._initial_load_done = True
-            has_results = any(data.get(k) is not None for k in ("summary", "state_summary", "motifs", "animal_scalars"))
-            self._ov.show_load_banner(has_results)
+            has_results = any(
+                data.get(k) is not None
+                for k in ("summary", "overview_summary", "state_summary", "motifs", "animal_scalars")
+            ) or any(markers.get(k) for k in ("features", "clusters", "summary", "report", "motifs"))
+            self._ov.show_load_banner(has_results, data)
         self._ov.update_data(data)
-        self._sv.update_data(data)
-        self._vv.update_data(data)
-        self._qv.update_data(data)
+        if self._sv is not None:
+            self._sv.update_data(data)
+        if self._vv is not None:
+            self._vv.update_data(data)
+        if self._qv is not None:
+            self._qv.update_data(data)
         if self._av is not None:
             self._av.update_data(data)
-        if hasattr(self._av, "refresh"):
-            self._av.refresh(data)
         if hasattr(self._sv, "refresh"):
             self._sv.refresh(data)
-        if self._artv is not None:
-            self._artv.update_data(data)
+        if self._crv is not None:
+            self._crv.refresh()
+        if getattr(self, "_post_report_reload", False):
+            self._post_report_reload = False
+            self.statusBar().showMessage("Report regenerated. Views updated.", 5000)
+        else:
+            self.statusBar().showMessage("Data reloaded", 3000)
 
     def _load_session(self):
         if self._cached_data:
             self._ov.show_load_banner(False)
             self._ov.update_data(self._cached_data)
-            self._sv.update_data(self._cached_data)
-            self._vv.update_data(self._cached_data)
-            self._qv.update_data(self._cached_data)
+            if self._sv is not None:
+                self._sv.update_data(self._cached_data)
+            if self._vv is not None:
+                self._vv.update_data(self._cached_data)
+            if self._qv is not None:
+                self._qv.update_data(self._cached_data)
             if self._av is not None:
                 self._av.update_data(self._cached_data)
             self.statusBar().showMessage("Previous session results loaded.", 3000)
@@ -5716,40 +6120,79 @@ class MainWindow(QMainWindow):
                 return
         self._project_onboarding_required = True
 
-    def _refresh_project_label(self):
-        """Update the sidebar project name label from the active project's config."""
+    def _refresh_project_label(self, validation=None):
+        """Update the sidebar project name label.
+
+        The project *name* is read directly from config.json (cheap, no scan).
+        The *status* needs the expensive validate_project() scan, so it is taken
+        from ``validation`` when a caller already has one, and otherwise computed
+        off the UI thread (a placeholder "checking…" tooltip is shown until the
+        background check completes). Keeps startup/switches from blocking on the
+        validation scan.
+        """
         app_cfg = _load_app_config()
         active = app_cfg.get("active_project", "")
-        name = "—"
-        status = "No valid project"
-        if active:
-            cfg_path = Path(active) / "config.json"
-            if cfg_path.exists():
-                try:
-                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    name = cfg.get("project_name", Path(active).name)
-                    status = _pm.validate_project(active).status
-                except Exception:
-                    name = Path(active).name
-            else:
-                # Find the name from the projects list
-                for p in app_cfg.get("projects", []):
-                    if p.get("path") == active:
-                        name = p.get("name", name)
-                        break
-                status = _pm.validate_project(active).status
-        # Truncate with ellipsis
+        name = self._project_label_name(app_cfg, active)
         if len(name) > 18:
             name = name[:15] + "..."
         self._proj_btn.setText(f"{name}  ▼")
-        self._proj_btn.setToolTip(f"{status}\n{active or 'No project selected'}")
+
+        if not active:
+            self._proj_btn.setToolTip("No valid project\nNo project selected")
+            return
+        if validation is not None:
+            self._proj_btn.setToolTip(f"{validation.status}\n{active}")
+        else:
+            self._proj_btn.setToolTip(f"checking…\n{active}")
+            self._start_label_status_check(active)
+
+    def _project_label_name(self, app_cfg: dict, active: str) -> str:
+        """Resolve the display name without triggering a validation scan."""
+        if not active:
+            return "—"
+        cfg_path = Path(active) / "config.json"
+        if cfg_path.exists():
+            try:
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                return cfg.get("project_name", Path(active).name)
+            except Exception:
+                return Path(active).name
+        for p in app_cfg.get("projects", []):
+            if p.get("path") == active:
+                return p.get("name", Path(active).name)
+        return Path(active).name
+
+    def _start_label_status_check(self, active: str) -> None:
+        """Compute the project-label status off the UI thread and apply it."""
+        def _compute():
+            try:
+                return (_pm.validate_project(active).status, active)
+            except Exception:
+                return ("No valid project", active)
+
+        checker = _ReadinessChecker(_compute)
+        # Hold a reference until finished so the QThread isn't GC'd mid-run.
+        self._label_checkers.add(checker)
+
+        def _done(result):
+            try:
+                status, checked_active = result
+            except (ValueError, TypeError):
+                return
+            # Ignore stale results if the active project changed meanwhile.
+            if checked_active == _load_app_config().get("active_project", ""):
+                self._proj_btn.setToolTip(f"{status}\n{checked_active}")
+
+        checker.done.connect(_done)
+        checker.finished.connect(lambda: self._label_checkers.discard(checker))
+        checker.start()
 
     def _open_project_menu(self):
         app_cfg = _load_app_config()
         projects = app_cfg.get("projects", [])
         active = app_cfg.get("active_project", "")
 
-        menu = QMenu(self)
+        menu = _style_light_menu(QMenu(self))
         for proj in projects:
             path = proj.get("path", "")
             pname = proj.get("name", "Unnamed")
@@ -5819,11 +6262,9 @@ class MainWindow(QMainWindow):
                 p["last_opened"] = now
         _save_app_config(app_cfg)
 
-        _refresh_global_paths()
-        self.cfg = _load_cfg()
-        self._propagate_cfg()
-        self._load_data()
-        self._refresh_project_label()
+        # Explicit sidebar-menu / open / auto-detect / new-project switch: persist
+        # the active project (above), reload shared state, then land on Overview.
+        self._reload_after_project_change()
         self._switch("Overview")
         name = self.cfg.get("project_name", Path(path).name)
         self.statusBar().showMessage(f"Switched to {name}", 5000)
@@ -5931,7 +6372,9 @@ QComboBox::drop-down { border: none; width: 20px; }
 QComboBox QAbstractItemView {
     background: #FFFFFF;
     border: 1px solid #E5E5E5;
+    color: #1A1A1A;
     selection-background-color: rgba(78,121,167,0.12);
+    selection-color: #1A1A1A;
     outline: none;
 }
 
@@ -6072,6 +6515,60 @@ QSlider::handle:horizontal {
     margin: -6px 0;
 }
 QSlider::sub-page:horizontal { background: #4E79A7; border-radius: 2px; }
+
+/* ── Popup surfaces ──────────────────────────────────────── */
+QMenu {
+    background: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #DADCE0;
+    border-radius: 4px;
+    padding: 4px;
+}
+QMenu::item {
+    background: transparent;
+    color: #1A1A1A;
+    padding: 6px 28px 6px 12px;
+    border-radius: 3px;
+}
+QMenu::item:selected {
+    background: #E8F0FE;
+    color: #0B57D0;
+}
+QMenu::separator {
+    height: 1px;
+    background: #E5E5E5;
+    margin: 4px 6px;
+}
+QDialog {
+    background: #FAFAFA;
+    color: #1A1A1A;
+}
+QFileDialog QWidget {
+    background: #FAFAFA;
+    color: #1A1A1A;
+}
+QFileDialog QListView, QFileDialog QTreeView {
+    background: #FFFFFF;
+}
+QFileDialog QLineEdit {
+    background: #FFFFFF;
+}
+QFileDialog QToolButton {
+    background: transparent;
+}
+QListView, QTreeView, QAbstractItemView {
+    background: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #E5E5E5;
+    selection-background-color: rgba(78,121,167,0.12);
+    selection-color: #1A1A1A;
+    alternate-background-color: #FAFAFA;
+}
+QListView::item:selected, QTreeView::item:selected,
+QAbstractItemView::item:selected {
+    background: #E8F0FE;
+    color: #0B57D0;
+}
 
 /* ── Progress bar ─────────────────────────────────────────── */
 QProgressBar {

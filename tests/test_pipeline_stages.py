@@ -1,9 +1,54 @@
 import ast
+import json
+import os
+import sys
 from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import project_manager as pm
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _write_json(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _make_project(root: Path, name: str = "proj", *, with_metadata: bool = True) -> Path:
+    project = root / "projects" / name
+    project.mkdir(parents=True)
+    raw = project / "raw_videos"
+    raw.mkdir()
+    results = project / "results"
+    results.mkdir()
+    meta = project / "metadata.csv"
+    if with_metadata:
+        meta.write_text("session_id,stem\nvideo1,video1\n", encoding="utf-8")
+    _write_json(project / "config.json", {
+        "project_name": name,
+        "paths": {
+            "raw_videos": str(raw),
+            "pose_files": "",
+            "pose_h5": None,
+            "metadata": str(meta),
+            "results": str(results),
+        },
+        "metadata_schema": {"column_map": {"session_id": "session_id"}},
+        "analysis_groups": [{"name": "Session", "column": "session_id", "enabled": True}],
+        "ui_panels": {},
+        "pipeline_settings": {},
+    })
+    return project
 
 
 def _load_stages():
-    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    # STAGES is the single source of truth in the dependency-free _stages module
+    # (user_interface.py and _utils.py import it from there).
+    src = Path(__file__).resolve().parents[1] / "_stages.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -12,6 +57,8 @@ def _load_stages():
                     return ast.literal_eval(node.value)
     raise AssertionError("STAGES assignment not found")
 
+
+# ── existing stage-ordering tests ─────────────────────────────────────────────
 
 def test_stage_zero_is_onboarding_not_project_onboarding():
     stages = _load_stages()
@@ -36,3 +83,500 @@ def test_pipeline_stage_ids_are_in_product_order():
         (8, "Generate Clips"),
         (9, "Add Videos"),
     ]
+
+
+# ── Stage 0 readiness tests ───────────────────────────────────────────────────
+
+def test_stage0_panel_is_stage0_readiness_panel_not_project_onboarding():
+    """Stage 0 uses Stage0ReadinessPanel, not the old ProjectOnboardingPanel."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    assert "Stage0ReadinessPanel" in text
+    assert "ProjectOnboardingPanel" not in text
+
+
+def test_stage0_readiness_complete_when_valid_project(tmp_path):
+    """onboarding_complete returns True for a project with metadata and a raw-videos source."""
+    project = _make_project(tmp_path, with_metadata=True)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_readiness_incomplete_when_metadata_missing(tmp_path):
+    """onboarding_complete returns False when metadata.csv does not exist."""
+    project = _make_project(tmp_path, with_metadata=False)
+    assert pm.onboarding_complete(project) is False
+
+
+def test_stage0_no_repo_root_fallback(tmp_path):
+    """get_active_project raises ProjectSelectionError when no active project is configured,
+    even if a metadata.csv exists at the repo root (no implicit fallback)."""
+    (tmp_path / "metadata.csv").write_text("session_id\n", encoding="utf-8")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+
+    with pytest.raises(pm.ProjectSelectionError):
+        pm.get_active_project(tmp_path, app)
+
+
+def test_stage0_readiness_not_complete_for_repo_root_path_fallback(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (tmp_path / "metadata.csv").write_text("session_id,stem,animal_id,context\nvideo1,video1,a,A\n", encoding="utf-8")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["metadata"] = str(tmp_path / "metadata.csv")
+    cfg["paths"]["results"] = str(tmp_path / "results")
+    _write_json(project / "config.json", cfg)
+
+    validation = pm.validate_project(project, tmp_path)
+    checks = {check.key: check for check in validation.checks}
+
+    assert pm.onboarding_complete(project, tmp_path) is False
+    assert checks["metadata"].status == "red"
+    assert checks["results"].status == "red"
+
+
+def test_stage0_blocks_pipeline_error_message():
+    """The workers module contains the exact blocking message for Stage 0."""
+    src = Path(__file__).resolve().parents[1] / "_workers.py"
+    text = src.read_text(encoding="utf-8")
+    assert "No valid project selected. Complete Stage 0: Onboarding before running the pipeline." in text
+
+
+def test_stage0_session_source_status_is_lightweight():
+    """session_source_status must not use os.walk or Path.rglob (recursive scanning)."""
+    src = Path(__file__).resolve().parents[1] / "project_manager.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def session_source_status(")
+    assert fn_start != -1, "session_source_status not found"
+    # Find the end of the function by looking for the next top-level def/class
+    fn_body = text[fn_start:]
+    next_def = fn_body.find("\ndef ", 1)
+    if next_def == -1:
+        next_def = len(fn_body)
+    fn_body = fn_body[:next_def]
+    assert "os.walk" not in fn_body, "session_source_status must not use os.walk"
+    assert ".rglob(" not in fn_body, "session_source_status must not use Path.rglob"
+    assert 'glob("**/' not in fn_body, "session_source_status must not use recursive glob"
+
+
+def test_stage0_does_not_import_heavy_libraries():
+    """Stage 0 panel source must not import GPU/DLC/heavy libraries at module level."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    heavy = {"deeplabcut", "torch", "tensorflow", "cuml", "rapids", "h5py", "hdbscan", "umap"}
+    # Collect top-level imports (not inside function/class bodies)
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            for name in names:
+                root_pkg = (name or "").split(".")[0].lower()
+                assert root_pkg not in heavy, f"user_interface.py imports heavy library at top level: {name}"
+
+
+# ── Stage 0 summary state tests ─────────────────────────────────────────────
+
+
+def test_stage0_summary_no_project(tmp_path):
+    """When no project is configured, startup selection returns onboarding_required."""
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "onboarding_required"
+    assert selected.active_project is None
+
+
+def test_stage0_summary_one_detected_project(tmp_path):
+    """When exactly one project exists, it is auto-selected."""
+    _make_project(tmp_path, "only_one")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "auto_selected"
+    assert selected.active_project is not None
+
+
+def test_stage0_summary_multiple_detected_projects(tmp_path):
+    """When multiple projects exist without an active one, picker is required."""
+    _make_project(tmp_path, "proj_a")
+    _make_project(tmp_path, "proj_b")
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": "", "recent_projects": []})
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "picker_required"
+    assert len(selected.candidates) >= 2
+
+
+def test_stage0_summary_ready_project(tmp_path):
+    """A project with metadata and data source is ready (onboarding complete)."""
+    project = _make_project(tmp_path, with_metadata=True)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+    assert pm.onboarding_complete(project) is True
+    selected = pm.select_startup_project(tmp_path, app)
+    assert selected.action == "use_active"
+
+
+def test_stage0_summary_incomplete_project(tmp_path):
+    """A project without metadata is incomplete (onboarding not done)."""
+    project = _make_project(tmp_path, with_metadata=False)
+    app = tmp_path / "app_config.json"
+    _write_json(app, {"active_project": str(project), "recent_projects": []})
+    assert pm.onboarding_complete(project) is False
+
+
+def test_stage0_state_ready_for_stage1(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+
+    source = pm.session_source_status(project)
+
+    assert source["raw_videos"] > 0
+    assert source["pose_csvs"] == 0
+    assert source["h5"] is False
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_ready_for_stage2_csv(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    pose_dir = project / "pose_csvs"
+    pose_dir.mkdir()
+    (pose_dir / "video1.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["pose_files"] = str(pose_dir)
+    _write_json(project / "config.json", cfg)
+
+    source = pm.session_source_status(project)
+
+    assert source["pose_csvs"] > 0
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_ready_for_stage2_h5(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    h5 = project / "pose.h5"
+    h5.write_text("", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["pose_h5"] = str(h5)
+    _write_json(project / "config.json", cfg)
+
+    source = pm.session_source_status(project)
+
+    assert source["h5"] is True
+    assert pm.onboarding_complete(project) is True
+
+
+def test_stage0_state_needs_data(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    source = pm.session_source_status(project)
+
+    assert source["raw_videos"] == 0
+    assert source["pose_csvs"] == 0
+    assert source["h5"] is False
+
+
+def test_stage0_state_needs_metadata(tmp_path):
+    project = _make_project(tmp_path, with_metadata=False)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+
+    source = pm.session_source_status(project)
+    paths = pm.resolve_project_paths_for_project(project)
+
+    assert source["raw_videos"] > 0
+    assert not paths["metadata"].path.exists()
+
+
+def test_stage0_state_needs_column_mapping(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "raw_videos" / "video1.mp4").write_text("", encoding="utf-8")
+    (project / "metadata.csv").write_text("col_a,col_b\nv1,v2\n", encoding="utf-8")
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "not_found"
+
+
+def test_stage0_state_legacy_paths(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (tmp_path / "metadata.csv").write_text("session_id,stem\nvideo1,video1\n", encoding="utf-8")
+    (tmp_path / "results").mkdir()
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["paths"]["metadata"] = str(tmp_path / "metadata.csv")
+    cfg["paths"]["results"] = str(tmp_path / "results")
+    _write_json(project / "config.json", cfg)
+
+    paths = pm.resolve_project_paths_for_project(project, repo_root=tmp_path)
+
+    assert paths["metadata"].origin == "invalid_repo_root_fallback"
+    assert paths["results"].origin == "invalid_repo_root_fallback"
+
+
+def test_column_mapping_status_mapped_explicit(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is True
+    assert status["session_id_column"] == "session_id"
+
+
+def test_column_mapping_status_mapped_alias(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "metadata.csv").write_text("filename,stem\nvideo1.mp4,video1\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["metadata_schema"] = {"column_map": {}}
+    _write_json(project / "config.json", cfg)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is True
+    assert status["session_id_column"] == "filename"
+    assert status["auto_detected"] is True
+
+
+def test_column_mapping_status_unmapped(tmp_path):
+    project = _make_project(tmp_path, with_metadata=True)
+    (project / "metadata.csv").write_text("col_a,col_b\nv1,v2\n", encoding="utf-8")
+    cfg = json.loads((project / "config.json").read_text(encoding="utf-8"))
+    cfg["metadata_schema"] = {"column_map": {"session_id": "missing"}}
+    _write_json(project / "config.json", cfg)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "not_found"
+
+
+def test_column_mapping_status_no_metadata(tmp_path):
+    project = _make_project(tmp_path, with_metadata=False)
+
+    status = pm.column_mapping_status(project)
+
+    assert status["mapped"] is False
+    assert status["reason"] == "no_metadata"
+
+
+def test_column_mapping_status_lightweight():
+    src = Path(__file__).resolve().parents[1] / "project_manager.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def column_mapping_status(")
+    assert fn_start != -1, "column_mapping_status not found"
+    fn_body = text[fn_start:]
+    next_def = fn_body.find("\ndef ", 1)
+    if next_def == -1:
+        next_def = len(fn_body)
+    fn_body = fn_body[:next_def]
+    assert "import pandas" not in fn_body
+    assert "os.walk" not in fn_body
+    assert ".rglob(" not in fn_body
+
+
+def test_stage0_routes_to_column_mapper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    class_body = _class_body(src, "Stage0ReadinessPanel")
+
+    assert "MetadataMapperWidget" in class_body
+
+
+def test_stage0_primary_button_labels_cover_all_states():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _update_primary_button(self, state):")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    for state in (
+        "no_project",
+        "picker_required",
+        "auto_detected",
+        "legacy_paths",
+        "needs_data",
+        "needs_metadata",
+        "needs_column_mapping",
+        "incomplete",
+        "ready_for_stage1",
+        "ready_for_stage2",
+    ):
+        assert state in fn_body
+
+
+def test_stage0_details_hidden_by_default():
+    """The details section container starts hidden in the _build method."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    assert class_start != -1
+    build_start = text.find("def _build(self):", class_start)
+    assert build_start != -1
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert "_details_container" in build_body, "Stage0 _build must create _details_container"
+    assert ".hide()" in build_body, "Stage0 _build must hide the details container"
+
+
+def test_stage0_details_checklist_available():
+    """The details section contains the validation checklist and toggle."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "_checklist" in class_body, "Stage0 must have a _checklist layout"
+    assert "_add_check" in class_body, "Stage0 must have _add_check method"
+    assert "_toggle_details" in class_body, "Stage0 must have _toggle_details method"
+
+
+def test_stage0_routes_to_existing_dialogs():
+    """Stage 0 panel routes to existing dialogs, not duplicated UI."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "NewProjectDialog" in class_body, "Stage0 must use NewProjectDialog"
+    assert "ProjectSelectorDialog" in class_body, "Stage0 must use ProjectSelectorDialog"
+    assert "QLineEdit" not in class_body, "Stage0 must not define its own form fields"
+
+
+def test_stage0_secondary_buttons_hidden_by_default():
+    """Secondary buttons live inside _options_container which starts hidden."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    assert class_start != -1
+    build_start = text.find("def _build(self):", class_start)
+    assert build_start != -1
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert "_options_container" in build_body, "Stage0 _build must create _options_container"
+    assert "_options_container.hide()" in build_body, "Stage0 _build must hide _options_container"
+
+
+def test_stage0_has_more_options_toggle():
+    """Stage0 has a More options toggle and _toggle_options method."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    class_end = text.find("\nclass ", class_start + 1)
+    class_body = text[class_start:class_end] if class_end != -1 else text[class_start:]
+    assert "_options_toggle" in class_body, "Stage0 must have _options_toggle button"
+    assert "_toggle_options" in class_body, "Stage0 must have _toggle_options method"
+
+
+def test_stage0_single_primary_button():
+    """Stage0 _build creates exactly one primary button (stage0Primary)."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class Stage0ReadinessPanel")
+    build_start = text.find("def _build(self):", class_start)
+    next_def = text.find("\n    def ", build_start + 1)
+    build_body = text[build_start:next_def] if next_def != -1 else text[build_start:]
+    assert build_body.count('"stage0Primary"') == 1, "Exactly one primary button"
+
+
+def _class_body(path: Path, class_name: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    class_start = text.find(f"class {class_name}")
+    assert class_start != -1, f"{class_name} not found in {path.name}"
+    class_end = text.find("\nclass ", class_start + 1)
+    return text[class_start:class_end] if class_end != -1 else text[class_start:]
+
+
+def test_global_qss_styles_popup_surfaces():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    qss_start = text.find("_APP_QSS =")
+    assert qss_start != -1
+    qss = text[qss_start:]
+
+    for selector in ("QMenu", "QMenu::item", "QMenu::item:selected", "QFileDialog", "QListView", "QTreeView", "QAbstractItemView"):
+        assert selector in qss
+    assert "background: #FFFFFF" in qss
+    assert "color: #1A1A1A" in qss
+
+
+def test_popup_menus_use_light_menu_helper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "def _style_light_menu(menu: QMenu) -> QMenu:" in text
+    assert text.count("_style_light_menu(QMenu(self))") >= 2
+
+
+def test_stage_rows_use_qt_arrow_buttons_not_text_glyphs():
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("user_interface.py", "_widgets.py"):
+        body = _class_body(root / rel, "StageRow")
+        assert "self._arrow = QToolButton()" in body
+        assert "setArrowType(Qt.RightArrow)" in body
+        assert "setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)" in body
+        assert "def _set_expanded(self, expanded: bool):" in body
+        assert "self._arrow = QLabel" not in body
+        assert "self._arrow.setText" not in body
+        assert "_ARROW_COLLAPSED" not in body
+        assert "_ARROW_EXPANDED" not in body
+
+
+def test_expand_all_uses_stage_row_expansion_helper():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _toggle_expand_all(self):")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    assert "row._set_expanded(not any_expanded)" in fn_body
+    assert "row._arrow.setText" not in fn_body
+
+
+def test_lightweight_loader_reads_overview_summary_not_large_csvs():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_start = text.find("class DataLoader")
+    run_start = text.find("def run(self):", class_start)
+    run_end = text.find("\nclass ", run_start + 1)
+    run_body = text[run_start:run_end] if run_end != -1 else text[run_start:]
+    guard = "if not self._lightweight:"
+    assert 'data["overview_summary"] = _json("shared/overview_summary.json")' in run_body
+    assert "max_bytes = 1_000_000" in run_body
+    assert "path.stat().st_size > max_bytes" in run_body
+    assert guard in run_body
+    guarded_body = run_body[run_body.find(guard):]
+    assert 'data["summary"] = _csv("comparison/summary_table.csv")' in guarded_body
+    assert 'data["labels_per_frame"]' not in run_body
+
+
+def test_reload_button_runs_report_regen():
+    """Reload Data button runs compare.py --report (merged behavior after removing Regenerate Report button)."""
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("def _on_reload_clicked(self) -> None:")
+    assert fn_start != -1
+    fn_body = text[fn_start:text.find("\n    def ", fn_start + 1)]
+
+    assert "_run_report_regen" in fn_body
+
+
+def test_overview_previous_session_alert_removed():
+    src = Path(__file__).resolve().parents[1] / "user_interface.py"
+    text = src.read_text(encoding="utf-8")
+    class_body = _class_body(src, "OverviewView")
+
+    assert "Load Previous Session" not in text
+    assert "load_previous_requested" not in class_body
+    assert "_prev_banner" not in class_body
+    assert "_prev_load_btn" not in class_body
+    assert "Previous analysis results available" not in text
+
+
+def test_report_generation_writes_overview_summary():
+    src = Path(__file__).resolve().parents[1] / "compare.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "def _write_overview_summary(" in text
+    assert '"total_videos"' in text
+    assert '"total_frames"' in text
+    assert '"state_means"' in text
+    assert '_write_overview_summary(' in text[text.find("df.to_csv("):]

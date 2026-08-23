@@ -20,7 +20,13 @@ class SettingsView(QWidget):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 24, 24, 24)
 
         top_row = QHBoxLayout()
@@ -398,12 +404,103 @@ class SettingsView(QWidget):
             "Lower values produce more clusters with softer borders."
         )
 
+        # ── Learning Curves Panel ─────────────────────────────────────────
+        lc_sep = QLabel("Learning Curves Panel")
+        lc_sep.setFont(QFont("Arial", 10, QFont.Bold))
+        lc_sep.setStyleSheet("color:#555; padding-top:10px; padding-bottom:2px;")
+        form.addWidget(lc_sep, r, 0, 1, 2)
+        r += 1
+
+        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
+        if not isinstance(lc_cfg, dict):
+            lc_cfg = {}
+        self._lc_enabled = QCheckBox("Enable configured learning curve panel")
+        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
+        row("Learning curves", self._lc_enabled)
+        self._lc_group_col = QLineEdit(str(lc_cfg.get("group_column", "context") or ""))
+        row("Learning group column", self._lc_group_col)
+        self._lc_baseline = QLineEdit(
+            "" if lc_cfg.get("baseline_group") is None
+            else str(lc_cfg.get("baseline_group"))
+        )
+        row("Learning baseline group", self._lc_baseline)
+        self._lc_comparison = QLineEdit(
+            "" if lc_cfg.get("comparison_group") is None
+            else str(lc_cfg.get("comparison_group"))
+        )
+        row("Learning comparison group", self._lc_comparison)
+        self._lc_order_col = QLineEdit(str(lc_cfg.get("order_column", "day") or ""))
+        row("Learning order column", self._lc_order_col)
+        self._lc_target_state = QLineEdit(str(lc_cfg.get("target_state", "auto") or "auto"))
+        row("Learning target state", self._lc_target_state)
+
         lay.addLayout(form)
 
         save = QPushButton("Save Settings")
         save.clicked.connect(self._save)
         lay.addWidget(save)
         lay.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+    def load_from_cfg(self):
+        """Repopulate widgets from self.cfg (e.g. after switching projects)."""
+        ab = self.cfg.get("arena_bounds", _DEFAULT_CFG["arena_bounds"])
+        self._xmin.setValue(ab["x_min"])
+        self._ymin.setValue(ab["y_min"])
+        self._xmax.setValue(ab["x_max"])
+        self._ymax.setValue(ab["y_max"])
+        self._results.setText(self.cfg.get("results_dir", ""))
+        self._raw.setText(self.cfg.get("raw_videos_dir", ""))
+        self._dlc_python_le.setText(self.cfg.get("dlc_python", ""))
+        self._meta_csv.setText(self.cfg.get("metadata_csv_path", ""))
+        self._cohort_csv.setText(self.cfg.get("cohort_csv_path", ""))
+        self._pose_source.setCurrentText(self.cfg.get("pose_source", "csv"))
+        self._h5_path.setText(self.cfg.get("h5_path", ""))
+        self._h5_manifest.setText(self.cfg.get("h5_manifest_path", ""))
+        existing_h5_key = self.cfg.get("h5_key", "")
+        self._h5_key_combo.clear()
+        if existing_h5_key:
+            self._h5_key_combo.addItem(existing_h5_key)
+        existing_source_col = self.cfg.get("h5_source_col", "")
+        self._h5_source_col_combo.clear()
+        if existing_source_col:
+            self._h5_source_col_combo.addItem(existing_source_col)
+        self._cond_a_le.setText(self.cfg.get("condition_a_label", ""))
+        self._cond_b_le.setText(self.cfg.get("condition_b_label", ""))
+        self._metric_label_le.setText(self.cfg.get("primary_metric_label", ""))
+        self._ctx_groups.setText(str(self.cfg.get("context_groups", "A,B,C")))
+        _ctx_desc_dict = self.cfg.get("context_descriptions", {})
+        self._ctx_desc.setText(
+            ",".join(f"{k}={v}" for k, v in _ctx_desc_dict.items())
+        )
+        self._fps.setValue(int(self.cfg.get("fps", 30)))
+        self._umap_dims.setValue(int(self.cfg.get("umap_dims", 10)))
+        self._hdbscan_min_samples.setValue(
+            int(self.cfg.get("hdbscan_min_samples", 0))
+        )
+        lc_cfg = self.cfg.get("ui_panels", {}).get("learning_curves", {})
+        if not isinstance(lc_cfg, dict):
+            lc_cfg = {}
+        self._lc_enabled.setChecked(bool(lc_cfg.get("enabled", False)))
+        self._lc_group_col.setText(
+            str(lc_cfg.get("group_column", "context") or "")
+        )
+        self._lc_baseline.setText(
+            "" if lc_cfg.get("baseline_group") is None
+            else str(lc_cfg.get("baseline_group"))
+        )
+        self._lc_comparison.setText(
+            "" if lc_cfg.get("comparison_group") is None
+            else str(lc_cfg.get("comparison_group"))
+        )
+        self._lc_order_col.setText(
+            str(lc_cfg.get("order_column", "day") or "")
+        )
+        self._lc_target_state.setText(
+            str(lc_cfg.get("target_state", "auto") or "auto")
+        )
 
     def _browse(self, le):
         d = QFileDialog.getExistingDirectory(self, "Select Directory", le.text())
@@ -599,8 +696,35 @@ class SettingsView(QWidget):
         }
         self.cfg["results_dir"] = self._results.text()
         self.cfg["raw_videos_dir"] = self._raw.text()
+        paths = self.cfg.setdefault("paths", {})
+        paths["results"]    = self._results.text()
+        paths["raw_videos"] = self._raw.text()
         self.cfg["dlc_python"] = self._dlc_python_le.text().strip()
         self.cfg["metadata_csv_path"] = self._meta_csv.text().strip()
+        paths["metadata"] = self._meta_csv.text().strip()
+        # Keep external_paths in sync with the three directory fields. A path
+        # outside the project folder must be whitelisted or the resolver rejects
+        # it and the change silently reverts (mirrors import_data_source in
+        # project_manager). Also writing paths["metadata"] above stops the
+        # authoritative nested key from overwriting the flat one on normalize.
+        proj_str = self.cfg.get("project_path", "")
+        if proj_str:
+            proj = Path(proj_str).resolve()
+            ext = set(self.cfg.get("external_paths", []))
+            for _key, _value in (("results", paths["results"]),
+                                 ("raw_videos", paths["raw_videos"]),
+                                 ("metadata", paths["metadata"])):
+                inside = False
+                if _value:
+                    try:
+                        inside = Path(_value).resolve().is_relative_to(proj)
+                    except ValueError:
+                        inside = False
+                if _value and not inside:
+                    ext.add(_key)
+                else:
+                    ext.discard(_key)
+            self.cfg["external_paths"] = sorted(ext)
         self.cfg["cohort_csv_path"] = self._cohort_csv.text().strip()
         self.cfg["pose_source"] = self._pose_source.currentText()
         self.cfg["h5_path"] = self._h5_path.text().strip()
@@ -625,6 +749,16 @@ class SettingsView(QWidget):
         self.cfg["fps"] = self._fps.value()
         self.cfg["umap_dims"] = self._umap_dims.value()
         self.cfg["hdbscan_min_samples"] = self._hdbscan_min_samples.value()
+        ui_panels = self.cfg.setdefault("ui_panels", {})
+        ui_panels["learning_curves"] = {
+            "enabled": self._lc_enabled.isChecked(),
+            "group_column": self._lc_group_col.text().strip() or "context",
+            "baseline_group": self._lc_baseline.text().strip() or None,
+            "comparison_group": self._lc_comparison.text().strip() or None,
+            "order_column": self._lc_order_col.text().strip() or "day",
+            "subject_column": "animal_id",
+            "target_state": self._lc_target_state.text().strip() or "auto",
+        }
         _save_cfg(self.cfg)
         self.settings_changed.emit(self.cfg)
         QMessageBox.information(self, "Settings", "Saved.")

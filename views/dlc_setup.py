@@ -29,6 +29,7 @@ _ROLE_OPTIONS = [
 from _utils import ROOT, _save_cfg, _register_project, _find_dlc_project
 from _workers import SubprocessWorker
 from _dialogs import _CreateProjectDialog
+from dlc_project_utils import has_trained_dlc_model, normalize_dlc_project_path
 
 try:
     from vieb_config import get_dlc_project_path
@@ -109,6 +110,21 @@ def _translate_log(raw: str) -> str | None:
         if pattern in stripped:
             return msg  # None means pass raw through
     return None  # default: pass raw through
+
+
+def _gpu_state_from_log(raw: str) -> str | None:
+    """Return GPU badge state implied by a DLC log line."""
+    text = raw.lower()
+    if "no gpu detected" in text or "using cpu" in text or "torch not installed" in text:
+        return "inactive"
+    if "gpu detected" in text or "using cuda device" in text:
+        return "active"
+    return None
+
+
+def _should_stick_to_bottom(value: int, maximum: int, tolerance: int = 8) -> bool:
+    """True when new log output should keep the terminal pinned to the bottom."""
+    return maximum - value <= tolerance
 
 
 _DLC_NOT_INSTALLED_MSG = (
@@ -296,6 +312,8 @@ class DLCSetupView(QWidget):
 
     navigate_pipeline = pyqtSignal()
     navigate_settings = pyqtSignal()
+    worker_running = pyqtSignal(bool)
+    worker_command = pyqtSignal(str)
 
     _MODES = [
         ("scratch", "🆕", "Starting from scratch",
@@ -318,6 +336,9 @@ class DLCSetupView(QWidget):
         self._keypoint_combos: dict[str, QComboBox] = {}
         self._keypoint_object_checks: dict[str, QCheckBox] = {}
         self._pretrained_selection = ""
+        self._running_command = ""
+        self._base_running_command = ""
+        self._gpu_state = "unknown"
 
         try:
             self._project_path = get_dlc_project_path() or ""
@@ -359,6 +380,27 @@ class DLCSetupView(QWidget):
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:#555;")
         outer.addWidget(subtitle)
+
+        # ── GPU status badge ─────────────────────────────────────────────────
+        self._gpu_badge = QFrame()
+        self._gpu_badge.setObjectName("gpuBadge")
+        gpu_lay = QHBoxLayout(self._gpu_badge)
+        gpu_lay.setContentsMargins(10, 6, 10, 6)
+        gpu_lay.setSpacing(8)
+        self._gpu_icon = QLabel("●")
+        self._gpu_icon.setStyleSheet("background:transparent;border:none;font-size:13px;")
+        self._gpu_label = QLabel("GPU Unknown")
+        self._gpu_label.setStyleSheet(
+            "background:transparent;border:none;font-weight:bold;font-size:11px;"
+        )
+        self._gpu_detail = QLabel("Run a DLC command to detect the active hardware.")
+        self._gpu_detail.setStyleSheet("background:transparent;border:none;color:#666;font-size:11px;")
+        self._gpu_detail.setWordWrap(True)
+        gpu_lay.addWidget(self._gpu_icon)
+        gpu_lay.addWidget(self._gpu_label)
+        gpu_lay.addWidget(self._gpu_detail, stretch=1)
+        outer.addWidget(self._gpu_badge)
+        self._set_gpu_state("unknown")
 
         # ── Status banner ─────────────────────────────────────────────────────
         self._banner_frame = QFrame()
@@ -465,6 +507,45 @@ class DLCSetupView(QWidget):
     def _copy_log(self):
         from PyQt5.QtWidgets import QApplication
         QApplication.clipboard().setText(self._log.toPlainText())
+
+    def _set_gpu_state(self, state: str, detail: str | None = None):
+        self._gpu_state = state
+        styles = {
+            "active": {
+                "text": "GPU Active",
+                "detail": "DeepLabCut is using CUDA for this command.",
+                "bg": "#e8f5e9",
+                "border": "#a5d6a7",
+                "color": "#2e7d32",
+            },
+            "inactive": {
+                "text": "GPU Inactive",
+                "detail": "DeepLabCut is running on CPU for this command.",
+                "bg": "#fff8e1",
+                "border": "#ffe082",
+                "color": "#e65100",
+            },
+            "unknown": {
+                "text": "GPU Unknown",
+                "detail": "Run a DLC command to detect the active hardware.",
+                "bg": "#f5f5f5",
+                "border": "#d9d9d9",
+                "color": "#777",
+            },
+        }
+        spec = styles.get(state, styles["unknown"])
+        self._gpu_badge.setStyleSheet(
+            f"QFrame#gpuBadge{{background:{spec['bg']};border:1px solid {spec['border']};"
+            "border-radius:6px;}}"
+        )
+        self._gpu_icon.setStyleSheet(
+            f"background:transparent;border:none;font-size:13px;color:{spec['color']};"
+        )
+        self._gpu_label.setText(spec["text"])
+        self._gpu_label.setStyleSheet(
+            f"background:transparent;border:none;font-weight:bold;font-size:11px;color:{spec['color']};"
+        )
+        self._gpu_detail.setText(detail or spec["detail"])
 
     # ── Status banner / overall detection ────────────────────────────────────
 
@@ -1251,6 +1332,8 @@ class DLCSetupView(QWidget):
     # ── Project management ────────────────────────────────────────────────────
 
     def _set_project_path(self, path: str):
+        project_path = normalize_dlc_project_path(path)
+        path = str(project_path) if project_path else path
         self._project_path = path
         try:
             import vieb_config
@@ -1322,14 +1405,25 @@ class DLCSetupView(QWidget):
             self._log_human("⚠ A task is already running. Wait for it to finish.")
             return
         self._dlc_error_shown = False
+        self._set_gpu_state("unknown")
         self._set_buttons_enabled(False)
         dlc_python = self.cfg.get("dlc_python") or str(ROOT / "venv-dlc" / "bin" / "python")
         if not os.path.exists(dlc_python):
             dlc_python = sys.executable
+        display_python = Path(dlc_python).name or "python"
+        self._base_running_command = " ".join([display_python, *args])
+        self._running_command = self._base_running_command
         self._worker = SubprocessWorker(args, python_exe=dlc_python)
         self._worker.log.connect(self._on_raw_log)
         self._worker.done.connect(self._on_worker_done)
+        self.worker_command.emit(self._running_command)
+        self.worker_running.emit(True)
         self._worker.start()
+
+    def stop_worker(self):
+        if self._worker and self._worker.isRunning():
+            self._log_human("Stopping DLC command…")
+            self._worker.stop()
 
     def _extract_frames(self):
         if not self._validate_project():
@@ -1365,13 +1459,15 @@ class DLCSetupView(QWidget):
         """Return True if a trained DLC model snapshot exists."""
         if not self._project_path:
             return False
-        snapshots = list(Path(self._project_path).glob("dlc-models/**/train/snapshot-*.index"))
-        if not snapshots:
+        if not has_trained_dlc_model(self._project_path):
             if warn:
                 QMessageBox.information(
                     self,
                     "No Trained Model Found",
-                    "No trained model found yet. Complete the \"Train the model\" step first.",
+                    "No trained model snapshot found under dlc-models/ or "
+                    "dlc-models-pytorch/. If you imported an existing model, "
+                    "make sure its config.yaml is in the same project folder as "
+                    "the trained snapshot files.",
                 )
             return False
         return True
@@ -1384,6 +1480,9 @@ class DLCSetupView(QWidget):
         else:
             self._check_dlc_error("")
             self._log_human("✕ Task failed — check the log above for details.")
+        self.worker_running.emit(False)
+        self._running_command = ""
+        self._base_running_command = ""
         self._rebuild_steps()
 
     def _check_dlc_error(self, text: str) -> bool:
@@ -1394,11 +1493,13 @@ class DLCSetupView(QWidget):
                 "ModuleNotFoundError: No module named torch" in text:
             if not self._dlc_error_shown:
                 self._dlc_error_shown = True
+                sb = self._log.verticalScrollBar()
+                stick = _should_stick_to_bottom(sb.value(), sb.maximum())
                 self._log.append(
                     f"<pre style='color:#ffb300;'>{_DLC_NOT_INSTALLED_MSG}</pre>"
                 )
-                sb = self._log.verticalScrollBar()
-                sb.setValue(sb.maximum())
+                if stick:
+                    sb.setValue(sb.maximum())
                 QMessageBox.warning(self, "DeepLabCut Not Installed", _DLC_NOT_INSTALLED_MSG)
             return True
         return False
@@ -1409,20 +1510,29 @@ class DLCSetupView(QWidget):
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
+    def _append_log_text(self, text: str):
+        sb = self._log.verticalScrollBar()
+        stick = _should_stick_to_bottom(sb.value(), sb.maximum())
+        self._log.insertPlainText(text)
+        if stick:
+            sb.setValue(sb.maximum())
+
     def _on_raw_log(self, text: str):
+        gpu_state = _gpu_state_from_log(text)
+        if gpu_state:
+            self._set_gpu_state(gpu_state, text.strip())
+
         human = _translate_log(text)
         if human is not None:
-            self._log.insertPlainText(human + "\n")
+            self._append_log_text(human + "\n")
+            if gpu_state and text.strip() and text.strip() != human:
+                self._append_log_text(text)
         else:
-            self._log.insertPlainText(text)
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+            self._append_log_text(text)
         self._check_dlc_error(text)
 
     def _log_human(self, msg: str):
-        self._log.insertPlainText(msg + "\n")
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._append_log_text(msg + "\n")
 
     # ── Labeling guide ───────────────────────────────────────────────────────
 

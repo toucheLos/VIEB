@@ -1,5 +1,5 @@
 """
-VIEB — Video Interpreter for Experimental Behavior
+VIEB — Video Interpreter Excluding Bias
 ====================================================
 Behavioral analysis pipeline: pose data → feature extraction → clustering → anomaly detection.
 
